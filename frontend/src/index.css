@@ -1,0 +1,76 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* UI consistency: every clickable/keyboard-focusable element fades color/bg/border
+   on hover/focus instead of snapping. Matches tooltip 150ms timing. */
+button, a, input, select, textarea, [role="button"] {
+  transition-property: color, background-color, border-color, opacity;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  button, a, input, select, textarea, [role="button"] { transition: none; }
+}
+
+.chat-scroll::-webkit-scrollbar { width: 6px; }
+.chat-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+
+/* ---------- Dark mode (toggled by .dark on <html>) ---------- */
+.dark { color-scheme: dark; }
+.dark body { background-color: #0f172a; color: #e2e8f0; }
+
+.dark .bg-white { background-color: #1e293b !important; }
+.dark .bg-slate-50 { background-color: #0f172a !important; }
+.dark .bg-slate-100 { background-color: #0f172a !important; }
+.dark .bg-slate-200 { background-color: #334155 !important; }
+.dark .bg-brand-50 { background-color: rgba(37, 99, 235, 0.22) !important; }
+.dark .bg-amber-50\/60 { background-color: rgba(217, 119, 6, 0.14) !important; }
+.dark .bg-amber-50 { background-color: rgba(217, 119, 6, 0.14) !important; }
+.dark .bg-amber-100 { background-color: rgba(217, 119, 6, 0.25) !important; }
+.dark .bg-blue-100 { background-color: rgba(59, 130, 246, 0.25) !important; }
+.dark .bg-emerald-100 { background-color: rgba(16, 185, 129, 0.22) !important; }
+.dark .bg-orange-100 { background-color: rgba(249, 115, 22, 0.25) !important; }
+.dark .bg-red-50 { background-color: rgba(220, 38, 38, 0.14) !important; }
+.dark .bg-violet-100 { background-color: rgba(139, 92, 246, 0.25) !important; }
+.dark .bg-gray-300 { background-color: #475569 !important; }
+
+.dark .hover\:bg-slate-50:hover { background-color: #1e293b !important; }
+.dark .hover\:bg-slate-100:hover { background-color: #334155 !important; }
+.dark .hover\:bg-brand-50:hover { background-color: rgba(37, 99, 235, 0.3) !important; }
+.dark .hover\:bg-red-50:hover { background-color: rgba(220, 38, 38, 0.2) !important; }
+.dark .hover\:bg-violet-200:hover { background-color: rgba(139, 92, 246, 0.4) !important; }
+
+.dark .text-slate-900, .dark .text-slate-800 { color: #f1f5f9 !important; }
+.dark .text-slate-700, .dark .text-slate-600 { color: #cbd5e1 !important; }
+.dark .text-slate-500, .dark .text-slate-400 { color: #94a3b8 !important; }
+.dark .text-brand-600 { color: #93c5fd !important; }
+.dark .text-brand-700 { color: #bfdbfe !important; }
+.dark .text-red-600 { color: #fca5a5 !important; }
+.dark .text-amber-800, .dark .text-amber-700 { color: #fcd34d !important; }
+.dark .text-emerald-600, .dark .text-emerald-800 { color: #6ee7b7 !important; }
+.dark .text-blue-800 { color: #93c5fd !important; }
+.dark .text-orange-800 { color: #fdba74 !important; }
+.dark .text-violet-800 { color: #c4b5fd !important; }
+
+.dark .border, .dark .border-b, .dark .border-t, .dark .border-l, .dark .border-r,
+.dark .border-red-200, .dark .border-amber-200, .dark .border-slate-700 { border-color: #334155 !important; }
+.dark .divide-y > :not([hidden]) ~ :not([hidden]) { border-color: #334155 !important; }
+
+.dark input, .dark textarea, .dark select { background-color: #0f172a !important; color: #e2e8f0 !important; border-color: #475569 !important; }
+.dark input::placeholder, .dark textarea::placeholder { color: #64748b !important; }
+.dark input[type="checkbox"] { accent-color: #2563eb; }
+
+.dark .chat-scroll::-webkit-scrollbar-thumb { background: #475569; }
+
+/* ---------- Chat background (Settings → upload; low opacity for readability) ---------- */
+.chat-bg { position: relative; }
+.chat-bg::before {
+  content: ''; position: absolute; inset: 0; z-index: 0;
+  background-image: var(--chat-bg, none);
+  background-repeat: var(--chat-bg-repeat, no-repeat);
+  background-size: var(--chat-bg-size, cover);
+  background-position: center;
+  opacity: 0.12; pointer-events: none;
+}
+.chat-bg > * { position: relative; z-index: 1; }
