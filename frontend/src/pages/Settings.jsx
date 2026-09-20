@@ -1,10 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, fmtPhone, TIMEZONES } from '../api/client';
-import { toastError, toastSuccess } from '../lib/toast';
+import { toastError, toastSuccess, toastInfo } from '../lib/toast';
+import { InstallSection } from '../components/PwaInstall';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
 import { useTheme, fileToBgDataUrl } from '../context/ThemeContext';
 import { ensureDesktopPermission, desktopPermission, desktopNotify, playSound } from '../lib/notify';
+import { quietFromSettings, QUIET_DEFAULTS, fmtHhMm } from '../lib/quietHours';
+import { ChangePasswordForm } from '../components/ChangePasswordModal';
+import { fmtExpiry } from '../lib/passwordPolicy';
+
+const HALF_HOURS = [];
+for (let h = 0; h < 24; h += 1) for (const m of ['00', '30']) HALF_HOURS.push(`${String(h).padStart(2, '0')}:${m}`);
 
 const AGENT_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16'];
 
@@ -16,6 +23,7 @@ export default function Settings() {
   const [numbers, setNumbers] = useState([]);
   const [companyName, setCompanyName] = useState([]);
   const [cooldown, setCooldown] = useState(5);
+  const [quiet, setQuiet] = useState(QUIET_DEFAULTS);
   const [perm, setPerm] = useState(desktopPermission());
   const [pushState, setPushState] = useState('checking'); // checking|unsupported|unconfigured|off|on|busy
   const [pushMsg, setPushMsg] = useState('');
@@ -75,38 +83,36 @@ export default function Settings() {
   };
 
   const [agentColor, setAgentColor] = useState(user?.color || AGENT_COLORS[0]);
-  const [curPw, setCurPw] = useState('');
-  const [pw1, setPw1] = useState('');
-  const [pw2, setPw2] = useState('');
-  const [pwBusy, setPwBusy] = useState(false);
   useEffect(() => { if (user?.color) setAgentColor(user.color); }, [user?.color]);
   const saveAgentColor = async (c) => {
     setAgentColor(c);
     try {
-      const u = await api.updateAgentProfile({ color: c });
-      setUser({ ...user, ...u, role: 'agent' });
+      const u = await api.updateAgentProfile({ tag_color: c });
+      setUser({ ...user, color: c });
       toastSuccess('Color updated');
     } catch (e) { toastError(e?.response?.data?.message || e.message); }
   };
-  const saveAgentPassword = async () => {
-    if (!curPw) return toastError('Enter your current password.');
-    if (pw1.length < 8) return toastError('New password needs at least 8 characters.');
-    if (pw1 !== pw2) return toastError('Passwords do not match.');
-    setPwBusy(true);
+  const replayTour = async () => {
     try {
-      await api.changeAgentPassword(curPw, pw1);
-      setCurPw(''); setPw1(''); setPw2('');
-      toastSuccess('Password changed');
+      const { onboarding } = await api.updateOnboarding({ welcomed: false, tour_seen: false, dismissed: false });
+      if (onboarding) { setUser({ ...user, onboarding }); toastSuccess('Welcome tour will replay on Messages.'); }
     } catch (e) { toastError(e?.response?.data?.message || e.message); }
-    finally { setPwBusy(false); }
   };
   useEffect(() => { api.smsNumbers().then(setNumbers).catch(() => {}); }, []);
-  const reloadCompany = () => api.companySettings().then((d) => { setCompanyName(d?.company_name || ''); setCooldown(d?.auto_reply_cooldown_minutes ?? 5); }).catch(() => {});
+  const reloadCompany = () => api.companySettings().then((d) => { setCompanyName(d?.company_name || ''); setCooldown(d?.auto_reply_cooldown_minutes ?? 5); setQuiet(quietFromSettings(d)); }).catch(() => {});
   useEffect(() => { reloadCompany(); }, []);
   useEffect(() => { if (lastSync?.resource === 'company-settings') reloadCompany(); }, [lastSync]);
 
 
   const cooldownNum = () => Math.max(0, Math.min(1440, parseInt(cooldown, 10) || 0));
+  const saveQuiet = async () => {
+    try {
+      const d = await api.saveQuietHours({ enabled: !!quiet.enabled, start: quiet.start, end: quiet.end });
+      setQuiet(quietFromSettings(d));
+      toastSuccess('Quiet hours saved');
+    } catch (e) { toastError('Save failed: ' + (e?.response?.data?.message || e.message)); }
+  };
+
   const saveCompanyName = async () => {
     try { await api.saveCompanySettings(companyName.trim(), cooldownNum()); toastSuccess('Company name saved'); }
     catch (e) { toastError(e?.response?.data?.message || e.message); }
@@ -250,6 +256,34 @@ export default function Settings() {
               className="mt-1 w-32 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
             <p className="text-[11px] text-slate-400 mt-1">At most one auto-reply per sender each window (default 5). First STOP/START confirmations always send. 0 = off.</p>
           </div>
+          <div className="mt-4 border-t pt-3">
+            <label className="flex items-start gap-2 text-xs text-slate-600 cursor-pointer">
+              <input type="checkbox" checked={quiet.enabled} onChange={(e) => setQuiet((q) => ({ ...q, enabled: e.target.checked }))} className="w-4 h-4 mt-0.5 accent-brand-600" />
+              <span>
+                <span className="font-medium text-slate-700">Quiet hours</span>
+                <span className="block text-[11px] text-slate-400">Warn before sending between {fmtHhMm(quiet.start)} and {fmtHhMm(quiet.end)} (TCPA: no texts before 8:00 AM or after 9:00 PM). Sends are never blocked — you can always continue.</span>
+              </span>
+            </label>
+            {quiet.enabled && (
+              <div className="flex items-end gap-2 mt-2">
+                <div>
+                  <label className="text-[11px] text-slate-500">Quiet from</label>
+                  <select value={quiet.start} onChange={(e) => setQuiet((q) => ({ ...q, start: e.target.value }))}
+                    className="mt-1 border rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+                    {HALF_HOURS.map((t) => <option key={t} value={t}>{fmtHhMm(t)}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] text-slate-500">Quiet until</label>
+                  <select value={quiet.end} onChange={(e) => setQuiet((q) => ({ ...q, end: e.target.value }))}
+                    className="mt-1 border rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+                    {HALF_HOURS.map((t) => <option key={t} value={t}>{fmtHhMm(t)}</option>)}
+                  </select>
+                </div>
+                <button onClick={saveQuiet} className="text-sm bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-lg px-4 py-1.5">Save</button>
+              </div>
+            )}
+          </div>
         </section>
         )}
         {!isAgent && (
@@ -293,6 +327,7 @@ export default function Settings() {
           </div>
           <p className="text-[11px] text-slate-400 mt-2">An in-app notification window always pops up on new SMS. Sound needs one click anywhere first (browser rule). If desktop permission shows "denied", allow it via the 🔒 icon in the address bar → Site settings.</p>
         </section>
+        <InstallSection />
         {isAgent && (
           <section className="bg-white rounded-xl border p-5">
             <h3 className="font-semibold text-sm mb-2">My tag color</h3>
@@ -302,27 +337,96 @@ export default function Settings() {
                   className={`w-8 h-8 rounded-full border-2 ${agentColor === c ? 'border-slate-800 scale-110' : 'border-transparent'}`}
                   style={{ backgroundColor: c }} />
               ))}
+              <input type="color" value={agentColor} title="Custom color"
+                onChange={(e) => setAgentColor(e.target.value)} onBlur={() => saveAgentColor(agentColor)}
+                className="w-8 h-8 rounded cursor-pointer shrink-0" />
               <span className="text-xs text-slate-500">{agentColor}</span>
             </div>
           </section>
         )}
-        {isAgent && (
+        {(isAgent || user?.password_expires_at) && (
+        <section className="bg-white rounded-xl border p-5">
+          <h3 className="font-semibold text-sm mb-1">Change password</h3>
+          <p className="text-xs text-slate-400 mb-3">
+            {user?.password_expires_at
+              ? <>Current password expires {fmtExpiry(user.password_expires_at)}.</>
+              : 'Also available from the avatar menu, top-right.'}
+          </p>
+          <div className="max-w-xs">
+            <ChangePasswordForm />
+          </div>
+        </section>
+        )}
+        {!isAgent && <PasswordExpiryCard />}
+        {user?.onboarding && (
           <section className="bg-white rounded-xl border p-5">
-            <h3 className="font-semibold text-sm mb-2">Change password</h3>
-            <div className="space-y-2 max-w-xs">
-              <div><label className="text-xs font-medium text-slate-600">Current password</label>
-                <input type="password" value={curPw} onChange={(e) => setCurPw(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mt-1" /></div>
-              <div><label className="text-xs font-medium text-slate-600">New password (min 8)</label>
-                <input type="password" value={pw1} onChange={(e) => setPw1(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mt-1" /></div>
-              <div><label className="text-xs font-medium text-slate-600">Confirm new password</label>
-                <input type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mt-1" /></div>
-            </div>
-            <button onClick={saveAgentPassword} disabled={pwBusy} className="mt-3 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg px-4 py-2">
-              {pwBusy ? 'Saving…' : 'Change password'}
-            </button>
+            <h3 className="font-semibold text-sm mb-1">Welcome tour</h3>
+            <p className="text-xs text-slate-500 mb-3">Replay the first-run welcome and guided highlights on Messages.</p>
+            <button onClick={replayTour} className="text-xs border rounded-lg px-3 py-1.5 hover:bg-slate-50">↻ Replay welcome tour</button>
           </section>
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Admin-only: the tenant's password expiry window.
+ *
+ * Editing this never rewinds a cycle already in flight — the server applies
+ * the new number of days the next time a password is set, and each user row
+ * keeps the count that was active when its own expiry was calculated.
+ */
+function PasswordExpiryCard() {
+  const [days, setDays] = useState('');
+  const [cfg, setCfg] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.passwordExpirySettings()
+      .then((d) => { setDays(String(d?.days ?? 30)); setCfg(d || null); })
+      .catch(() => {});
+  }, []);
+
+  const min = cfg?.min ?? 1;
+  const max = cfg?.max ?? 365;
+
+  const save = async () => {
+    const n = Number(days);
+    if (!Number.isInteger(n) || n < min || n > max) {
+      return toastError(`Enter a whole number of days between ${min} and ${max}.`);
+    }
+    setBusy(true);
+    try {
+      const r = await api.savePasswordExpiryDays(n);
+      setCfg((c) => ({ ...(c || {}), days: n }));
+      toastSuccess('Password expiry saved');
+      if (r?.note) toastInfo(r.note);
+    } catch (e) {
+      toastError(e?.response?.data?.message || e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="bg-white rounded-xl border p-5">
+      <h3 className="font-semibold text-sm mb-1">Password expiry</h3>
+      <p className="text-xs text-slate-500 mb-3">How long a password stays valid before it must be changed.</p>
+      <div className="flex items-center gap-2">
+        <input type="number" min={min} max={max} value={days}
+          onChange={(e) => setDays(e.target.value)}
+          className="w-24 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
+        <span className="text-sm text-slate-600">days</span>
+        <button onClick={save} disabled={busy}
+          className="ml-auto bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg px-4 py-2">
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+      <p className="text-[11px] text-slate-400 mt-2">
+        Between {min} and {max} days. {cfg?.note
+          || 'This will apply the next time a user changes their password. It won’t affect passwords already in progress.'}
+      </p>
+    </section>
   );
 }

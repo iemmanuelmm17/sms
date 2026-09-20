@@ -3,7 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Events\DataChanged;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use App\Models\Contact;
+use App\Services\ContactSyncService;
 use App\Services\DynalinkService;
 use App\Http\Controllers\Concerns\ResolvesActor;
 use Illuminate\Http\Request;
@@ -11,7 +14,7 @@ use Illuminate\Http\Request;
 class ContactController extends Controller
 {
     use ResolvesActor;
-    public function __construct(protected DynalinkService $dynalink) {}
+    public function __construct(protected DynalinkService $dynalink, protected ContactSyncService $sync) {}
 
     protected function sess(Request $r): array
     {
@@ -35,18 +38,91 @@ class ContactController extends Controller
         }
     }
 
-    /** GET /api/contacts — always a JSON list (never an error object). */
+    /**
+     * GET /api/contacts — reads the LOCAL table (always a JSON list).
+     * The provider is only touched when the local table is still empty:
+     * one backfill, then never again until someone presses Resync or the
+     * nightly job runs. That keeps every page load local and fast.
+     */
     public function index(Request $request)
     {
         $s = $this->sess($request);
-        $list = $this->dynalink->contacts($this->dtoken(request()), $s['domain'], $s['user']);
-        // Dynalink failures arrive as {code,message} objects — never leak a
-        // non-list to the UI (it iterates this response directly).
-        if (!is_array($list) || (!empty($list) && (!isset($list[0]) || !is_array($list[0])))) {
-            Log::warning('Contacts: non-list payload from Dynalink', ['type' => gettype($list), 'keys' => is_array($list) ? array_keys($list) : null]);
-            return response()->json([]);
+        $rows = $this->sync->localList($s['domain'], $s['user']);
+        if ($rows->isEmpty() && $this->maybeBackfill($s)) {
+            $rows = $this->sync->localList($s['domain'], $s['user']);
         }
-        return response()->json($list);
+        return response()->json($rows->map(fn($c) => $c->toProviderArray())->values());
+    }
+
+    /**
+     * First-read backfill: pull the address book once so a fresh install never
+     * shows an empty list. Guarded by a 12h cache flag so a tenant with
+     * genuinely zero contacts doesn't re-hit the provider on every load.
+     * Returns true when a sync actually ran.
+     */
+    protected function maybeBackfill(array $s): bool
+    {
+        $key  = "contacts:backfill:{$s['domain']}:{$s['user']}";
+        if (Cache::has($key)) return false;
+        $lock = Cache::lock($key . ':lock', 60);
+        try {
+            $lock->get();
+            $this->sync->sync($this->dtoken(request()), $s['domain'], $s['user']);
+            Log::info('Contacts: initial backfill from provider', ['domain' => $s['domain'], 'user' => $s['user']]);
+        } catch (\Throwable $e) {
+            Log::warning('Contacts: backfill failed — ' . $e->getMessage());
+        } finally {
+            Cache::put($key, now()->toISOString(), now()->addHours(12));
+            try { $lock->release(); } catch (\Throwable $e) {}
+        }
+        return true;
+    }
+
+    /** POST /api/contacts/resync — two-way sync with the portal (admin only). */
+    public function resync(Request $request)
+    {
+        $s = $this->sess($request);
+        $this->requireAdmin($request);
+        $res = $this->sync->sync($this->dtoken(request()), $s['domain'], $s['user']);
+        $res['last_synced_at'] = $this->lastSyncedAt($s['domain'], $s['user']);
+        if ($res['created'] || $res['updated'] || $res['removed'] || $res['pushed']) {
+            DataChanged::send($s['domain'], $s['user'], 'contacts', 'saved');
+        }
+        return response()->json($res);
+    }
+
+    /** GET /api/contacts/sync-status — local count + last sync time. */
+    public function status(Request $request)
+    {
+        $s = $this->sess($request);
+        $q = Contact::where('domain', $s['domain'])->where('user', $s['user']);
+        return response()->json([
+            'count'          => (int) (clone $q)->count(),
+            'last_synced_at' => $this->lastSyncedAt($s['domain'], $s['user']),
+        ]);
+    }
+
+    protected function lastSyncedAt(string $domain, string $user): ?string
+    {
+        $max = Contact::where('domain', $domain)->where('user', $user)->max('synced_at');
+        if (!$max) return null;
+        try { return \Illuminate\Support\Carbon::parse($max)->toISOString(); } catch (\Throwable $e) { return (string) $max; }
+    }
+
+    /**
+     * Dynalink create/update replies are inconsistent: an array (sometimes
+     * wrapped in a list), or a bare id string. → [row, providerId].
+     */
+    protected function providerRow(mixed $body): array
+    {
+        if (is_string($body)) {
+            $t = trim($body);
+            return [[], $t !== '' && strlen($t) <= 120 && preg_match('/^[A-Za-z0-9._@-]+$/', $t) ? $t : ''];
+        }
+        if (!is_array($body)) return [[], ''];
+        $row = isset($body[0]) && is_array($body[0]) ? $body[0] : $body;
+        if (!is_array($row)) return [[], ''];
+        return [$row, ContactSyncService::providerIdOf($row)];
     }
 
     /** POST /api/contacts — First name + Last name + Cellphone are required. */
@@ -66,7 +142,11 @@ class ContactController extends Controller
         ]);
         $this->assertValidPhones($data);
         [$status, $body] = $this->dynalink->createContact($this->dtoken(request()), $s['domain'], $s['user'], $data);
-        if ($status >= 200 && $status < 300) DataChanged::send($s['domain'], $s['user'], 'contacts', 'saved');
+        if ($status >= 200 && $status < 300) {
+            [$row, $pid] = $this->providerRow($body);
+            $this->sync->upsertFromWrite($s['domain'], $s['user'], array_merge($data, $row), $pid);
+            DataChanged::send($s['domain'], $s['user'], 'contacts', 'saved');
+        }
         return response()->json($body, $status);
     }
 
@@ -87,7 +167,11 @@ class ContactController extends Controller
         ]);
         $this->assertValidPhones($data);
         [$status, $body] = $this->dynalink->updateContact($this->dtoken(request()), $s['domain'], $s['user'], $id, $data);
-        if ($status >= 200 && $status < 300) DataChanged::send($s['domain'], $s['user'], 'contacts', 'saved', $id);
+        if ($status >= 200 && $status < 300) {
+            [$row] = $this->providerRow($body);
+            $this->sync->upsertFromWrite($s['domain'], $s['user'], array_merge($data, $row), $id);
+            DataChanged::send($s['domain'], $s['user'], 'contacts', 'saved', $id);
+        }
         return response()->json($body, $status);
     }
 
@@ -97,7 +181,10 @@ class ContactController extends Controller
         $s = $this->sess($request);
         $this->requireAdmin($s);
         [$status, $body] = $this->dynalink->deleteContact($this->dtoken(request()), $s['domain'], $s['user'], $id);
-        if ($status >= 200 && $status < 300) DataChanged::send($s['domain'], $s['user'], 'contacts', 'deleted', $id);
+        if ($status >= 200 && $status < 300) {
+            $this->sync->forget($s['domain'], $s['user'], $id);
+            DataChanged::send($s['domain'], $s['user'], 'contacts', 'deleted', $id);
+        }
         return response()->json($body, $status);
     }
 
@@ -184,8 +271,13 @@ class ContactController extends Controller
             ], fn($v) => $v !== '');
 
             [$status, $body] = $this->dynalink->createContact($this->dtoken(request()), $s['domain'], $s['user'], $payload);
-            if ($status >= 200 && $status < 300) $created++;
-            else $errors[] = ['row' => $line, 'error' => is_string($body) ? $body : json_encode($body)];
+            if ($status >= 200 && $status < 300) {
+                [$row, $pid] = $this->providerRow($body);
+                $this->sync->upsertFromWrite($s['domain'], $s['user'], array_merge($payload, $row), $pid);
+                $created++;
+            } else {
+                $errors[] = ['row' => $line, 'error' => is_string($body) ? $body : json_encode($body)];
+            }
         }
 
         if ($created > 0) DataChanged::send($s['domain'], $s['user'], 'contacts', 'saved');

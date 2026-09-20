@@ -54,6 +54,10 @@ const LABELS = {
   'conversation.assigned': '👤 Conversation assigned',
   'admin.ip-unblocked': '🔓 Admin unlocked IP',
   'admin.user-unblocked': '🔓 Admin unlocked username',
+  'password.changed': '🔑 Password changed',
+  'tenant.login.password-expired': '⛔ Password expired at login',
+  'agent.login.password-expired': '⛔ Password expired at login',
+  'tenant.password-expiry.updated': '⏳ Password expiry window updated',
 };
 const label = (a) => LABELS[a] || String(a || '').replace(/[._-]+/g, ' ');
 
@@ -78,6 +82,22 @@ const detailText = (row) => {
     }
     case 'agent.password-forced':
       return d.agent_id ? `Agent #${d.agent_id} signed out everywhere` : '—';
+    // Why the password was changed — lets an admin tell "the agent stayed on
+    // top of it" apart from "it lapsed and they were forced".
+    case 'password.changed': {
+      const TRIGGER = {
+        voluntary: 'Voluntary — changed by the user',
+        forced_expiry: 'Forced — password had expired',
+        forgot_password: 'Forgot-password reset',
+        admin_reset: 'Admin-set (Create New Password)',
+      };
+      const why = TRIGGER[d.trigger] || d.trigger || 'Changed';
+      const who = d.target_name ? ` for ${d.target_name}` : '';
+      const cyc = d.days_applied ? ` — next expiry in ${d.days_applied} days` : '';
+      return `${why}${who}${cyc}`;
+    }
+    case 'tenant.password-expiry.updated':
+      return `Window: ${d.from ?? '—'} → ${d.to ?? '—'} days`;
     case 'template.created':
     case 'template.updated':
     case 'template.deleted':

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../api/client';
+import { useBrand } from '../../context/BrandContext';
 import { toastError, toastSuccess } from '../../lib/toast';
 
 const isLocalUrl = (u) => /^(https?:\/\/)(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(u || '');
@@ -24,6 +25,10 @@ export default function SuperSettings() {
   const [whErr, setWhErr] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [appName, setAppName] = useState('');
+  const [logoFile, setLogoFile] = useState(null);
+  const [logoURL, setLogoURL] = useState('');
+  const { refresh: refreshBrand } = useBrand();
 
   const load = async () => {
     setLoading(true);
@@ -34,6 +39,8 @@ export default function SuperSettings() {
       setSecret('');
       setWebhook(s?.webhook_url?.override || '');
       setReqCorr(!!s?.require_correlation_id?.enabled);
+      setAppName(s?.branding?.app_name || '');
+      setLogoFile(null); setLogoURL('');
     } catch (e) { toastError(e?.response?.data?.message || 'Failed to load settings.'); }
     finally { setLoading(false); }
   };
@@ -114,6 +121,24 @@ export default function SuperSettings() {
     finally { setSaving(false); }
   };
 
+  const saveBranding = async (clearLogo) => {
+    if (logoFile && logoFile.size > 512 * 1024) { toastError('Logo must be under 512 KB.'); return; }
+    setSaving(true);
+    try {
+      const fd = new FormData();
+      fd.append('app_name', appName.trim());
+      if (clearLogo) fd.append('logo_clear', '1');
+      else if (logoFile) fd.append('logo', logoFile);
+      const s = await api.superBrandingUpdate(fd);
+      setSettings(s);
+      setAppName(s?.branding?.app_name || '');
+      setLogoFile(null); setLogoURL('');
+      refreshBrand();
+      toastSuccess('Branding saved.');
+    } catch (ex) { toastError(ex?.response?.data?.message || 'Save failed.'); }
+    finally { setSaving(false); }
+  };
+
   const input = 'w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mt-1';
 
   if (loading) return <div className="text-sm text-slate-500">Loading…</div>;
@@ -147,6 +172,39 @@ export default function SuperSettings() {
           </button>
         </div>
       </form>
+      <div className="bg-white border rounded-xl p-5 max-w-xl mt-4">
+        <h2 className="text-sm font-bold text-slate-800">Branding</h2>
+        <p className="text-xs text-slate-400 mb-4">App name and logo on the login screens, app header, and browser tab. Empty name falls back to the default.</p>
+        <label className="text-xs font-medium text-slate-600">App name</label>
+        <input value={appName} onChange={(e) => setAppName(e.target.value)} placeholder="SMS Messaging" maxLength={60} className={input} />
+        <div className="mt-4">
+          <label className="text-xs font-medium text-slate-600">Logo</label>
+          <div className="flex items-center gap-3 mt-1">
+            {(logoURL || settings?.branding?.logo_url) ? (
+              <img src={logoURL || settings.branding.logo_url} alt="Logo preview" className="w-12 h-12 rounded-xl object-contain bg-slate-50 border" />
+            ) : (
+              <div className="w-12 h-12 rounded-xl bg-slate-100 text-slate-400 flex items-center justify-center text-xs">none</div>
+            )}
+            <label className="text-xs border rounded-lg px-3 py-2 hover:bg-slate-50 cursor-pointer">
+              Choose file…
+              <input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" className="hidden"
+                onChange={(e) => { const f = e.target.files?.[0] || null; setLogoFile(f); setLogoURL(f ? URL.createObjectURL(f) : ''); }} />
+            </label>
+            {(settings?.branding?.has_logo || logoFile) && (
+              <button type="button" onClick={() => { if (logoFile) { setLogoFile(null); setLogoURL(''); } else saveBranding(true); }}
+                className="text-xs text-red-600 hover:underline">Remove</button>
+            )}
+          </div>
+          {logoFile && <p className="text-[11px] text-slate-400 mt-1">{logoFile.name} ({Math.round(logoFile.size / 1024)} KB) — Save to apply.</p>}
+          <p className="text-[11px] text-slate-400 mt-1">PNG/JPG/WebP/GIF/SVG, max 512 KB.</p>
+        </div>
+        <div className="flex justify-end mt-5">
+          <button type="button" onClick={() => saveBranding(false)} disabled={saving}
+            className="text-sm bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg px-4 py-2 font-semibold">
+            {saving ? 'Saving…' : 'Save branding'}
+          </button>
+        </div>
+      </div>
       <div className="bg-white border rounded-xl p-5 max-w-xl mt-4">
         <h2 className="text-sm font-bold text-slate-800">Webhook URL</h2>
         <p className="text-xs text-slate-400 mb-3">Where Dynalink POSTs inbound events. Applies to each tenant on their next login/refresh (renewal pushes the new URL).</p>

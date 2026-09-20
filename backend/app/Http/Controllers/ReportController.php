@@ -8,6 +8,7 @@ use App\Models\SentMessageLog;
 use App\Models\Tenant;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 
 /**
  * SMS send-volume analytics over sent_message_logs (one row per
@@ -23,6 +24,17 @@ class ReportController extends Controller
     use ResolvesActor;
 
     private const MAX_DAYS = 31;
+    private const CACHE_TTL = 300; // reports may lag sends by 5 min
+
+    /** Aggregate views are pure functions of (scope, query) — safe to cache. */
+    protected function cached(Request $r, string $view, array $scope, \Closure $fn)
+    {
+        // The epoch changes whenever a send is logged, so a report refreshes the
+        // moment something new is sent instead of lagging by the full TTL.
+        try { $epoch = (int) Cache::get(SentMessageLog::REPORT_EPOCH_KEY, 0); } catch (\Throwable $e) { $epoch = 0; }
+        $key = 'report:' . $view . ':' . $epoch . ':' . md5(json_encode([$scope, $r->query()]));
+        return Cache::remember($key, self::CACHE_TTL, $fn);
+    }
 
     // ---------------- scope ----------------
 
@@ -64,16 +76,36 @@ class ReportController extends Controller
 
     // ---------------- filters ----------------
 
+    /**
+     * Day bounds for the report. Dates arrive as Y-m-d in the VIEWER's timezone
+     * (the browser sends its own), so they're interpreted there and converted
+     * to the storage timezone — otherwise "Today" resolves to the wrong window
+     * for anyone whose day doesn't match the server's (e.g. UTC+8 vs UTC).
+     */
+    protected function tzOf(Request $r): string
+    {
+        $tz = trim((string) $r->query('tz', ''));
+        if ($tz !== '' && in_array($tz, timezone_identifiers_list(), true)) return $tz;
+        return (string) (config('app.timezone') ?: 'UTC');
+    }
+
+    protected function storageTz(): string
+    {
+        return (string) (config('app.timezone') ?: 'UTC');
+    }
+
     /** [from, to] as day bounds; default = last 7 days incl. today. */
     protected function range(Request $r): array
     {
+        $tz = $this->tzOf($r);
+        $store = $this->storageTz();
         try {
             $to = $r->query('to')
-                ? Carbon::createFromFormat('Y-m-d', $r->query('to'))->endOfDay()
-                : now()->endOfDay();
+                ? Carbon::createFromFormat('Y-m-d', (string) $r->query('to'), $tz)->endOfDay()->tz($store)
+                : now($tz)->endOfDay()->tz($store);
             $from = $r->query('from')
-                ? Carbon::createFromFormat('Y-m-d', $r->query('from'))->startOfDay()
-                : now()->subDays(6)->startOfDay();
+                ? Carbon::createFromFormat('Y-m-d', (string) $r->query('from'), $tz)->startOfDay()->tz($store)
+                : now($tz)->subDays(6)->startOfDay()->tz($store);
         } catch (\Throwable $e) {
             abort(response()->json(['message' => 'Dates must be Y-m-d.'], 422));
         }
@@ -119,23 +151,25 @@ class ReportController extends Controller
     {
         $scope = $this->scope($request);
         [$from, $to] = $this->range($request);
-        $base = fn() => $this->applyFilters($this->applyScope(SentMessageLog::query(), $scope), $request);
-        $cur = $base()->whereBetween('sent_at', [$from, $to]);
-        $total = (clone $cur)->count();
-        $byCat = array_fill_keys(SentMessageLog::CATEGORIES, 0);
-        foreach ((clone $cur)->selectRaw('category, COUNT(*) c')->groupBy('category')->pluck('c', 'category') as $cat => $c) {
-            if (isset($byCat[$cat])) $byCat[$cat] = (int) $c;
-        }
-        $days = (int) abs($from->diffInDays($to)) + 1;
-        $prev = $base()->whereBetween('sent_at', [$from->copy()->subDays($days), $from->copy()->subSecond()])->count();
-        $delta = $prev > 0 ? round(($total - $prev) / $prev * 100, 1) : null;
-        $since = $this->applyScope(SentMessageLog::query(), $scope)->min('sent_at');
-        return response()->json([
-            'from' => $from->toDateString(), 'to' => $to->toDateString(),
-            'total' => $total, 'by_category' => $byCat,
-            'prev_total' => $prev, 'delta_pct' => $delta,
-            'tracking_since' => $since ? Carbon::parse($since)->toDateString() : null,
-        ]);
+        return response()->json($this->cached($request, 'summary', $scope, function () use ($request, $scope, $from, $to) {
+            $base = fn() => $this->applyFilters($this->applyScope(SentMessageLog::query(), $scope), $request);
+            $cur = $base()->whereBetween('sent_at', [$from, $to]);
+            $total = (clone $cur)->count();
+            $byCat = array_fill_keys(SentMessageLog::CATEGORIES, 0);
+            foreach ((clone $cur)->selectRaw('category, COUNT(*) c')->groupBy('category')->pluck('c', 'category') as $cat => $c) {
+                if (isset($byCat[$cat])) $byCat[$cat] = (int) $c;
+            }
+            $days = (int) abs($from->diffInDays($to)) + 1;
+            $prev = $base()->whereBetween('sent_at', [$from->copy()->subDays($days), $from->copy()->subSecond()])->count();
+            $delta = $prev > 0 ? round(($total - $prev) / $prev * 100, 1) : null;
+            $since = $this->applyScope(SentMessageLog::query(), $scope)->min('sent_at');
+            return [
+                'from' => $from->toDateString(), 'to' => $to->toDateString(),
+                'total' => $total, 'by_category' => $byCat,
+                'prev_total' => $prev, 'delta_pct' => $delta,
+                'tracking_since' => $since ? Carbon::parse($since)->toDateString() : null,
+            ];
+        }));
     }
 
     /** Per-bucket volume (daily ≤14 days, else Mon–Sun weeks), gaps zero-filled. */
@@ -144,6 +178,7 @@ class ReportController extends Controller
         $scope = $this->scope($request);
         [$from, $to] = $this->range($request);
         $days = (int) abs($from->diffInDays($to)) + 1;
+        return response()->json($this->cached($request, 'trend', $scope, function () use ($request, $scope, $from, $to, $days) {
         $rows = $this->applyFilters($this->applyScope(SentMessageLog::query(), $scope), $request)
             ->whereBetween('sent_at', [$from, $to])
             ->selectRaw('date(sent_at) d, category, COUNT(*) c')
@@ -174,7 +209,8 @@ class ReportController extends Controller
             }
             $points = array_values($weeks);
         }
-        return response()->json(['bucket' => $bucket, 'points' => $points]);
+            return ['bucket' => $bucket, 'points' => $points];
+        }));
     }
 
     /** One row per sending agent + an aggregate Admin row (manual sends). */
@@ -182,6 +218,7 @@ class ReportController extends Controller
     {
         $scope = $this->scope($request);
         [$from, $to] = $this->range($request);
+        return response()->json($this->cached($request, 'byAgent', $scope, function () use ($request, $scope, $from, $to) {
         $q = $this->applyFilters($this->applyScope(SentMessageLog::query(), $scope), $request)
             ->whereBetween('sent_at', [$from, $to]);
         $agents = (clone $q)->whereNotNull('agent_id')
@@ -209,7 +246,8 @@ class ReportController extends Controller
                     'regular_reply' => (int) $admin->regular_reply, 'mass_triggered' => 0];
             }
         }
-        return response()->json(['rows' => $rows]);
+            return ['rows' => $rows];
+        }));
     }
 
     /** One row per sending number with a category breakdown. */
@@ -217,6 +255,7 @@ class ReportController extends Controller
     {
         $scope = $this->scope($request);
         [$from, $to] = $this->range($request);
+        return response()->json($this->cached($request, 'byNumber', $scope, function () use ($request, $scope, $from, $to) {
         $rows = $this->applyFilters($this->applyScope(SentMessageLog::query(), $scope), $request)
             ->whereBetween('sent_at', [$from, $to])
             ->selectRaw('from_number, COUNT(*) total')
@@ -231,7 +270,8 @@ class ReportController extends Controller
                 'new_sms' => (int) $r->new_sms, 'regular_reply' => (int) $r->regular_reply,
                 'mass_sms' => (int) $r->mass_sms, 'auto_reply' => (int) $r->auto_reply];
         }
-        return response()->json(['rows' => $out]);
+            return ['rows' => $out];
+        }));
     }
 
     /** Message-level rows for drill-down + CSV export (newest first). */
@@ -239,6 +279,7 @@ class ReportController extends Controller
     {
         $scope = $this->scope($request);
         [$from, $to] = $this->range($request);
+        return response()->json($this->cached($request, 'detail', $scope, function () use ($request, $scope, $from, $to) {
         $per = min(max((int) $request->query('per_page', 50), 1), 5000);
         $page = max((int) $request->query('page', 1), 1);
         $q = $this->applyFilters($this->applyScope(SentMessageLog::query(), $scope), $request)
@@ -251,7 +292,8 @@ class ReportController extends Controller
             'id', 'tenant_id', 'sent_at', 'category', 'agent_id', 'actor_name',
             'from_number', 'to_number', 'type', 'scheduled_message_id', 'auto_reply_id', 'session_id',
         ]);
-        return response()->json(['data' => $data, 'meta' => ['total' => $total, 'page' => $page, 'per_page' => $per]]);
+            return ['data' => $data->toArray(), 'meta' => ['total' => $total, 'page' => $page, 'per_page' => $per]];
+        }));
     }
 
     /** Super only: per-tenant volume + active-agent counts for the range. */
@@ -259,6 +301,7 @@ class ReportController extends Controller
     {
         abort_unless($request->attributes->get('superadmin'), 403, 'Super admins only.');
         [$from, $to] = $this->range($request);
+        return response()->json($this->cached($request, 'tenants', ['mode' => 'all'], function () use ($request, $from, $to) {
         $q = $this->applyFilters(SentMessageLog::query(), $request)->whereBetween('sent_at', [$from, $to]);
         $vol = (clone $q)->whereNotNull('tenant_id')
             ->selectRaw('tenant_id, COUNT(*) total')
@@ -292,6 +335,7 @@ class ReportController extends Controller
                 'regular_reply' => (int) $legacy->regular_reply, 'mass_sms' => (int) $legacy->mass_sms,
                 'auto_reply' => (int) $legacy->auto_reply, 'active_agents' => null];
         }
-        return response()->json(['rows' => $rows]);
+            return ['rows' => $rows];
+        }));
     }
 }

@@ -2,8 +2,10 @@
 
 namespace App\Services;
 
+use GuzzleHttp\Exception\ConnectException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Dynalink NS-API v2 client.
@@ -36,7 +38,7 @@ class DynalinkService
     /** Password-grant login → returns full token payload. */
     public function login(string $username, string $password): array
     {
-        $res = Http::acceptJson()->timeout(10)->post("{$this->authBase}/tokens", [
+        $res = $this->authApi()->post("{$this->authBase}/tokens", [
             'grant_type'    => 'password',
             'client_id'     => $this->clientId,
             'client_secret' => $this->clientSecret,
@@ -55,7 +57,7 @@ class DynalinkService
     /** Refresh-token grant. */
     public function refreshToken(string $refreshToken): array
     {
-        $res = Http::acceptJson()->timeout(10)->post("{$this->authBase}/tokens", [
+        $res = $this->authApi()->post("{$this->authBase}/tokens", [
             'grant_type'    => 'refresh_token',
             'client_id'     => $this->clientId,
             'client_secret' => $this->clientSecret,
@@ -75,7 +77,48 @@ class DynalinkService
 
     protected function api(string $token)
     {
-        return Http::acceptJson()->withToken($token)->timeout(30);
+        return Http::acceptJson()->withToken($token)->timeout(30)
+            ->withMiddleware($this->providerGuard());
+    }
+
+    protected function authApi()
+    {
+        return Http::acceptJson()->timeout(10)->withMiddleware($this->providerGuard());
+    }
+
+    /**
+     * Guzzle middleware: every provider connection failure (DNS/TCP/TLS/
+     * timeout — the "cURL error N" family) becomes one friendly 503.
+     * Technical detail goes to the log only, never to the API response.
+     * Handles both sync throws and async rejections.
+     */
+    protected function providerGuard(): callable
+    {
+        return function (callable $handler) {
+            return function ($request, array $options) use ($handler) {
+                try {
+                    $result = $handler($request, $options);
+                } catch (ConnectException $e) {
+                    $this->abortUnreachable($e);
+                }
+                if ($result instanceof \GuzzleHttp\Promise\PromiseInterface) {
+                    return $result->otherwise(function ($reason) {
+                        if ($reason instanceof ConnectException) $this->abortUnreachable($reason);
+                        return new \GuzzleHttp\Promise\RejectedPromise($reason);
+                    });
+                }
+                return $result;
+            };
+        };
+    }
+
+    protected function abortUnreachable(ConnectException $e): never
+    {
+        Log::warning('Dynalink unreachable', ['error' => $e->getMessage()]);
+        abort(response()->json([
+            'message' => "We couldn't reach the messaging provider. Please try again in a moment.",
+            'code' => 'provider_unreachable',
+        ], 503));
     }
 
     protected function userPath(string $domain, string $user): string
@@ -87,9 +130,11 @@ class DynalinkService
      | SMS numbers (getsmsnumber.txt)
      * ------------------------------------------------------------------ */
 
+    /** Number inventory rarely changes: 5-min cache, TTL-only (provisioning happens outside the app). */
     public function smsNumbers(string $token, string $domain, string $user): array
     {
-        return $this->api($token)->get($this->userPath($domain, $user) . '/smsnumbers')->json() ?? [];
+        return \Illuminate\Support\Facades\Cache::remember("dl:numbers:{$domain}:{$user}", 300,
+            fn() => $this->api($token)->get($this->userPath($domain, $user) . '/smsnumbers')->json() ?? []);
     }
 
     /* ------------------------------------------------------------------
@@ -167,24 +212,33 @@ class DynalinkService
 
     public function contacts(string $token, string $domain, string $user): array
     {
-        $res = $this->api($token)->get($this->userPath($domain, $user) . '/contacts');
-        $data = $res->json();
-        // API sometimes returns a single object instead of array
-        if (isset($data['uid']) || isset($data['unique-id'])) {
-            return [$data];
-        }
-        return $data ?? [];
+        return \Illuminate\Support\Facades\Cache::remember("dl:contacts:{$domain}:{$user}", 120, function () use ($token, $domain, $user) {
+            $res = $this->api($token)->get($this->userPath($domain, $user) . '/contacts');
+            $data = $res->json();
+            // API sometimes returns a single object instead of array
+            if (isset($data['uid']) || isset($data['unique-id'])) {
+                return [$data];
+            }
+            return $data ?? [];
+        });
+    }
+
+    public static function bustContacts(string $domain, string $user): void
+    {
+        try { \Illuminate\Support\Facades\Cache::forget("dl:contacts:{$domain}:{$user}"); } catch (\Throwable $e) {}
     }
 
     public function createContact(string $token, string $domain, string $user, array $payload): array
     {
         $res = $this->api($token)->post($this->userPath($domain, $user) . '/contacts', $payload);
+        static::bustContacts($domain, $user);
         return [$res->status(), $res->json() ?? $res->body()];
     }
 
     public function updateContact(string $token, string $domain, string $user, string $contactId, array $payload): array
     {
         $res = $this->api($token)->put($this->userPath($domain, $user) . "/contacts/{$contactId}", $payload);
+        static::bustContacts($domain, $user);
         return [$res->status(), $res->json() ?? $res->body()];
     }
 
@@ -202,6 +256,7 @@ class DynalinkService
     public function deleteContact(string $token, string $domain, string $user, string $contactId): array
     {
         $res = $this->api($token)->delete($this->userPath($domain, $user) . "/contacts/{$contactId}");
+        static::bustContacts($domain, $user);
         return [$res->status(), $res->json() ?? $res->body()];
     }
 

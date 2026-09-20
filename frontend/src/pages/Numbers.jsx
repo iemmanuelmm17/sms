@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ChevronDown, ChevronRight, Star } from 'lucide-react';
+import { ChevronDown, ChevronRight, Search, Star } from 'lucide-react';
 import { api, agentName, fmtPhone } from '../api/client';
 import { toastError, toastSuccess } from '../lib/toast';
 import { useAuth } from '../context/AuthContext';
@@ -11,7 +11,7 @@ const digits = (v) => String(v ?? '').replace(/\D/g, '');
 
 /** One per-number admin page: agent assignment + shared + notify emails + email senders. */
 export default function Numbers() {
-  const { user } = useAuth();
+  const { user, setUser } = useAuth();
   const isAgent = user?.role === 'agent';
   const main = digits(user?.main_number);
   const { lastSync } = useSocket();
@@ -26,6 +26,7 @@ export default function Numbers() {
   const [sendInput, setSendInput] = useState({});
   // Per-number accordion; default is collapsed.
   const [open, setOpen] = useState({});
+  const [q, setQ] = useState(''); // search box
 
   const reload = async () => {
     try {
@@ -54,6 +55,11 @@ export default function Numbers() {
         }
       }
       setAssign(m);
+      if (user?.role === 'admin' && user?.onboarding && !user.onboarding.done && !user.onboarding.steps?.numbers_reviewed) {
+        api.updateOnboarding({ step: 'numbers_reviewed' }).then(({ onboarding }) => {
+          if (onboarding) setUser((u) => (u ? { ...u, onboarding } : u));
+        }).catch(() => {});
+      }
     } catch (e) { toastError(e?.response?.data?.message || e.message); }
   };
   useEffect(() => { reload(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -193,7 +199,19 @@ export default function Numbers() {
     finally { setBusy((p) => ({ ...p, [key]: false })); }
   };
 
-  const allDigits = visibleNumbers.map(digitsOf).filter(Boolean);
+  // Search matches the number itself — typed digits ignore spacing/punctuation
+  // ("55512" finds +1 (555) 123-4567), so no need to type the full format.
+  const nq = digits(q);
+  const shownNumbers = !q.trim()
+    ? visibleNumbers
+    : visibleNumbers.filter((n) => {
+        const d = digitsOf(n);
+        const fmt = fmtPhone(n.number).toLowerCase();
+        const raw = String(n.number || '').toLowerCase();
+        const tq = q.trim().toLowerCase();
+        return (nq && d.includes(nq)) || fmt.includes(tq) || raw.includes(tq);
+      });
+  const allDigits = shownNumbers.map(digitsOf).filter(Boolean);
   const expandAll = () => setOpen(Object.fromEntries(allDigits.map((d) => [d, true])));
   const collapseAll = () => setOpen({});
 
@@ -213,8 +231,30 @@ export default function Numbers() {
           </div>
         )}
       </div>
-      {visibleNumbers.length === 0 && <p className="text-sm text-slate-400">{isAgent ? 'No SMS numbers assigned to you.' : 'No SMS numbers found.'}</p>}
-      {visibleNumbers.map((n) => {
+      {numbers.length > 1 && (
+        <div className="relative">
+          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="🔍 Search numbers…"
+            className="w-full border rounded-lg pl-9 pr-9 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
+          {q && (
+            <button onClick={() => setQ('')} title="Clear search"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 font-bold px-1">✕</button>
+          )}
+        </div>
+      )}
+      {shownNumbers.length === 0 && (
+        <p className="text-sm text-slate-400">
+          {q.trim()
+            ? `No numbers match “${q.trim()}”.`
+            : (isAgent ? 'No SMS numbers assigned to you.' : 'No SMS numbers found.')}
+        </p>
+      )}
+      {q.trim() && shownNumbers.length > 0 && (
+        <p className="text-xs text-slate-400 -mt-1">
+          Showing {shownNumbers.length} of {visibleNumbers.length} number{visibleNumbers.length === 1 ? '' : 's'}
+        </p>
+      )}
+      {shownNumbers.map((n) => {
         const d = digitsOf(n);
         if (!d) return null;
         const dr = draftFor(d);

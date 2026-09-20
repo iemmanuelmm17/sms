@@ -3,6 +3,7 @@ import { api, fmtDateTime } from '../api/client';
 import { toastError, toastSuccess } from '../lib/toast';
 import { useSocket } from '../context/SocketContext';
 import { useAuth } from '../context/AuthContext';
+import useEscape from '../lib/useEscape';
 
 export default function Templates() {
   const { user } = useAuth();
@@ -17,6 +18,7 @@ export default function Templates() {
   const [busy, setBusy] = useState(false);
   const editingTpl = editing && editing !== 'new' ? list.find((x) => String(x.id) === String(editing)) : null;
   const { lastSync } = useSocket();
+  useEscape(() => setEditing(null), !!editing); // Esc closes the editor (no Modal wrapper here)
 
   const reload = () => api.templates().then(setList);
   useEffect(() => { reload(); }, []);

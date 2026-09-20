@@ -3,6 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Models\AuditLog;
+use App\Models\PasswordHistory;
+use App\Rules\PasswordPolicy;
+use App\Services\PasswordPolicyService;
 use App\Models\Tenant;
 use App\Models\TenantAdmin;
 use App\Models\TenantPasswordResetRequest;
@@ -110,20 +113,27 @@ class TenantPasswordResetController extends Controller
     public function complete(Request $request)
     {
         $data = $request->validate([
-            'challenge' => 'required|string', 'new_password' => 'required|string|min:8|max:200',
+            'challenge' => 'required|string',
+            'new_password' => ['required', 'string', new PasswordPolicy()],
         ]);
         $req = $this->liveChallenge($data['challenge']);
         $admin = $req ? TenantAdmin::find($req->tenant_admin_id) : null;
         if (!$req || !$req->verified_at || !$admin || !$admin->isActive()) {
             return response()->json(['message' => 'That reset link expired. Start over.'], 422);
         }
-        $admin->update([
-            'password_hash' => Hash::make($data['new_password']),
-            'session_version' => $admin->session_version + 1, // all sessions drop
-        ]);
+        if ($err = PasswordPolicyService::reuseError($admin, PasswordHistory::TYPE_ADMIN, $data['new_password'])) {
+            return response()->json(['message' => $err], 422);
+        }
+        $admin->loadMissing('tenant');
+        PasswordPolicyService::change($admin, PasswordHistory::TYPE_ADMIN, $data['new_password'],
+            PasswordPolicyService::T_FORGOT, [
+                'domain'     => $admin->tenant->domain ?? $req->domain,
+                'actor_type' => 'admin',
+                'actor_id'   => $admin->id,
+                'actor_name' => $admin->displayName(),
+                'ip'         => $request->ip(),
+            ]);
         $req->update(['completed_at' => now()]);
-        AuditLog::record($admin->tenant->domain ?? $req->domain, 'admin', null,
-            $admin->displayName(), 'tenant.forgot.completed', [], $request->ip());
         return response()->json(['ok' => true]);
     }
 

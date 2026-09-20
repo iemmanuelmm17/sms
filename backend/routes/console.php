@@ -8,6 +8,10 @@ use Illuminate\Support\Facades\Schedule;
 // scheduler to run (cron: `php artisan schedule:run` every minute).
 Schedule::command('mail:poll-email-sms')->everyMinute()->withoutOverlapping(5);
 
+// Contacts: nightly two-way sync with the portal (local table is the read
+// source; this keeps it fresh when contacts are edited directly in Dynalink).
+Schedule::command('contacts:sync')->dailyAt('03:10')->withoutOverlapping(30);
+
 // Queue worker heartbeat: queue:work loops even when idle, so every loop
 // iteration refreshes this timestamp. The Scheduler page reads it via
 // GET /api/ops/health to show worker online/offline. (Registered here

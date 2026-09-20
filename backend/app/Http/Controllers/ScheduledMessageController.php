@@ -56,7 +56,9 @@ class ScheduledMessageController extends Controller
         $actor = $this->actor($request);
         $q = ScheduledMessage::where('domain', $domain)->where('user', $user);
         if ($actor['role'] === 'agent') $q->where('created_by', 'agent:' . $actor['agent_id']);
-        return response()->json($q->orderBy('send_at')->get());
+        // Newest first: most recently created at the top (send_at breaks ties),
+        // so a message you just scheduled is visible without scrolling.
+        return response()->json($q->orderByDesc('created_at')->orderByDesc('send_at')->get());
     }
 
     /** GET /api/scheduled/{id} */
@@ -134,7 +136,13 @@ class ScheduledMessageController extends Controller
             'size'         => 'sometimes|nullable|integer|min:0|max:1048576',
             'send_at'      => 'required|date',
             'timezone'     => 'sometimes|string|max:60',
+            'tcpa_script'  => 'sometimes|boolean',
+            'include_optin' => 'sometimes|boolean',
             'targets'      => 'required|array',
+            'recurrence'   => 'sometimes|nullable|in:daily,weekly,monthly',
+            'recur_interval' => 'sometimes|integer|min:1|max:365',
+            'recur_until'  => 'sometimes|nullable|date',
+            'recur_occurrences' => 'sometimes|nullable|integer|min:1|max:999',
         ]);
 
         $this->assertMediaSize($data['data'] ?? null);
@@ -146,6 +154,10 @@ class ScheduledMessageController extends Controller
         }
         RateLimiter::hit($storeKey, 60);
         $recipients = $this->expandTargets($domain, $data['targets']);
+        // "Include opt-in contacts" ADDs the opt-in list to whatever was picked.
+        if (!empty($data['include_optin'])) {
+            $recipients = $this->mergeOptIns($domain, $recipients);
+        }
         if (empty($recipients)) {
             return response()->json(['message' => 'No recipients resolved from targets.'], 422);
         }
@@ -162,6 +174,13 @@ class ScheduledMessageController extends Controller
             'media_size' => $data['size'] ?? null,
             'send_at' => $sendAt,
             'timezone' => $data['timezone'] ?? 'US/Eastern',
+            'tcpa_script' => array_key_exists('tcpa_script', $data) ? (bool) $data['tcpa_script'] : true,
+            'include_optin' => array_key_exists('include_optin', $data) ? (bool) $data['include_optin'] : false,
+            'recurrence' => $data['recurrence'] ?? null,
+            'recur_interval' => max(1, (int) ($data['recur_interval'] ?? 1)),
+            'recur_until' => !empty($data['recur_until']) ? \Carbon\Carbon::parse($data['recur_until']) : null,
+            'recur_occurrences' => !empty($data['recur_occurrences']) ? (int) $data['recur_occurrences'] : null,
+            'recur_index' => 0,
             'targets' => $data['targets'],
             'recipients' => $recipients,   // snapshot: [{phone, name, vars}]
             'created_by' => $cbKey, 'created_by_name' => $cbName,
@@ -194,14 +213,42 @@ class ScheduledMessageController extends Controller
             'message' => 'sometimes|string|max:5000',
             'send_at' => 'sometimes|date',
             'timezone' => 'sometimes|string|max:60',
+            'tcpa_script' => 'sometimes|boolean',
+            'include_optin' => 'sometimes|boolean',
+            'recurrence' => 'sometimes|nullable|in:daily,weekly,monthly',
+            'recur_interval' => 'sometimes|integer|min:1|max:365',
+            'recur_until' => 'sometimes|nullable|date',
+            'recur_occurrences' => 'sometimes|nullable|integer|min:1|max:999',
         ]);
         if (isset($data['send_at'])) {
             $data['send_at'] = $this->clampSendAt($data['send_at']);
         }
+        if (array_key_exists('recur_until', $data)) {
+            $data['recur_until'] = !empty($data['recur_until']) ? \Carbon\Carbon::parse($data['recur_until']) : null;
+        }
         $actor = $this->actor($request);
         $data['updated_by'] = $actor['role'] === 'agent' ? 'agent:' . $actor['agent_id'] : $user;
         $data['updated_by_name'] = $actor['display_name'] ?? null;
+        $wasIncluding = (bool) $scheduled->include_optin;
         $scheduled->update($data);
+        // Switching "include opt-in contacts" ON later appends the opt-in list
+        // to a still-pending message and dispatches the extra jobs. Existing
+        // entries are never reindexed — queued jobs point at recipient indexes.
+        // (Switching it back OFF can't recall jobs already in the queue.)
+        if (!$wasIncluding && !empty($data['include_optin']) && $scheduled->status === 'pending') {
+            $old = $scheduled->recipients ?? [];
+            $merged = $this->mergeOptIns($domain, $old);
+            $added = array_slice($merged, count($old));
+            if ($added) {
+                $base = $scheduled->send_at ? \Carbon\Carbon::parse($scheduled->send_at) : now();
+                foreach ($added as $k => $r) {
+                    $i = count($old) + $k;                       // keep existing indexes
+                    SendScheduledMessage::dispatch($scheduled->id, $i)->delay($base->copy()->addSeconds($i * 2));
+                }
+                $scheduled->recipients = $merged;
+                $scheduled->save();
+            }
+        }
         $this->audit($request, 'scheduled.updated', ['scheduled_id' => $scheduled->id, 'name' => $scheduled->name]);
         // NOTE: previously dispatched jobs check status + send_at at runtime;
         // cancelled/rescheduled messages are skipped by the job itself.
@@ -320,6 +367,69 @@ class ScheduledMessageController extends Controller
     }
 
     /**
+     * POST /api/scheduled/{scheduled}/cancel-series
+     * Stop a recurring send: cancel every pending occurrence of the series and
+     * clear the recurrence so nothing else spawns.
+     */
+    public function cancelSeries(Request $request, ScheduledMessage $scheduled)
+    {
+        [$domain, $user] = $this->scope($request);
+        abort_unless($scheduled->domain === $domain, 403);
+        $this->assertOwn($request, $scheduled);
+
+        $root = $scheduled->parent_id ?: $scheduled->id;
+        $rows = ScheduledMessage::where('domain', $domain)
+            ->where(function ($q) use ($root) { $q->where('id', $root)->orWhere('parent_id', $root); })
+            ->where('status', 'pending')
+            ->get();
+
+        $n = 0;
+        foreach ($rows as $m) {
+            $m->status = 'cancelled';
+            $m->recurrence = null;      // belt and braces: no further spawning
+            $m->save();
+            $n += 1;
+        }
+        $this->audit($request, 'scheduled.series-cancelled', ['scheduled_id' => $scheduled->id, 'cancelled' => $n]);
+        DataChanged::send($domain, $user, 'scheduled', 'saved', $scheduled->id);
+        return response()->json(['ok' => true, 'cancelled' => $n]);
+    }
+
+    /**
+     * Append every opted-in number that isn't already in the recipient list.
+     * Compared on the last 10 digits so 10- and 11-digit forms dedupe.
+     */
+    protected function mergeOptIns(string $domain, array $recipients): array
+    {
+        $key10 = static function ($phone) {
+            $d = preg_replace('/\D/', '', (string) $phone);
+            if ($d === '') return '';
+            return strlen($d) === 11 && str_starts_with($d, '1') ? substr($d, 1) : $d;
+        };
+
+        try {
+            $optins = app(\App\Services\OptOutService::class)->optedInNumbers($domain);
+        } catch (\Throwable $e) {
+            return $recipients; // never block a send on the opt-in lookup
+        }
+        if (!$optins) return $recipients;
+
+        $seen = [];
+        foreach ($recipients as $r) {
+            $k = $key10($r['phone'] ?? '');
+            if ($k !== '') $seen[$k] = true;
+        }
+        foreach ($optins as $phone) {
+            $k = $key10($phone);
+            if ($k === '' || isset($seen[$k])) continue;
+            $seen[$k] = true;
+            $recipients[] = ['phone' => $k, 'name' => 'Opt-in contact', 'first_name' => '', 'last_name' => '',
+                'vars' => ['col1' => '', 'col2' => '', 'col3' => '']];
+        }
+        return $recipients;
+    }
+
+    /**
      * Expand { contacts, group_ids, company, csv } into a flat recipient list.
      * Company expansion uses Dynalink contacts filtered by company name.
      * CSV rows: [{phone, name?, col1?, col2?, col3?}] → vars for personalization.
@@ -331,8 +441,12 @@ class ScheduledMessageController extends Controller
 
         $push = function ($phone, $name = '', $vars = [], $first = null, $last = null) use (&$out, &$seen) {
             $digits = preg_replace('/\D/', '', (string) $phone);
-            if (!$digits || isset($seen[$digits])) return;
-            $seen[$digits] = true;
+            if (!$digits) return;
+            // One copy per number: 11-digit +1XXXXXXXXXX and 10-digit XXXXXXXXXX
+            // are the same line, so dedupe on the normalized form.
+            $key = (strlen($digits) === 11 && $digits[0] === '1') ? substr($digits, 1) : $digits;
+            if (isset($seen[$key])) return;
+            $seen[$key] = true;
             if ($first === null) { // CSV rows carry one name string — split it.
                 $parts = preg_split('/\s+/', trim((string) $name));
                 $first = $parts[0] ?? ''; $last = count($parts) > 1 ? implode(' ', array_slice($parts, 1)) : '';

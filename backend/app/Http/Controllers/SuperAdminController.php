@@ -20,6 +20,8 @@ use App\Models\IntegrationNumber;
 use App\Models\IntegrationSession;
 use App\Models\OptEvent;
 use App\Models\PasswordResetRequest;
+use App\Models\PasswordHistory;
+use App\Services\PasswordPolicyService;
 use App\Models\ScheduledMessage;
 use App\Models\Template;
 use App\Models\TenantPasswordResetRequest;
@@ -174,7 +176,7 @@ class SuperAdminController extends Controller
         if (!in_array($main, array_column($numbers, 'digits'), true)) {
             return response()->json(["message" => "Main number must be one of this account's assigned SMS numbers."], 422);
         }
-        $tenant = DB::transaction(function () use ($data, $adminData, $main) {
+        $tenant = DB::transaction(function () use ($data, $adminData, $main, $request) {
             $t = Tenant::create([
                 'name' => mb_strtolower($data['name']), 'domain' => $data['domain'],
                 'dynalink_user' => $data['dynalink_user'], 'dynalink_pass' => $data['dynalink_pass'],
@@ -182,7 +184,7 @@ class SuperAdminController extends Controller
                 'company_name' => $data['company_name'] ?? null, 'status' => 'active',
             ]);
             if ($adminData) {
-                TenantAdmin::create([
+                $admin = TenantAdmin::create([
                     'tenant_id' => $t->id, 'username' => mb_strtolower($adminData['username']),
                     'first_name' => $adminData['first_name'], 'last_name' => $adminData['last_name'],
                     'password_hash' => Hash::make($adminData['password']),
@@ -190,6 +192,15 @@ class SuperAdminController extends Controller
                     'secret_answer_hash' => Hash::make(AgentController::normalizeAnswer($adminData['secret_answer'])),
                     'status' => 'active',
                 ]);
+                PasswordPolicyService::startCycle($admin, PasswordHistory::TYPE_ADMIN,
+                    PasswordPolicyService::T_ADMIN, [
+                        'domain'     => $t->domain,
+                        'actor_type' => 'superadmin',
+                        'actor_id'   => null,
+                        'actor_name' => $this->sa($request)->username ?? 'superadmin',
+                        'ip'         => $request->ip(),
+                        'detail'     => ['on_create' => true],
+                    ]);
             }
             return $t;
         });
@@ -308,8 +319,18 @@ class SuperAdminController extends Controller
             'secret_answer_hash' => Hash::make(AgentController::normalizeAnswer($data['secret_answer'])),
             'status' => 'active',
         ]);
+        PasswordPolicyService::startCycle($admin, PasswordHistory::TYPE_ADMIN,
+            PasswordPolicyService::T_ADMIN, [
+                'domain'     => $tenant->domain,
+                'actor_type' => 'superadmin',
+                'actor_id'   => null,
+                'actor_name' => $this->sa($request)->username,
+                'ip'         => $request->ip(),
+                'detail'     => ['on_create' => true],
+            ]);
         AuditLog::record($tenant->domain, 'superadmin', null, $this->sa($request)->username,
             'tenant.admin.created', ['tenant' => $tenant->name, 'admin' => $username], $request->ip());
+        \App\Models\Agent::bustList($tenant->domain, $tenant->dynalink_user);
         return response()->json($admin->fresh(), 201);
     }
 
@@ -331,6 +352,7 @@ class SuperAdminController extends Controller
         AuditLog::record($tenant->domain, 'superadmin', null, $this->sa($request)->username,
             'tenant.admin.updated', ['tenant' => $tenant->name, 'admin' => $admin->username,
                 'keys' => array_keys($data)], $request->ip());
+        \App\Models\Agent::bustList($tenant->domain, $tenant->dynalink_user);
         return response()->json($admin->fresh());
     }
 
@@ -389,6 +411,7 @@ class SuperAdminController extends Controller
                 'enabled' => Settings::get('webhook.require_correlation_id', '0') === '1',
             ],
             'mail' => $this->mailState(),
+            'branding' => \App\Services\Branding::state(),
         ]);
     }
 
@@ -574,6 +597,22 @@ class SuperAdminController extends Controller
         $resp = $this->settingsShow($request)->getData(true);
         if ($resub !== null) $resp['resubscribed'] = $resub;
         return response()->json($resp);
+    }
+
+    /** POST /superadmin/settings/branding — app name + logo (multipart). */
+    public function brandingUpdate(Request $request)
+    {
+        $data = $request->validate([
+            'app_name' => 'sometimes|nullable|string|max:60',
+            'logo' => 'sometimes|nullable|image|mimes:jpeg,png,webp,gif,svg|max:512',
+            'logo_clear' => 'sometimes|boolean',
+        ]);
+        if (array_key_exists('app_name', $data)) \App\Services\Branding::setName($data['app_name']);
+        if ($request->hasFile('logo')) \App\Services\Branding::saveLogo($request->file('logo'));
+        elseif (!empty($data['logo_clear'])) \App\Services\Branding::clearLogo();
+        AuditLog::record(null, 'superadmin', null, $this->sa($request)->username,
+            'branding.updated', ['keys' => array_keys($data)], $request->ip());
+        return response()->json($this->settingsShow($request)->getData(true));
     }
 
     /** POST /superadmin/settings/mail-test — test email send or inbox check. */
@@ -880,6 +919,7 @@ class SuperAdminController extends Controller
         }
         $username = $admin->username;
         $admin->delete(); // their reset requests cascade
+        \App\Models\Agent::bustList($tenant->domain, $tenant->dynalink_user);
         AuditLog::record($tenant->domain, 'superadmin', null, $sa->username,
             'tenant.admin.deleted', ['tenant' => $tenant->name, 'admin' => $username], $request->ip());
         return response()->json(['ok' => true]);

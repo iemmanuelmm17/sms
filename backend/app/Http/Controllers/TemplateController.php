@@ -20,11 +20,11 @@ class TemplateController extends Controller
     public function index(Request $request)
     {
         [$domain, $user] = $this->scope($request);
-        return response()->json(
+        $list = \Illuminate\Support\Facades\Cache::remember(Template::listKey($domain, $user), 120, fn() =>
             Template::where('domain', $domain)
                 ->where(fn($q) => $q->where('user', $user)->orWhere('shared', true))
-                ->orderBy('name')->get()
-        );
+                ->orderBy('name')->get()->toArray());
+        return response()->json($list);
     }
 
     /** POST /api/templates { name, body, shared? } — supports $FirstName, $LastName, $CompanyName, $AgentName. */
@@ -45,6 +45,7 @@ class TemplateController extends Controller
             'created_by' => $cbKey, 'created_by_name' => $cbName,
             'updated_by' => $cbKey, 'updated_by_name' => $cbName]);
         $this->audit($request, 'template.created', ['template_id' => $t->id, 'name' => $t->name]);
+        Template::bustList($domain);
         DataChanged::send($domain, $user, 'templates', 'saved', $t->id);
         return response()->json($t, 201);
     }
@@ -67,6 +68,7 @@ class TemplateController extends Controller
         $data['updated_by_name'] = $actor['display_name'] ?? null;
         $template->update($data);
         $this->audit($request, 'template.updated', ['template_id' => $template->id, 'name' => $template->name, 'keys' => array_values(array_diff(array_keys($data), ['updated_by', 'updated_by_name']))]);
+        Template::bustList($domain);
         DataChanged::send($domain, $user, 'templates', 'saved', $template->id);
         return response()->json($template);
     }
@@ -80,6 +82,7 @@ class TemplateController extends Controller
         $id = $template->id; $nm = $template->name;
         $template->delete();
         $this->audit($request, 'template.deleted', ['template_id' => $id, 'name' => $nm]);
+        Template::bustList($domain);
         DataChanged::send($domain, $user, 'templates', 'deleted', $id);
         return response()->json(['ok' => true]);
     }

@@ -39,6 +39,8 @@ class TenantWebhookController extends Controller
             'events' => 'sometimes|array',
             'events.*' => Rule::in(TenantWebhook::EVENTS),
         ]);
+        try { \App\Services\WebhookUrlGuard::assertPublicUrl($data['url']); }
+        catch (\Throwable $e) { return response()->json(['message' => 'URL must be a reachable public http(s) address.'], 422); }
         $plain = Str::random(32);
         $hook = TenantWebhook::create(['domain' => $s['domain'], 'user' => $s['user'],
             'url' => $data['url'], 'secret' => $plain,
@@ -60,6 +62,10 @@ class TenantWebhookController extends Controller
             'status' => 'sometimes|in:active,disabled',
         ]);
         if (array_key_exists('events', $data)) $data['events'] = array_values($data['events']);
+        if (array_key_exists('url', $data)) {
+            try { \App\Services\WebhookUrlGuard::assertPublicUrl($data['url']); }
+            catch (\Throwable $e) { return response()->json(['message' => 'URL must be a reachable public http(s) address.'], 422); }
+        }
         $webhook->update($data);
         $this->audit($request, 'tenant-webhook.updated', ['url' => $webhook->url, 'keys' => array_keys($data)]);
         return response()->json($webhook->fresh());

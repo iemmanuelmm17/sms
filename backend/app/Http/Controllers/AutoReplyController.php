@@ -19,6 +19,29 @@ class AutoReplyController extends Controller
         return [$a['domain'], $a['user']];
     }
 
+    /**
+     * TCPA words the compliance engine owns (OptOutService::STOP_WORDS +
+     * START_WORDS). These always win — the default actions answer them and
+     * priority never overrides that, so a custom rule claiming one would be
+     * dead weight. Rejected up front instead.
+     */
+    public const RESERVED_KEYWORDS = [
+        'stop', 'stopall', 'unsubscribe', 'unsubscribed', 'cancel', 'end', 'quit',
+        'start', 'subscribed', 'yes', 'unstop',
+    ];
+
+    /** 422 unless every keyword is outside the TCPA-reserved set. */
+    protected function assertNotReserved(array $keywords): void
+    {
+        foreach ($keywords as $k) {
+            $n = strtolower(trim((string) $k, " \t\n\r\0\x0B!?.\"'"));
+            if (in_array($n, self::RESERVED_KEYWORDS, true)) {
+                abort(response()->json(['message' => strtoupper($n)
+                    . ' is reserved for TCPA compliance — the default STOP/START actions own it and always take priority. Choose a different keyword.'], 422));
+            }
+        }
+    }
+
     /** The two permanent compliance actions (Action A = opt-out, B = opt-in). */
     public const DEFAULT_A_BODY = '$CompanyName: Notifications stopped. Reply START to subscribe.';
     public const DEFAULT_B_BODY = '$CompanyName: Thanks for signing up for updates! Msg frequency varies. Msg&Data rates may apply. Reply STOP or UNSUBSCRIBE to cancel.';
@@ -60,11 +83,11 @@ class AutoReplyController extends Controller
         [$domain, $user] = $this->scope($request);
         $this->ensureDefaults($domain, $user);
         $q = AutoReply::where('domain', $domain)->where('user', $user)
-            ->orderByDesc('is_default')->orderBy('name');
+            ->orderBy('priority')->orderBy('id'); // priority order = evaluation order
         if ($ctx = $this->agentRuleContext($request, $domain, $user)) {
-            return response()->json($q->get()->filter(fn($r) => $this->ruleVisibleToAgent($r, $ctx[1]))->values());
+            return response()->json($this->decorate($q->get()->filter(fn($r) => $this->ruleVisibleToAgent($r, $ctx[1]))->values(), $domain, $user));
         }
-        return response()->json($q->get());
+        return response()->json($this->decorate($q->get(), $domain, $user));
     }
 
     protected function ensureDefaults(string $domain, string $user): void
@@ -100,15 +123,29 @@ class AutoReplyController extends Controller
         if (!$ctx) $this->requireAdmin($request);
         $data = $request->validate([
             'name'        => 'required|string|max:120',
-            'keywords'    => 'required',
+            'match_type'  => 'sometimes|in:keyword,any',
+            'keywords'    => $request->input('match_type') === AutoReply::MATCH_ANY ? 'sometimes|nullable' : 'required',
             'match_mode'  => 'sometimes|in:any,all,exact',
             'message'     => 'required|string|max:2000',
             'from_number' => 'sometimes|nullable|string|max:30',
             'active'      => 'sometimes|boolean',
+            'numbers'     => 'sometimes|nullable|array|max:100',
+            'numbers.*'   => 'string|max:32',
+            'active_from' => 'sometimes|nullable|date_format:H:i',
+            'active_to'   => 'sometimes|nullable|date_format:H:i',
+            'active_days' => 'sometimes|nullable|array|max:7',
+            'active_days.*' => 'integer|between:0,6',
+            'timezone'    => 'sometimes|nullable|string|max:64',
+            'schedule'    => 'sometimes|nullable',
         ]);
-        $data['keywords'] = $this->normalizeKeywords($data['keywords']);
-        if (empty($data['keywords'])) {
-            return response()->json(['message' => 'At least one keyword is required.'], 422);
+        $data = $this->normalizeScope($data);
+        $data = $this->normalizeCatchAll($data);
+        if (($data['match_type'] ?? AutoReply::MATCH_KEYWORD) !== AutoReply::MATCH_ANY) {
+            $data['keywords'] = $this->normalizeKeywords($data['keywords'] ?? '');
+            if (empty($data['keywords'])) {
+                return response()->json(['message' => 'At least one keyword is required.'], 422);
+            }
+            $this->assertNotReserved($data['keywords']); // TCPA words belong to the defaults
         }
         if ($ctx) {
             [$agent, , $main] = $ctx;
@@ -117,11 +154,17 @@ class AutoReplyController extends Controller
             if (!$ok) return response()->json(['message' => 'Agent rules may only send from your assigned numbers (not the main line).'], 422);
             $data['from_number'] = $fromDigits !== '' ? $fromDigits : null;
         }
+        if ($ctx) {
+            $scoped = $this->applyAgentScope($data['numbers'] ?? null, $ctx);
+            if (is_string($scoped)) return response()->json(['message' => $scoped], 422);
+            if (is_array($scoped)) $data['numbers'] = $scoped;
+        }
         [$cb, $cbName] = $ctx
             ? ['agent:' . $ctx[0]->id, trim($ctx[0]->first_name . ' ' . $ctx[0]->last_name)]
             : [$user, $request->session()->get('dynalink.display_name')];
         $rule = AutoReply::create($data + [
             'domain' => $domain, 'user' => $user, 'match_mode' => $data['match_mode'] ?? 'any',
+            'priority' => (int) (AutoReply::where('domain', $domain)->where('user', $user)->max('priority') ?? -1) + 1,
             'is_default' => false, 'is_deletable' => true,
             'created_by' => $cb, 'created_by_name' => $cbName,
             'updated_by' => $cb, 'updated_by_name' => $cbName]);
@@ -138,7 +181,7 @@ class AutoReplyController extends Controller
         if ($ctx = $this->agentRuleContext($request, $autoReply->domain, $autoReply->user)) {
             abort_unless($this->ruleVisibleToAgent($autoReply, $ctx[1]), 403);
         }
-        return response()->json($autoReply);
+        return response()->json($this->decorate([$autoReply], $autoReply->domain, $autoReply->user)[0]);
     }
 
     /** PUT /api/auto-replies/{autoReply} */
@@ -162,16 +205,30 @@ class AutoReplyController extends Controller
         }
         $data = $request->validate([
             'name'        => 'sometimes|string|max:120',
+            'match_type'  => 'sometimes|in:keyword,any',
             'keywords'    => 'sometimes',
             'match_mode'  => 'sometimes|in:any,all,exact',
             'message'     => 'sometimes|string|max:2000',
             'from_number' => 'sometimes|nullable|string|max:30',
             'active'      => 'sometimes|boolean',
+            'numbers'     => 'sometimes|nullable|array|max:100',
+            'numbers.*'   => 'string|max:32',
+            'active_from' => 'sometimes|nullable|date_format:H:i',
+            'active_to'   => 'sometimes|nullable|date_format:H:i',
+            'active_days' => 'sometimes|nullable|array|max:7',
+            'active_days.*' => 'integer|between:0,6',
+            'timezone'    => 'sometimes|nullable|string|max:64',
+            'schedule'    => 'sometimes|nullable',
         ]);
-        if (isset($data['keywords'])) {
+        $data = $this->normalizeScope($data);
+        $data = $this->normalizeCatchAll($data);
+        if (isset($data['keywords']) && ($data['match_type'] ?? $autoReply->match_type) !== AutoReply::MATCH_ANY) {
             $data['keywords'] = $this->normalizeKeywords($data['keywords']);
             if (empty($data['keywords'])) {
                 return response()->json(['message' => 'At least one keyword is required.'], 422);
+            }
+            if (!$autoReply->is_default) {
+                $this->assertNotReserved($data['keywords']); // defaults own these
             }
         }
         if ($ctx && array_key_exists('from_number', $data)) {
@@ -180,6 +237,11 @@ class AutoReplyController extends Controller
             $ok = $fromDigits === '' || ($fromDigits !== $main && in_array($fromDigits, $agent->assignedNumbers(), true));
             if (!$ok) return response()->json(['message' => 'Agent rules may only send from your assigned numbers (not the main line).'], 422);
             $data['from_number'] = $fromDigits !== '' ? $fromDigits : null;
+        }
+        if ($ctx && array_key_exists('numbers', $data)) {
+            $scoped = $this->applyAgentScope($data['numbers'], $ctx);
+            if (is_string($scoped)) return response()->json(['message' => $scoped], 422);
+            if (is_array($scoped)) $data['numbers'] = $scoped;
         }
         if ($autoReply->is_default) {
             // Defaults always match the exact keyword; flags can't be flipped.
@@ -234,7 +296,7 @@ class AutoReplyController extends Controller
         [$domain, $user] = $this->scope($request);
         $data = $request->validate(['text' => 'required|string|max:2000']);
         $rules = AutoReply::where('domain', $domain)->where('user', $user)
-            ->where('active', true)->orderBy('id')->get();
+            ->where('active', true)->orderBy('priority')->orderBy('id')->get();
         $matches = array_map(
             fn($m) => ['rule_id' => $m['rule']->id, 'name' => $m['rule']->name, 'keyword' => $m['keyword']],
             $svc->findMatches($rules, $data['text'])
@@ -317,6 +379,188 @@ class AutoReplyController extends Controller
         $this->audit($request, 'autoreply.reset', ['autoreply_id' => $autoReply->id, 'name' => $autoReply->name]);
         DataChanged::send($domain, $user, 'auto-replies', 'saved', $autoReply->id);
         return response()->json($autoReply->fresh());
+    }
+
+    /**
+     * POST /api/auto-replies/reorder { ids: [...] } — admin only.
+     * The array order becomes the evaluation order (lower priority = checked
+     * first); only ids belonging to this tenant are renumbered.
+     */
+    public function reorder(Request $request)
+    {
+        [$domain, $user] = $this->scope($request);
+        $this->requireAdmin($request);
+        $data = $request->validate(['ids' => 'required|array|max:500', 'ids.*' => 'integer']);
+
+        $ids = array_values(array_unique(array_map('intval', $data['ids'])));
+        $mine = AutoReply::where('domain', $domain)->where('user', $user)
+            ->whereIn('id', $ids)->pluck('id')->map('intval')->all();
+
+        // Keep any rule the client didn't send (newly created elsewhere) at the end.
+        $ordered = array_values(array_filter($ids, fn($id) => in_array($id, $mine, true)));
+        foreach ($mine as $id) {
+            if (!in_array($id, $ordered, true)) $ordered[] = $id;
+        }
+
+        foreach ($ordered as $i => $id) {
+            AutoReply::where('id', $id)->where('domain', $domain)->where('user', $user)
+                ->update(['priority' => $i]);
+        }
+
+        DataChanged::send($domain, $user, 'auto-replies', 'saved');
+        return response()->json(['ok' => true, 'ids' => $ordered]);
+    }
+
+    /** Catch-all rules are always on: no keywords, no time window, 24/7. */
+    protected function normalizeCatchAll(array $data): array
+    {
+        $isAny = array_key_exists('match_type', $data) && $data['match_type'] === AutoReply::MATCH_ANY;
+        if (!$isAny) return $data;
+        $data['keywords']    = [];
+        $data['match_mode']  = 'any';
+        $data['active_from'] = null;
+        $data['active_to']   = null;
+        $data['active_days'] = null;
+        $data['schedule']    = null;
+        $data['timezone']    = null;
+        return $data;
+    }
+
+    /**
+     * Fill in `numbers` for rules created before number assignment existed, so
+     * the UI always shows a concrete selection (and the first save locks it in).
+     */
+    protected function decorate(iterable $rows, string $domain, string $user): array
+    {
+        $main  = $this->mainDigits($domain, $user);
+        $cache = [];
+        $out   = [];
+        foreach ($rows as $r) {
+            $r->numbers = $r->scopeNumbers() ?? $this->legacyScope($r, $main, $cache);
+            $out[] = $r;
+        }
+        return $out;
+    }
+
+    /** Pre-feature scope: defaults everywhere, admin rules on main, agent rules on their own lines. */
+    protected function legacyScope(AutoReply $r, string $main, array &$cache): array
+    {
+        if ($r->is_default) return [AutoReply::ALL_NUMBERS];
+        $cb = (string) ($r->created_by ?? '');
+        if (str_starts_with($cb, 'agent:')) {
+            $aid = (int) substr($cb, 6);
+            if (!array_key_exists($aid, $cache)) {
+                $nums = [];
+                try { if ($ag = \App\Models\Agent::find($aid)) $nums = $ag->assignedNumbers(); } catch (\Throwable $e) {}
+                $cache[$aid] = array_values(array_filter(array_map(
+                    fn($n) => preg_replace('/\D/', '', (string) $n), (array) $nums
+                ), fn($n) => $n !== ''));
+            }
+            $mine = array_values(array_filter($cache[$aid], fn($n) => $n !== $main));
+            return $mine === [] ? [AutoReply::ALL_NUMBERS] : $mine;
+        }
+        return $main !== '' ? [$main] : [AutoReply::ALL_NUMBERS];
+    }
+
+    protected function mainDigits(string $domain, string $user): string
+    {
+        try {
+            return preg_replace('/\D/', '', (string) (\App\Models\Tenant::where('domain', $domain)
+                ->where('dynalink_user', $user)->value('main_number') ?? ''));
+        } catch (\Throwable $e) {
+            return '';
+        }
+    }
+
+    /** Normalize numbers / days / window from a request payload. */
+    protected function normalizeScope(array $data): array
+    {
+        if (array_key_exists('numbers', $data)) $data['numbers'] = $this->normalizeNumbers($data['numbers']);
+        if (array_key_exists('schedule', $data)) {
+            // A per-day schedule supersedes the legacy single from/to window.
+            $data['schedule'] = $this->normalizeSchedule($data['schedule'] ?? null);
+            $data['active_from'] = null;
+            $data['active_to']   = null;
+            $data['active_days'] = null;
+        }
+        if (array_key_exists('active_days', $data)) {
+            $days = is_array($data['active_days']) ? $data['active_days'] : [];
+            $days = array_values(array_unique(array_map('intval', $days)));
+            sort($days);
+            $data['active_days'] = $days === [] || count($days) === 7 ? null : $days;
+        }
+        foreach (['active_from', 'active_to'] as $k) {
+            if (array_key_exists($k, $data)) $data[$k] = $data[$k] ? substr((string) $data[$k], 0, 5) : null;
+        }
+        if (array_key_exists('timezone', $data)) $data['timezone'] = $data['timezone'] ?: null;
+        return $data;
+    }
+
+    /**
+     * Normalize a per-day schedule: { "0": {"from":"09:00","to":"17:00"}, ... }
+     * keyed 0=Sunday … 6=Saturday. Days that are absent mean "silent that day";
+     * an empty result means 24/7.
+     */
+    protected function normalizeSchedule($v): ?array
+    {
+        if ($v === null || $v === '') return null;
+        if (is_string($v)) {
+            $decoded = json_decode($v, true);
+            $v = is_array($decoded) ? $decoded : null;
+        }
+        if (!is_array($v)) return null;
+
+        $out = [];
+        foreach ($v as $day => $w) {
+            if (!is_numeric($day)) continue;
+            $d = (int) $day;
+            if ($d < 0 || $d > 6 || !is_array($w)) continue;
+            $from = trim((string) ($w['from'] ?? ''));
+            $to   = trim((string) ($w['to'] ?? ''));
+            if (!preg_match('/^\d{2}:\d{2}$/', $from) || !preg_match('/^\d{2}:\d{2}$/', $to)) continue;
+            $out[$d] = ['from' => $from, 'to' => $to];
+        }
+        ksort($out);
+        return $out === [] ? null : $out;
+    }
+
+    /** Digits-only number list. '*' (or an empty list) means every number. */
+    protected function normalizeNumbers($v): array
+    {
+        if ($v === null || $v === '') return [AutoReply::ALL_NUMBERS];
+        $out = [];
+        foreach ((is_array($v) ? $v : [$v]) as $n) {
+            $s = trim((string) $n);
+            if ($s === AutoReply::ALL_NUMBERS) return [AutoReply::ALL_NUMBERS];
+            $d = preg_replace('/\D/', '', $s);
+            if ($d !== '') $out[] = $d;
+        }
+        $out = array_values(array_unique($out));
+        return $out === [] ? [AutoReply::ALL_NUMBERS] : $out;
+    }
+
+    /**
+     * Agents may only run rules on their own assigned numbers (never the main
+     * line). '*' narrows to their numbers instead of granting every line.
+     * @return array|string|null  new numbers | 422 message | no change
+     */
+    protected function applyAgentScope(?array $numbers, array $ctx): array|string|null
+    {
+        if ($numbers === null) return null;
+        [$agent, , $main] = $ctx;
+        $allowed = array_values(array_filter(array_map(
+            fn($n) => preg_replace('/\D/', '', (string) $n), (array) $agent->assignedNumbers()
+        ), fn($n) => $n !== '' && $n !== $main));
+
+        if (in_array(AutoReply::ALL_NUMBERS, $numbers, true)) {
+            return $allowed === [] ? 'You have no assigned numbers yet.' : $allowed;
+        }
+        foreach ($numbers as $n) {
+            if (!in_array($n, $allowed, true)) {
+                return 'Agent rules may only run on your assigned numbers (not the main line).';
+            }
+        }
+        return null;
     }
 
     protected function normalizeKeywords($v): array

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\DynalinkService;
+use App\Services\OnboardingService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use App\Models\Agent;
@@ -11,6 +12,9 @@ use App\Models\TenantAdmin;
 use App\Services\Settings;
 use App\Models\AuditLog;
 use App\Services\LockoutService;
+use App\Models\PasswordHistory;
+use App\Rules\PasswordPolicy;
+use App\Services\PasswordPolicyService;
 use Illuminate\Support\Facades\Hash;
 
 /**
@@ -131,6 +135,25 @@ class AuthController extends Controller
             AuditLog::record($tenant->domain, 'unknown', null, $key, 'tenant.login.token-fail', [], $request->ip());
             return response()->json(['message' => 'Messaging service unavailable — try again shortly.'], 503);
         }
+        // Day 0: credentials were correct, but the password lapsed. Park the
+        // verified identity in the session and force a change instead of
+        // completing the login.
+        if ($admin->isPasswordExpired()) {
+            $request->session()->regenerate();
+            $request->session()->put('password_reset_required', [
+                'type' => PasswordHistory::TYPE_ADMIN,
+                'id'   => $admin->id,
+                'at'   => now()->timestamp,
+            ]);
+            AuditLog::record($tenant->domain, 'admin', $admin->id, $admin->displayName(),
+                'tenant.login.password-expired', [], $request->ip());
+            return response()->json([
+                'code'                => 'password_expired',
+                'message'             => 'Your password has expired. Choose a new one to continue.',
+                'password_expires_at' => $admin->password_expires_at?->toJSON(),
+            ], 409);
+        }
+
         $request->session()->regenerate();
         $request->session()->put('tenant', ['id' => $admin->id, 'v' => $admin->session_version]);
         $admin->forceFill(['last_seen_at' => now()])->save();
@@ -168,7 +191,8 @@ class AuthController extends Controller
             'main_number' => $admin->tenant->main_number ?? null,
             'tenant' => $admin->tenant->name ?? null,
             'company' => $admin->tenant->company_name ?? null,
-        ];
+            'onboarding' => OnboardingService::state($admin),
+        ] + $admin->passwordExpiryState();
     }
 
     public function me(Request $request)
@@ -242,6 +266,23 @@ class AuthController extends Controller
                 'agent.login.fail', [], $request->ip());
             return response()->json(['message' => 'Incorrect username or password.'], 401);
         }
+        if ($agent->isPasswordExpired()) {
+            $request->session()->regenerate();
+            $request->session()->put('password_reset_required', [
+                'type' => PasswordHistory::TYPE_AGENT,
+                'id'   => $agent->id,
+                'at'   => now()->timestamp,
+            ]);
+            AuditLog::record($domain, 'agent', $agent->id,
+                trim($agent->first_name . ' ' . $agent->last_name),
+                'agent.login.password-expired', [], $request->ip());
+            return response()->json([
+                'code'                => 'password_expired',
+                'message'             => 'Your password has expired. Choose a new one to continue.',
+                'password_expires_at' => $agent->password_expires_at?->toJSON(),
+            ], 409);
+        }
+
         $request->session()->regenerate();
         $request->session()->put('agent', ['id' => $agent->id, 'v' => $agent->session_version]);
         $agent->forceFill(['last_seen_at' => now()])->save();
@@ -263,7 +304,8 @@ class AuthController extends Controller
             'color' => $agent->tag_color, 'status' => $agent->status,
             'default_number' => $agent->default_number,
             'assigned_numbers' => $agent->assignedNumbers(),
-        ];
+            'onboarding' => OnboardingService::state($agent),
+        ] + $agent->passwordExpiryState();
     }
 
     /** POST /api/auth/verify-password — re-check the login password for
@@ -339,6 +381,111 @@ class AuthController extends Controller
         }
 
         return response()->json(['ok' => true, 'expires_at' => $s['expires_at']]);
+    }
+
+    /**
+     * POST /api/auth/expired-password { new_password, confirm_password }
+     *
+     * Completes a login that was interrupted at day 0. Identity was already
+     * proven by the login attempt seconds earlier, so no current-password
+     * field is required — the short-lived session flag is what authorises
+     * this. Same complexity + reuse rules as every other password path.
+     */
+    public function expiredPassword(Request $request)
+    {
+        $data = $request->validate([
+            'new_password'     => ['required', 'string', new PasswordPolicy()],
+            'confirm_password' => 'required|string',
+        ]);
+
+        if ($data['new_password'] !== $data['confirm_password']) {
+            return response()->json(['message' => 'Passwords do not match.'], 422);
+        }
+
+        $flag = $request->session()->get('password_reset_required');
+        if (!is_array($flag) || empty($flag['id']) || empty($flag['at'])
+            || (now()->timestamp - (int) $flag['at']) > PasswordPolicyService::RESET_FLAG_TTL) {
+            $request->session()->forget('password_reset_required');
+            return response()->json(['message' => 'That reset link expired. Sign in again.'], 422);
+        }
+
+        $type = ($flag['type'] ?? PasswordHistory::TYPE_AGENT) === PasswordHistory::TYPE_ADMIN
+            ? PasswordHistory::TYPE_ADMIN
+            : PasswordHistory::TYPE_AGENT;
+
+        $user = $type === PasswordHistory::TYPE_ADMIN
+            ? TenantAdmin::with('tenant')->find($flag['id'])
+            : Agent::find($flag['id']);
+
+        if (!$user || (isset($user->status) && $user->status !== 'active')) {
+            $request->session()->forget('password_reset_required');
+            return response()->json(['message' => 'That account is no longer active.'], 422);
+        }
+
+        if ($err = PasswordPolicyService::reuseError($user, $type, $data['new_password'])) {
+            return response()->json(['message' => $err], 422);
+        }
+
+        $isAdmin = $type === PasswordHistory::TYPE_ADMIN;
+        $domain  = $isAdmin ? ($user->tenant->domain ?? null) : $user->domain;
+
+        PasswordPolicyService::change($user, $type, $data['new_password'],
+            PasswordPolicyService::T_FORCED, [
+                'domain'     => $domain,
+                'actor_type' => $isAdmin ? 'admin' : 'agent',
+                'actor_id'   => $user->getKey(),
+                'actor_name' => PasswordPolicyService::displayNameFor($user),
+                'ip'         => $request->ip(),
+            ]);
+
+        $request->session()->forget('password_reset_required');
+
+        // Finish the interrupted login: fresh cycle, ordinary session.
+        $request->session()->regenerate();
+        $request->session()->put(
+            $isAdmin ? 'tenant' : 'agent',
+            ['id' => $user->id, 'v' => $user->session_version]
+        );
+        $user->forceFill(['last_seen_at' => now()])->save();
+
+        try {
+            app(SubscriptionController::class)->ensureForSession($request);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('expired-password: subscription ensure failed: ' . $e->getMessage());
+        }
+
+        return response()->json([
+            'user' => $isAdmin
+                ? $this->tenantAdminPayload($user->fresh())
+                : $this->agentPayload($user->fresh()),
+        ]);
+    }
+
+    /**
+     * POST /api/auth/password-expiry/dismiss — "Don't notify again".
+     *
+     * Scoped to the exact password_expires_at the user is looking at. The
+     * next password change writes a NEW expires_at, which makes this
+     * dismissal stale all by itself — no cleanup job needed.
+     */
+    public function dismissExpiryNotice(Request $request)
+    {
+        $user = null;
+        if ($a = $request->session()->get('agent')) {
+            $user = Agent::find($a['id'] ?? null);
+        } elseif ($t = $request->session()->get('tenant')) {
+            $user = TenantAdmin::find($t['id'] ?? null);
+        }
+
+        if (!$user || !$user->password_expires_at) {
+            return response()->json(['ok' => true]);
+        }
+
+        $user->forceFill([
+            'password_expiry_notice_dismissed_for' => $user->password_expires_at,
+        ])->save();
+
+        return response()->json(['ok' => true]);
     }
 
     protected function mePayload(Request $request): array

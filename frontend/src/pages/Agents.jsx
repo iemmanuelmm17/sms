@@ -233,7 +233,14 @@ function AgentAdmin() {
         <SetPasswordModal agent={pwTarget} onClose={() => setPwTarget(null)}
           onSaved={() => { setPwTarget(null); reload(); toastSuccess('Password updated — agent signed out everywhere'); }} />
       )}
-      {delTarget && (
+      {delTarget && (() => {
+        // No username (never given a login) → confirm against the full name,
+        // so the prompt is never blank and the delete is always possible.
+        const confirmWord = String(delTarget.username || '').trim()
+          || String(agentName(delTarget) || '').trim();
+        const typedOk = confirmWord === ''
+          || delName.trim().toLowerCase() === confirmWord.toLowerCase();
+        return (
         <Modal onClose={() => setDelTarget(null)}>
           <h2 className="text-lg font-bold text-red-600 mb-1">Delete {agentName(delTarget)}?</h2>
           <p className="text-xs text-slate-500 mb-3">Permanent. Their conversations are unassigned (not deleted); their pending scheduled messages are cancelled.</p>
@@ -245,20 +252,35 @@ function AgentAdmin() {
             </ul>
           )}
           <form onSubmit={doDelete} className="space-y-3">
-            <div><label className="text-xs font-medium text-slate-600">Type <strong>{delTarget.username}</strong> to confirm</label>
-              <input value={delName} onChange={(e) => setDelName(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mt-1" /></div>
+            {confirmWord ? (
+              <div>
+                <label className="text-xs font-medium text-slate-600">
+                  {delTarget.username
+                    ? <>Type this agent's login username <strong className="font-mono">{confirmWord}</strong> to confirm</>
+                    : <>This agent has no login — type their full name <strong>{confirmWord}</strong> to confirm</>}
+                </label>
+                <input value={delName} onChange={(e) => setDelName(e.target.value)} placeholder={confirmWord} autoComplete="off"
+                  className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mt-1" />
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  {delTarget.username ? 'Shown on their row as username@tenant.' : 'No username was ever set for this agent.'}
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-500">This agent has no username or name on file — your admin password alone confirms the delete.</p>
+            )}
             <div><label className="text-xs font-medium text-slate-600">Your admin password</label>
               <input type="password" value={delPw} onChange={(e) => setDelPw(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mt-1" /></div>
             <div className="flex gap-2 justify-end">
               <button type="button" onClick={() => setDelTarget(null)} className="text-sm px-4 py-2 rounded-lg border hover:bg-slate-50">Cancel</button>
-              <button disabled={delBusy || delName.trim().toLowerCase() !== (delTarget.username || '').toLowerCase()}
+              <button disabled={delBusy || !typedOk || !delPw.trim()}
                 className="text-sm bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white rounded-lg px-4 py-2 font-semibold">
                 {delBusy ? 'Deleting…' : 'Delete forever'}
               </button>
             </div>
           </form>
         </Modal>
-      )}
+        );
+      })()}
     </div>
   );
 }

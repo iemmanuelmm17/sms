@@ -37,6 +37,11 @@ class AutoReplyService
         $hay = $norm($text);
         $out = [];
         foreach ($rules as $rule) {
+            // Catch-all: answers ANY inbound message, no keywords involved.
+            if ($rule->isCatchAll()) {
+                $out[] = ['rule' => $rule, 'keyword' => '(any message)'];
+                continue;
+            }
             $keywords = array_values(array_filter(array_map(
                 fn($k) => $norm(trim((string) $k)),
                 (array) ($rule->keywords ?? [])
@@ -148,7 +153,7 @@ class AutoReplyService
                 return;
             }
             $rules = AutoReply::where('domain', $domain)->where('user', $user)
-                ->where('active', true)->orderBy('id')->get();
+                ->where('active', true)->orderBy('priority')->orderBy('id')->get();
             Log::info('AutoReply: rules loaded', ['count' => $rules->count()]);
             if ($rules->isEmpty()) return;
 
@@ -166,25 +171,36 @@ class AutoReplyService
             $agentNumsCache = [];
             $matches = array_values(array_filter($matches, function ($m) use ($inboundDigits, $mainDigits, &$agentNumsCache) {
                 $rule = $m['rule'];
+                // Compliance actions (STOP/START) always answer, whatever the scope.
                 if ($rule->is_default) return true;
-                $cb = (string) ($rule->created_by ?? '');
-                if (str_starts_with($cb, 'agent:')) {
-                    $aid = (int) substr($cb, 6);
-                    if (!array_key_exists($aid, $agentNumsCache)) {
-                        $nums = [];
-                        try { if ($ag = \App\Models\Agent::find($aid)) $nums = $ag->assignedNumbers(); } catch (\Throwable $e) {}
-                        $agentNumsCache[$aid] = $nums;
-                    }
-                    foreach ($agentNumsCache[$aid] as $n) {
-                        if ($n !== '' && $n === $inboundDigits && $n !== $mainDigits) return true;
-                    }
+
+                // Per-rule active window (days + local time range).
+                // Catch-all rules are 24/7 by design — a window never applies.
+                if (!$rule->isCatchAll() && !$rule->inSchedule()) {
+                    Log::info('AutoReply: skipped (outside active hours)', ['rule' => $rule->id]);
                     return false;
                 }
-                if ($mainDigits === '' || $inboundDigits === '') return true;
-                return $inboundDigits === $mainDigits;
+
+                // Per-rule numbers: null = pre-feature rule → old behaviour.
+                $scope = $rule->scopeNumbers();
+                if ($scope === null) return $this->legacyLineOk($rule, $inboundDigits, $mainDigits, $agentNumsCache);
+                if (in_array(AutoReply::ALL_NUMBERS, $scope, true)) return true;
+                if ($inboundDigits === '') return true; // event has no number → don't block
+                return in_array($inboundDigits, $scope, true);
             }));
             if (empty($matches)) return;
-            Log::info('AutoReply: matches', ['count' => count($matches)]);
+
+            // Priority: the top-ranked eligible rule wins — exactly ONE reply
+            // per inbound message. Everything below it stays silent for this
+            // message (paused rules and rules outside their window are already
+            // filtered out above, so the next eligible one simply moves up).
+            $skipped = array_slice($matches, 1);
+            $matches = [$matches[0]];
+            Log::info('AutoReply: matches', [
+                'count' => count($matches),
+                'winner' => $matches[0]['rule']->id,
+                'skipped' => array_map(fn($m) => $m['rule']->id, $skipped),
+            ]);
             if (empty($matches)) return;
 
             // Sender cooldown: suppress the reply, but the FIRST opt-out/in
@@ -285,6 +301,30 @@ class AutoReplyService
         } catch (\Throwable $e) {
             Log::warning('AutoReply failed: ' . $e->getMessage());
         }
+    }
+
+    /**
+     * Line scope for rules created before number assignment existed:
+     * agent rules fire on their creator's assigned numbers (never the main
+     * line); admin rules fire on the tenant main line only.
+     */
+    protected function legacyLineOk(AutoReply $rule, string $inboundDigits, string $mainDigits, array &$agentNumsCache): bool
+    {
+        $cb = (string) ($rule->created_by ?? '');
+        if (str_starts_with($cb, 'agent:')) {
+            $aid = (int) substr($cb, 6);
+            if (!array_key_exists($aid, $agentNumsCache)) {
+                $nums = [];
+                try { if ($ag = \App\Models\Agent::find($aid)) $nums = $ag->assignedNumbers(); } catch (\Throwable $e) {}
+                $agentNumsCache[$aid] = array_map(fn($n) => preg_replace('/\D/', '', (string) $n), (array) $nums);
+            }
+            foreach ($agentNumsCache[$aid] as $n) {
+                if ($n !== '' && $n === $inboundDigits && $n !== $mainDigits) return true;
+            }
+            return false;
+        }
+        if ($mainDigits === '' || $inboundDigits === '') return true;
+        return $inboundDigits === $mainDigits;
     }
 
     /** [domain, user] from a webhook event. */

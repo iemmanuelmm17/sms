@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { api } from '../api/client';
+import { api, getTimezone } from '../api/client';
 import { toastError } from '../lib/toast';
 import { CATS, catColor, catLabel, PRESETS, rangeFor, rangeDays, escCsv, saveFile } from '../lib/reporting';
 
@@ -166,7 +166,9 @@ export default function Reporting({
   const showTenant = !!tenantMap && (tenantId === null || tenantId === undefined);
 
   const baseParams = () => {
-    const p = { from: range.from, to: range.to };
+    // The browser's timezone: the backend turns "today" into day bounds in it,
+    // so a send made a few minutes ago lands inside the range.
+    const p = { from: range.from, to: range.to, tz: getTimezone() };
     if (filters.cats.length < CATS.length) p.categories = filters.cats.join(',');
     if (agentSel.length) p.agent_ids = agentSel.join(',');
     if (tenantId !== null && tenantId !== undefined) p.tenant_id = tenantId;

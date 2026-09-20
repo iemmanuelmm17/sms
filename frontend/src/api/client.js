@@ -14,6 +14,12 @@ const http = axios.create({ baseURL: BASE || '/', withCredentials: true });
 // Router). Until then, fall back to a hard redirect to /login.
 let unauthorizedHandler = null;
 export const setUnauthorizedHandler = (fn) => { unauthorizedHandler = fn; };
+
+// Day-0 password expiry: the server answers 409 + code=password_expired and
+// the session is still alive, so the app must swap in the forced-change
+// screen rather than logging the user out.
+let passwordExpiredHandler = null;
+export const setPasswordExpiredHandler = (fn) => { passwordExpiredHandler = fn; };
 http.interceptors.response.use(
   (r) => r,
   (err) => {
@@ -23,6 +29,11 @@ http.interceptors.response.use(
         sessionStorage.setItem('last-auth-redirect', String(Date.now()));
         if (unauthorizedHandler) { try { unauthorizedHandler(); } catch {} } else { window.location.replace('/login'); }
       }
+    }
+    if (err?.response?.status === 409 && err?.response?.data?.code === 'password_expired') {
+      const d = err.response.data;
+      try { sessionStorage.setItem('sms-password-expired', d?.password_expires_at || '1'); } catch {}
+      if (passwordExpiredHandler) { try { passwordExpiredHandler(d); } catch {} }
     }
     return Promise.reject(err);
   }
@@ -121,6 +132,10 @@ export const api = {
     if (DEMO_MODE) return { tenant: true, legacy_dynalink: false };
     return (await http.get('/api/auth/login-options')).data;
   },
+  async branding() {
+    if (DEMO_MODE) return { app_name: 'SMS Messaging', logo_url: null };
+    return (await http.get('/api/branding')).data;
+  },
 
   // ---- Superadmin portal ----
   async superLogin(username, password) {
@@ -190,6 +205,10 @@ export const api = {
   async superSettingsUpdate(payload) {
     if (DEMO_MODE) throw { response: { data: { message: 'Superadmin portal needs the backend (unavailable in demo).' } } };
     return (await http.put('/api/superadmin/settings', payload)).data;
+  },
+  async superBrandingUpdate(formData) {
+    if (DEMO_MODE) throw { response: { data: { message: 'Superadmin portal needs the backend (unavailable in demo).' } } };
+    return (await http.post('/api/superadmin/settings/branding', formData)).data;
   },
   async mailTestSend(to) {
     if (DEMO_MODE) throw { response: { data: { message: 'Superadmin portal needs the backend (unavailable in demo).' } } };
@@ -352,13 +371,49 @@ export const api = {
     if (DEMO_MODE) { await delay(150); const u = { ...(JSON.parse(localStorage.getItem('sms-demo-user') || '{}')), ...payload }; localStorage.setItem('sms-demo-user', JSON.stringify(u)); return u; }
     return (await http.patch('/api/agent/profile', payload)).data;
   },
-  async changeAgentPassword(current_password, new_password) {
+  async changeAgentPassword(current_password, new_password, confirm_password) {
     if (DEMO_MODE) { await delay(150); return { ok: true }; }
-    return (await http.post('/api/agent/password', { current_password, new_password })).data;
+    return (await http.post('/api/agent/password', { current_password, new_password, confirm_password })).data;
+  },
+  async changeTenantPassword(current_password, new_password, confirm_password) {
+    if (DEMO_MODE) { await delay(150); return { ok: true }; }
+    return (await http.post('/api/tenant/password', { current_password, new_password, confirm_password })).data;
+  },
+  // Forced change after a day-0 block. Returns { user } — the completed login.
+  async resetExpiredPassword(new_password, confirm_password) {
+    if (DEMO_MODE) throw new Error('Password expiry needs the backend (unavailable in demo).');
+    return (await http.post('/api/auth/expired-password', { new_password, confirm_password })).data;
+  },
+  async dismissPasswordExpiryNotice() {
+    if (DEMO_MODE) return { ok: true };
+    return (await http.post('/api/auth/password-expiry/dismiss')).data;
+  },
+  async passwordExpirySettings() {
+    if (DEMO_MODE) return { days: 30, min: 1, max: 365, default: 30, note: '' };
+    return (await http.get('/api/settings/password-expiry')).data;
+  },
+  async savePasswordExpiryDays(days) {
+    if (DEMO_MODE) return { ok: true, days };
+    return (await http.put('/api/settings/password-expiry', { days })).data;
   },
   async agentPing() {
     if (DEMO_MODE) return { ok: true };
     return (await http.post('/api/agent/ping')).data;
+  },
+  async updateOnboarding(payload) {
+    if (DEMO_MODE) {
+      await delay(100);
+      const u = JSON.parse(localStorage.getItem('sms-demo-user') || '{}');
+      const cur = u.onboarding || { done: false, dismissed: false, welcomed: false, tour_seen: false, steps: {} };
+      const steps = { ...(cur.steps || {}) };
+      if (payload.step) steps[payload.step] = new Date().toISOString();
+      const ob = { ...cur, steps };
+      for (const k of ['welcomed', 'tour_seen', 'dismissed']) if (payload[k] !== undefined) ob[k] = !!payload[k];
+      u.onboarding = ob;
+      localStorage.setItem('sms-demo-user', JSON.stringify(u));
+      return { onboarding: ob };
+    }
+    return (await http.put('/api/me/onboarding', payload)).data;
   },
 
   // ---- Numbers / sessions / messages ----
@@ -528,6 +583,15 @@ export const api = {
   async deleteContact(id) {
     if (DEMO_MODE) { await delay(150); demo.contacts = demo.contacts.filter((c) => cid(c) !== id); saveDemo(demo); return { ok: true }; }
     return (await http.delete(`/api/contacts/${encodeURIComponent(id)}`)).data;
+  },
+  // Two-way sync with the portal: portal wins, local-only rows get pushed up.
+  async resyncContacts() {
+    if (DEMO_MODE) { await delay(300); return { created: 0, updated: 0, removed: 0, pushed: 0, count: demo.contacts.length, last_synced_at: new Date().toISOString(), errors: [] }; }
+    return (await http.post('/api/contacts/resync')).data;
+  },
+  async contactSyncStatus() {
+    if (DEMO_MODE) return { count: demo.contacts.length, last_synced_at: null };
+    return (await http.get('/api/contacts/sync-status')).data;
   },
   contactsTemplateUrl() { return DEMO_MODE ? null : '/api/contacts/template'; },
   demoCsvTemplate() {
@@ -755,6 +819,10 @@ export const api = {
     }
     return (await http.put(`/api/scheduled/${id}`, payload)).data;
   },
+  async cancelScheduledSeries(id) {
+    if (DEMO_MODE) { await delay(80); return { ok: true, cancelled: 0 }; }
+    return (await http.post(`/api/scheduled/${encodeURIComponent(id)}/cancel-series`)).data;
+  },
   async cancelScheduled(id) {
     if (DEMO_MODE) { await delay(150); demo.scheduled = demo.scheduled.map((m) => (String(m.id) === String(id) ? { ...m, status: 'cancelled' } : m)); saveDemo(demo); return { ok: true }; }
     return (await http.post(`/api/scheduled/${id}/cancel`)).data;
@@ -799,6 +867,10 @@ export const api = {
   async saveCompanySettings(company_name, auto_reply_cooldown_minutes) {
     if (DEMO_MODE) { await delay(50); demo.companyName = company_name; if (auto_reply_cooldown_minutes !== undefined) demo.cooldown = auto_reply_cooldown_minutes; saveDemo(demo); return { company_name, auto_reply_cooldown_minutes: demo.cooldown ?? 5 }; }
     return (await http.put('/api/company-settings', { company_name, auto_reply_cooldown_minutes })).data;
+  },
+  async saveQuietHours(quietHours) {
+    if (DEMO_MODE) { await delay(50); demo.quietHours = quietHours; saveDemo(demo); return { quiet_hours: quietHours }; }
+    return (await http.put('/api/company-settings', { quiet_hours: quietHours })).data;
   },
   async saveNumberEmail(digits, notify, enabled) {
     if (DEMO_MODE) { await delay(50); demo.numberEmail = { ...(demo.numberEmail || {}), [digits]: { notify, enabled: enabled ?? demo.numberEmail?.[digits]?.enabled ?? true } }; saveDemo(demo); return { number_email: { [digits]: { notify } } }; }
@@ -851,6 +923,10 @@ export const api = {
   async updateAutoReply(id, payload) {
     if (DEMO_MODE) { await delay(); demo.autoReplies = (demo.autoReplies || []).map((r) => (String(r.id) === String(id) ? { ...r, ...payload } : r)); saveDemo(demo); return demo.autoReplies.find((r) => String(r.id) === String(id)); }
     return (await http.put(`/api/auto-replies/${id}`, payload)).data;
+  },
+  async reorderAutoReplies(ids) {
+    if (DEMO_MODE) { await delay(80); return { ok: true, ids }; }
+    return (await http.post('/api/auto-replies/reorder', { ids })).data;
   },
   async deleteAutoReply(id) {
     if (DEMO_MODE) { await delay(150); demo.autoReplies = (demo.autoReplies || []).filter((r) => String(r.id) !== String(id)); saveDemo(demo); return { ok: true }; }

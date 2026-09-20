@@ -115,6 +115,7 @@ class MessageSessionController extends Controller
 
         if ($status >= 200 && $status < 300) {
             DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', $id, ['session_id' => $id]);
+            \App\Services\OnboardingService::markAgentStep($s, 'first_send');
             $toDigits = preg_replace('/\D/', '', (string) ($check[0] ?? ''));
             SentMessageLog::record([
                 'tenant_id' => SentMessageLog::scopeTenant($s),

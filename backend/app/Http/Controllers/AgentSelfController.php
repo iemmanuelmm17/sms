@@ -6,11 +6,13 @@ use App\Events\DataChanged;
 use App\Http\Controllers\Concerns\ResolvesActor;
 use App\Models\Agent;
 use App\Models\AuditLog;
+use App\Models\PasswordHistory;
+use App\Rules\PasswordPolicy;
+use App\Services\PasswordPolicyService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Validation\Rule;
 
-/** The logged-in agent's own profile: color (fixed palette) + password + ping. */
+/** The logged-in agent's own profile: color (presets + custom hex) + password + ping. */
 class AgentSelfController extends Controller
 {
     use ResolvesActor;
@@ -34,9 +36,10 @@ class AgentSelfController extends Controller
     public function update(Request $request)
     {
         $agent = $this->self($request);
-        $data = $request->validate(['tag_color' => ['required', Rule::in(self::PALETTE)]]);
+        $data = $request->validate(['tag_color' => ['required', 'regex:/^#[0-9a-fA-F]{6}$/']]);
         $agent->update($data);
         DataChanged::send($agent->domain, $agent->user, 'agents', 'saved', $agent->id);
+        \App\Services\OnboardingService::mark($agent, 'tag');
         return response()->json($agent->fresh());
     }
 
@@ -46,20 +49,28 @@ class AgentSelfController extends Controller
         $agent = $this->self($request);
         $data = $request->validate([
             'current_password' => 'required|string',
-            'new_password'     => 'required|string|min:8|max:200',
+            'new_password'     => ['required', 'string', new PasswordPolicy()],
+            'confirm_password' => 'required|string',
         ]);
+        if ($data['new_password'] !== $data['confirm_password']) {
+            return response()->json(['message' => 'Passwords do not match.'], 422);
+        }
         if (!$agent->password_hash || !Hash::check($data['current_password'], $agent->password_hash)) {
             return response()->json(['message' => 'Current password is incorrect.'], 403);
         }
-        $agent->update([
-            'password_hash' => Hash::make($data['new_password']),
-            'session_version' => $agent->session_version + 1,
-        ]);
+        if ($err = PasswordPolicyService::reuseError($agent, PasswordHistory::TYPE_AGENT, $data['new_password'])) {
+            return response()->json(['message' => $err], 422);
+        }
+        PasswordPolicyService::change($agent, PasswordHistory::TYPE_AGENT, $data['new_password'],
+            PasswordPolicyService::T_VOLUNTARY, [
+                'domain'     => $agent->domain,
+                'actor_type' => 'agent',
+                'actor_id'   => $agent->id,
+                'actor_name' => trim($agent->first_name . ' ' . $agent->last_name),
+                'ip'         => $request->ip(),
+            ]);
         // Stay logged in HERE; every other session drops on next request.
         $request->session()->put('agent.v', $agent->session_version);
-        AuditLog::record($agent->domain, 'agent', $agent->id,
-            trim($agent->first_name . ' ' . $agent->last_name),
-            'agent.password-changed', [], $request->ip());
         return response()->json(['ok' => true]);
     }
 

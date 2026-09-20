@@ -6,6 +6,9 @@ use App\Events\DataChanged;
 use App\Http\Controllers\Concerns\ResolvesActor;
 use App\Models\Agent;
 use App\Models\AuditLog;
+use App\Models\PasswordHistory;
+use App\Rules\PasswordPolicy;
+use App\Services\PasswordPolicyService;
 use App\Models\ConversationMeta;
 use App\Models\PasswordResetRequest;
 use App\Models\ScheduledMessage;
@@ -42,30 +45,34 @@ class AgentController extends Controller
     public function directory(Request $request)
     {
         $actor = $this->actor($request);
-        return response()->json(
-            Agent::where('domain', $actor['domain'])->where('user', $actor['user'])
+        $list = \Illuminate\Support\Facades\Cache::remember(Agent::listKey($actor['domain'], $actor['user']) . ':dir', 120, function () use ($actor) {
+            return Agent::where('domain', $actor['domain'])->where('user', $actor['user'])
                 ->where('status', 'active')->orderBy('first_name')->orderBy('last_name')->get()
                 ->map(fn($a) => ['id' => $a->id, 'first_name' => $a->first_name,
                     'last_name' => $a->last_name, 'tag_color' => $a->tag_color,
-                    'numbers' => $a->assignedNumbers()])
-        );
+                    'numbers' => $a->assignedNumbers()])->values()->toArray();
+        });
+        return response()->json($list);
     }
 
     public function index(Request $request)
     {
         [$domain, $user] = $this->adminScope($request);
-        $list = Agent::where('domain', $domain)->where('user', $user)
-            ->orderBy('first_name')->orderBy('last_name')->get()->toArray();
-        // Admin roster rows (display-only; created with the tenant, can't be edited/deleted).
-        try {
-            $tenant = \App\Models\Tenant::where('domain', $domain)->where('dynalink_user', $user)->first();
-            $admins = $tenant ? \App\Models\TenantAdmin::where('tenant_id', $tenant->id)->orderBy('username')->get() : collect();
-            foreach ($admins as $ad) {
-                $list[] = ['id' => 'admin-' . $ad->id, 'is_admin' => true,
-                    'username' => $ad->username, 'first_name' => $ad->first_name, 'last_name' => $ad->last_name,
-                    'domain' => $domain, 'status' => $ad->status ?? 'active', 'tag_color' => '#334155'];
-            }
-        } catch (\Throwable $e) {}
+        $list = \Illuminate\Support\Facades\Cache::remember(Agent::listKey($domain, $user), 120, function () use ($domain, $user) {
+            $list = Agent::where('domain', $domain)->where('user', $user)
+                ->orderBy('first_name')->orderBy('last_name')->get()->toArray();
+            // Admin roster rows (display-only; created with the tenant, can't be edited/deleted).
+            try {
+                $tenant = \App\Models\Tenant::where('domain', $domain)->where('dynalink_user', $user)->first();
+                $admins = $tenant ? \App\Models\TenantAdmin::where('tenant_id', $tenant->id)->orderBy('username')->get() : collect();
+                foreach ($admins as $ad) {
+                    $list[] = ['id' => 'admin-' . $ad->id, 'is_admin' => true,
+                        'username' => $ad->username, 'first_name' => $ad->first_name, 'last_name' => $ad->last_name,
+                        'domain' => $domain, 'status' => $ad->status ?? 'active', 'tag_color' => '#334155'];
+                }
+            } catch (\Throwable $e) {}
+            return $list;
+        });
         return response()->json($list);
     }
 
@@ -111,8 +118,22 @@ class AgentController extends Controller
             'allowed_numbers' => $allowed,
             'status' => 'active',
         ]);
+        // A brand-new account's first password starts its expiry cycle too,
+        // otherwise it would sit at NULL and never expire.
+        PasswordPolicyService::startCycle($agent, PasswordHistory::TYPE_AGENT,
+            PasswordPolicyService::T_ADMIN, [
+                'domain'     => $domain,
+                'actor_type' => 'admin',
+                'actor_id'   => null,
+                'actor_name' => $user . '@' . $domain,
+                'ip'         => $request->ip(),
+                'detail'     => ['on_create' => true],
+            ]);
         AuditLog::record($domain, 'admin', null, $user . '@' . $domain,
             'agent.created', ['agent_id' => $agent->id, 'username' => $username], $request->ip());
+        $obT = $request->session()->get('tenant'); // acting tenant admin earns agent_created
+        \App\Services\OnboardingService::markAdminStep(['tenant_admin_id' => $obT['id'] ?? null], 'agent_created');
+        Agent::bustList($domain, $user);
         DataChanged::send($domain, $user, 'agents', 'saved', $agent->id);
         return response()->json($agent->fresh(), 201);
     }
@@ -179,6 +200,7 @@ class AgentController extends Controller
         AuditLog::record($domain, 'admin', null, $user . '@' . $domain,
             'agent.updated', ['agent_id' => $agent->id, 'keys' => array_keys($data)]
                 + ($numChg === [] ? [] : ['number_changes' => $numChg]), $request->ip());
+        Agent::bustList($domain, $user);
         DataChanged::send($domain, $user, 'agents', 'saved', $agent->id);
         return response()->json($agent->fresh());
     }
@@ -192,19 +214,26 @@ class AgentController extends Controller
         [$domain, $user] = $this->owned($request, $agent);
         $data = $request->validate([
             'admin_password' => 'required|string',
-            'new_password'   => 'required|string|min:8|max:200',
+            'new_password'   => ['required', 'string', new PasswordPolicy()],
         ]);
         try {
             $this->dynalink->login($user . '@' . $domain, $data['admin_password']);
         } catch (\Throwable $e) {
             return response()->json(['message' => 'Incorrect admin password.'], 403);
         }
-        $agent->update([
-            'password_hash' => Hash::make($data['new_password']),
-            'session_version' => $agent->session_version + 1,
-        ]);
-        AuditLog::record($domain, 'admin', null, $user . '@' . $domain,
-            'agent.password-forced', ['agent_id' => $agent->id], $request->ip());
+        if ($err = PasswordPolicyService::reuseError($agent, PasswordHistory::TYPE_AGENT, $data['new_password'])) {
+            return response()->json(['message' => $err], 422);
+        }
+        PasswordPolicyService::change($agent, PasswordHistory::TYPE_AGENT, $data['new_password'],
+            PasswordPolicyService::T_ADMIN, [
+                'domain'     => $domain,
+                'actor_type' => 'admin',
+                'actor_id'   => null,
+                'actor_name' => $user . '@' . $domain,
+                'ip'         => $request->ip(),
+                'detail'     => ['agent_id' => $agent->id],
+            ]);
+        Agent::bustList($domain, $user);
         DataChanged::send($domain, $user, 'agents', 'saved', $agent->id);
         return response()->json(['ok' => true]);
     }
@@ -238,8 +267,14 @@ class AgentController extends Controller
             'confirm_username' => 'required|string',
             'admin_password' => 'required|string',
         ]);
-        if (mb_strtolower(trim($data['confirm_username'])) !== mb_strtolower($agent->username)) {
-            return response()->json(['message' => 'Typed username does not match this agent.'], 422);
+        // Agents created without a login have no username — there is nothing to
+        // type, so the confirmation falls back to their full name.
+        $expected = trim((string) $agent->username);
+        if ($expected === '') $expected = trim((string) $agent->first_name . ' ' . (string) $agent->last_name);
+        if ($expected !== '' && mb_strtolower(trim($data['confirm_username'])) !== mb_strtolower($expected)) {
+            return response()->json(['message' => (string) $agent->username !== ''
+                ? 'Typed username does not match this agent.'
+                : "This agent has no login — type their full name ({$expected}) to confirm."], 422);
         }
         if (!$this->verifyAdminPassword($request, $data['admin_password'])) {
             return response()->json(['message' => 'Incorrect admin password.'], 403);
@@ -255,6 +290,7 @@ class AgentController extends Controller
         });
         AuditLog::record($domain, 'admin', null, $user . '@' . $domain,
             'agent.deleted', ['agent_id' => $agent->id, 'username' => $agent->username] + $counts, $request->ip());
+        Agent::bustList($domain, $user);
         DataChanged::send($domain, $user, 'agents', 'deleted', $agent->id);
         return response()->json(['ok' => true, 'counts' => $counts]);
     }

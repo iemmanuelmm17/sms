@@ -17,6 +17,8 @@ class SentMessageLog extends Model
     public const NEW_SMS = 'new_sms';
     public const REGULAR_REPLY = 'regular_reply';
     public const MASS_SMS = 'mass_sms';
+    /** Bumped on every recorded send so cached reports refresh immediately. */
+    public const REPORT_EPOCH_KEY = 'report:epoch';
     public const AUTO_REPLY = 'auto_reply';
     public const EMAIL_SMS = 'email_sms';
     public const CATEGORIES = [self::NEW_SMS, self::REGULAR_REPLY, self::MASS_SMS, self::AUTO_REPLY, self::EMAIL_SMS];
@@ -37,8 +39,22 @@ class SentMessageLog extends Model
     {
         try {
             static::create($attrs + ['sent_at' => now()]);
+            static::bumpReportEpoch();
         } catch (\Throwable $e) {
             Log::warning('Send log write failed: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Invalidate cached reports. Without this, a send that just happened stayed
+     * invisible for up to CACHE_TTL (5 min) — including ASAP/send-now blasts.
+     */
+    public static function bumpReportEpoch(): void
+    {
+        try {
+            Cache::forever(self::REPORT_EPOCH_KEY, (int) Cache::get(self::REPORT_EPOCH_KEY, 0) + 1);
+        } catch (\Throwable $e) {
+            // Nothing else to do — the cache TTL expires stale entries anyway.
         }
     }
 

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\HasPasswordExpiry;
 use Illuminate\Database\Eloquent\Model;
 use Laravel\Sanctum\HasApiTokens;
 
@@ -13,15 +14,27 @@ use Laravel\Sanctum\HasApiTokens;
 class TenantAdmin extends Model
 {
     use HasApiTokens;
+    use HasPasswordExpiry;
 
     protected $fillable = ['tenant_id', 'username', 'first_name', 'last_name',
         'password_hash', 'secret_question', 'secret_answer_hash',
-        'status', 'session_version', 'last_seen_at'];
+        'status', 'session_version', 'last_seen_at', 'onboarding',
+        'password_last_changed_at', 'password_expires_at',
+        'password_expiry_notice_dismissed_for', 'password_expiry_days_applied'];
 
     /** Credentials are write-only: never serialized to any API response. */
     protected $hidden = ['password_hash', 'secret_answer_hash'];
 
-    protected $casts = ['last_seen_at' => 'datetime'];
+    protected $casts = ['last_seen_at' => 'datetime', 'onboarding' => 'array',
+        'password_last_changed_at' => 'datetime', 'password_expires_at' => 'datetime',
+        'password_expiry_notice_dismissed_for' => 'datetime',
+        'password_expiry_days_applied' => 'integer'];
+
+    /** Password-history bucket for PasswordPolicyService. */
+    public function passwordUserType(): string
+    {
+        return PasswordHistory::TYPE_ADMIN;
+    }
 
     public function tenant()
     {

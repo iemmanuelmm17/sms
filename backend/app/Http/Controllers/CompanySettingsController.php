@@ -48,6 +48,10 @@ class CompanySettingsController extends Controller
             'number_email.*.enabled' => 'sometimes|boolean',
             'number_shared' => 'sometimes|array',
             'number_shared.*' => 'boolean',
+            'quiet_hours' => 'sometimes|array',
+            'quiet_hours.enabled' => 'sometimes|boolean',
+            'quiet_hours.start' => 'sometimes|nullable|string|regex:/^\d{1,2}:\d{2}$/',
+            'quiet_hours.end' => 'sometimes|nullable|string|regex:/^\d{1,2}:\d{2}$/',
         ]);
         // Preserve the existing name when only the cooldown is sent.
         $prev = $this->settings->get($s['domain']);
@@ -74,6 +78,16 @@ class CompanySettingsController extends Controller
                 $this->settings->setNumberShared($s['domain'], $d, (bool) $v);
             }
             $saved = $this->settings->get($s['domain']);
+        }
+        if (array_key_exists('quiet_hours', $data) && is_array($data['quiet_hours'])) {
+            $q = $data['quiet_hours'];
+            $p = is_array($prev['quiet_hours'] ?? null) ? $prev['quiet_hours'] : [];
+            $this->settings->setQuietHours($s['domain'],
+                array_key_exists('enabled', $q) ? (bool) $q['enabled'] : (bool) ($p['enabled'] ?? true),
+                (string) ($q['start'] ?? $p['start'] ?? '21:00'),
+                (string) ($q['end'] ?? $p['end'] ?? '08:00'));
+            $saved = $this->settings->get($s['domain']);
+            $this->audit($request, 'company-settings.updated', ['quiet_hours' => $saved['quiet_hours'] ?? null]);
         }
         if (array_key_exists('company_name', $data) && (string) $data['company_name'] !== (string) ($prev['company_name'] ?? '')) {
             $this->audit($request, 'company-settings.updated', ['company_name' => $saved['company_name'] ?? '']);

@@ -2,6 +2,8 @@
 
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\BrandingController;
+use App\Http\Controllers\OnboardingController;
 use App\Http\Controllers\MessageSessionController;
 use App\Http\Controllers\MessageController;
 use App\Http\Controllers\ContactController;
@@ -31,6 +33,8 @@ use App\Http\Controllers\ApiTokenController;
 use App\Http\Controllers\TenantWebhookController;
 use App\Http\Controllers\PushSubscriptionController;
 use App\Http\Controllers\LockoutController;
+use App\Http\Controllers\TenantSelfController;
+use App\Http\Controllers\TenantSettingsController;
 
 /*
  | API routes — session auth via `web` middleware group
@@ -43,10 +47,13 @@ Route::post('/login', [AuthController::class, 'login']);
 Route::get('/auth/login-options', [AuthController::class, 'loginOptions']);
 Route::post('/tenant/login', [AuthController::class, 'tenantLogin']);
 Route::post('/webhooks/dynalink', [WebhookController::class, 'dynalink']); // server-to-server
+Route::get('/branding', [BrandingController::class, 'show']);
+Route::get('/branding/logo', [BrandingController::class, 'logo']);
 
 // Authenticated (dynalink session must exist)
 Route::post('/logout', [AuthController::class, 'logout']);
 Route::get('/me', [AuthController::class, 'me']);
+Route::put('/me/onboarding', [OnboardingController::class, 'update']);
 Route::post('/refresh', [AuthController::class, 'refresh']);
 Route::post('/auth/verify-password', [AuthController::class, 'verifyPassword'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':10,1');
 
@@ -80,6 +87,7 @@ Route::prefix('superadmin')->middleware([\App\Http\Middleware\EnsureSuperAdminIp
     Route::post('/tenants/{tenant}/admins/{admin}/password', [SuperAdminController::class, 'adminsPassword']);
     Route::get('/settings', [SuperAdminController::class, 'settingsShow']);
     Route::put('/settings', [SuperAdminController::class, 'settingsUpdate']);
+    Route::post('/settings/branding', [SuperAdminController::class, 'brandingUpdate']);
     Route::post('/settings/mail-test', [SuperAdminController::class, 'mailTest'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':10,1');
     Route::get('/audit-logs', [SuperAdminController::class, 'auditIndex']);
     Route::get('/audit-logs/actions', [SuperAdminController::class, 'auditActions']);
@@ -105,6 +113,20 @@ Route::patch('/agent/profile', [AgentSelfController::class, 'update']);
 Route::post('/agent/password', [AgentSelfController::class, 'password']);
 Route::post('/agent/ping', [AgentSelfController::class, 'ping']);
 Route::post('/agents/{agent}/password', [AgentController::class, 'setPassword']);
+
+// ---- Password expiry -----------------------------------------------------
+// Forced change after a day-0 login block. Unauthenticated by design: the
+// short-lived `password_reset_required` session flag (written by the login
+// attempt that just verified the password) is what authorises it.
+Route::post('/auth/expired-password', [AuthController::class, 'expiredPassword'])
+    ->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':20,1');
+// "Don't notify again" for the current expiry cycle.
+Route::post('/auth/password-expiry/dismiss', [AuthController::class, 'dismissExpiryNotice']);
+// Voluntary change for a tenant admin (agents use /agent/password).
+Route::post('/tenant/password', [TenantSelfController::class, 'password']);
+// Per-tenant expiry window, Admin-only (affects future password changes only).
+Route::get('/settings/password-expiry', [TenantSettingsController::class, 'show']);
+Route::put('/settings/password-expiry', [TenantSettingsController::class, 'update']);
 
 Route::get('/sms-numbers', [SmsNumberController::class, 'index']);
 Route::get('/subscriptions', [SubscriptionController::class, 'index']);
@@ -134,6 +156,10 @@ Route::post('/sessions/{id}/unread', [MessageSessionController::class, 'unread']
 Route::post('/messages', [MessageController::class, 'store'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':30,1');
 Route::post('/messages/bulk', [MessageController::class, 'bulk'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':5,1'); // single call, array destination
 
+// Registered before the resource so /contacts/resync and /contacts/sync-status
+// are not swallowed by GET /contacts/{contact}.
+Route::get('/contacts/sync-status', [ContactController::class, 'status']);
+Route::post('/contacts/resync', [ContactController::class, 'resync']);
 Route::get('/contacts/template', [ContactController::class, 'template']);
 Route::post('/contacts/import', [ContactController::class, 'import'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':3,1');
 Route::apiResource('/contacts', ContactController::class)->except(['create', 'edit']);
@@ -169,12 +195,14 @@ Route::post('/auto-replies/{autoReply}/reset', [AutoReplyController::class, 'res
 Route::post('/scheduled/{scheduled}/cancel', [ScheduledMessageController::class, 'cancel']);
 Route::post('/scheduled/{scheduled}/retry', [ScheduledMessageController::class, 'retry'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':10,1');
 Route::post('/scheduled/{scheduled}/send-now', [ScheduledMessageController::class, 'sendNow'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':10,1');
+Route::post('/scheduled/{scheduled}/cancel-series', [ScheduledMessageController::class, 'cancelSeries']);
 Route::get('/ops/health', [ScheduledMessageController::class, 'opsHealth']);
 Route::apiResource('/scheduled', ScheduledMessageController::class)->except(['create', 'edit'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':60,1');
 
 Route::get('/auto-reply-logs', [AutoReplyController::class, 'logs']);
 Route::get('/webhook-events', [AutoReplyController::class, 'events']);
 Route::post('/auto-replies/test', [AutoReplyController::class, 'test']);
+Route::post('/auto-replies/reorder', [AutoReplyController::class, 'reorder']);
 Route::post('/auto-replies/{autoReply}/fire', [AutoReplyController::class, 'fire']);
 // NOTE: explicit parameter name — Laravel would singularize to {auto_reply},
 // which would NOT bind to the $autoReply arguments (update/delete/show/fire).

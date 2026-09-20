@@ -15,12 +15,12 @@ use Illuminate\Support\Facades\Cache;
 class Tenant extends Model
 {
     protected $fillable = ['name', 'domain', 'dynalink_user', 'dynalink_pass',
-        'main_number', 'company_name', 'status'];
+        'main_number', 'company_name', 'status', 'password_expiry_days'];
 
     /** The Dynalink password is never serialized to any API response. */
     protected $hidden = ['dynalink_pass'];
 
-    protected $casts = ['dynalink_pass' => 'encrypted'];
+    protected $casts = ['dynalink_pass' => 'encrypted', 'password_expiry_days' => 'integer'];
 
     public function admins()
     {

@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useBrand } from '../context/BrandContext';
+import BrandMark from '../components/BrandMark';
 import { api } from '../api/client';
+import ForcedPasswordChange from '../components/ForcedPasswordChange';
 
 const fmtCountdown = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
@@ -14,7 +17,9 @@ export default function Login() {
   const [lockSecs, setLockSecs] = useState(0);
   const [legacyOn, setLegacyOn] = useState(false);
   const [legacyMode, setLegacyMode] = useState(false);
-  const { login } = useAuth();
+  const [forced, setForced] = useState(null); // credentials OK, password lapsed
+  const { login, setUser } = useAuth();
+  const { appName } = useBrand();
   const nav = useNavigate();
   const reason = useLocation().state?.reason;
   const demo = api.isDemo;
@@ -47,18 +52,36 @@ export default function Login() {
         const secs = ex?.response?.data?.retry_after_secs || 300;
         setLockSecs(secs);
         setErr(`Too many failed attempts — locked for ${fmtCountdown(secs)}.`);
+      } else if (status === 409 && ex?.response?.data?.code === 'password_expired') {
+        // Credentials were correct — the password just lapsed. Identity is
+        // already proven, so go straight to the forced-change screen.
+        setErr('');
+        setForced({ expiresAt: ex?.response?.data?.password_expires_at || '' });
       } else {
         setErr(ex?.response?.data?.message || 'Incorrect username and Password');
       }
     } finally { setBusy(false); }
   };
 
+  if (forced) {
+    return (
+      <ForcedPasswordChange
+        expiresAt={forced.expiresAt}
+        onDone={(fresh) => {
+          setForced(null);
+          if (fresh) setUser(fresh);
+          nav('/app/messages');
+        }}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-900 px-4">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-8">
-        <div className="w-12 h-12 rounded-xl bg-brand-600 text-white flex items-center justify-center text-2xl font-bold mb-4">S</div>
+        <BrandMark glyph="S" />
         <h1 className="text-2xl font-bold text-slate-900">Sign in</h1>
-        <p className="text-sm text-slate-500 mb-4">SMS / MMS Messaging Console</p>
+        <p className="text-sm text-slate-500 mb-4">{appName}</p>
         <div className="flex gap-1 bg-slate-100 rounded-lg p-1 mb-5 text-sm font-medium">
           <button onClick={() => switchTab('admin')}
             className={`flex-1 rounded-md px-3 py-1.5 ${tab === 'admin' ? 'bg-white shadow text-slate-900' : 'text-slate-500'}`}>

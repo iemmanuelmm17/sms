@@ -42,7 +42,7 @@ class GroupController extends Controller
         $out = [];
         foreach (Storage::files($dir) as $file) {
             if (pathinfo($file, PATHINFO_EXTENSION) !== 'json') continue;
-            $data = json_decode(Storage::get($file), true);
+            $data = \App\Services\JsonFileStore::read($file);
             if ($data) $out[] = $data;
         }
         usort($out, fn($a, $b) => strcmp($a['name'] ?? '', $b['name'] ?? ''));
@@ -79,7 +79,7 @@ class GroupController extends Controller
             'created_by' => $user, 'created_by_name' => $this->actor($request)['display_name'],
             'updated_by' => $user, 'updated_by_name' => $this->actor($request)['display_name'],
         ];
-        Storage::put($this->dir($domain) . "/{$group['id']}.json", json_encode($group, JSON_PRETTY_PRINT));
+        \App\Services\JsonFileStore::put($this->dir($domain) . "/{$group['id']}.json", $group);
         DataChanged::send($domain, $user, 'groups', 'saved', $group['id']);
         return response()->json($group, 201);
     }
@@ -103,9 +103,13 @@ class GroupController extends Controller
             'members'     => 'sometimes|array|min:1',
         ]);
         if (array_key_exists('company_id', $data)) $this->assertCompanyExists($domain, $data['company_id']);
-        $group = array_merge($group, $data, ['updated_at' => now()->toISOString(),
-            'updated_by' => $user, 'updated_by_name' => $this->actor($request)['display_name']]);
-        Storage::put($this->dir($domain) . "/{$id}.json", json_encode($group, JSON_PRETTY_PRINT));
+        $byName = $this->actor($request)['display_name'];
+        $file = $this->dir($domain) . "/{$id}.json";
+        $group = \App\Services\JsonFileStore::mutate($file, function ($fresh) use ($data, $user, $byName) {
+            return array_merge(is_array($fresh) ? $fresh : [], $data, ['updated_at' => now()->toISOString(),
+                'updated_by' => $user, 'updated_by_name' => $byName]);
+        }, true);
+        abort_unless($group !== null, 404, 'Group not found');
         DataChanged::send($domain, $user, 'groups', 'saved', $id);
         return response()->json($group);
     }
@@ -117,7 +121,7 @@ class GroupController extends Controller
         $domain = $this->domain($request);
         $user = $this->actor($request)['user'];
         $this->assertUuid($id); // traversal defense: destroy skips load()
-        Storage::delete($this->dir($domain) . "/{$id}.json");
+        \App\Services\JsonFileStore::delete($this->dir($domain) . "/{$id}.json");
         DataChanged::send($domain, $user, 'groups', 'deleted', $id);
         return response()->json(['ok' => true]);
     }
@@ -126,8 +130,9 @@ class GroupController extends Controller
     {
         $this->assertUuid($id); // traversal defense: {id} reaches the filesystem
         $file = $this->dir($domain) . "/{$id}.json";
-        abort_unless(Storage::exists($file), 404, 'Group not found');
-        return json_decode(Storage::get($file), true);
+        $data = \App\Services\JsonFileStore::read($file);
+        abort_unless(is_array($data) && $data !== [], 404, 'Group not found');
+        return $data;
     }
 
     /** Groups may stand alone, but a linked company_id must exist. */

@@ -45,6 +45,8 @@ class PushSubscriptionController extends Controller
                 'endpoint' => $data['endpoint'],
                 'p256dh' => $data['keys']['p256dh'], 'auth' => $data['keys']['auth']]
         );
+        \App\Services\OnboardingService::markAgentStep(['role' => 'agent', 'agent_id' => $agentId], 'push');
+        \App\Services\OnboardingService::markAdminStep(['tenant_admin_id' => $adminId], 'push');
         return response()->json(['ok' => true]);
     }
 

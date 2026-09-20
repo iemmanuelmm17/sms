@@ -806,8 +806,8 @@ export default function Integration() {
           ))}
         </div>
       )}
-      {!loading && <ApiTokensSection />}
-      {!loading && <WebhooksSection />}
+      {/* API tokens + outbound webhooks are hidden by request — the components
+          below are untouched, so re-enabling is a one-line change. */}
       {!loading && (
         <p className="text-[11px] text-slate-400 mt-3">More integrations will appear here as options.</p>
       )}

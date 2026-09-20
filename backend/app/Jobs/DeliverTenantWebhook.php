@@ -42,9 +42,12 @@ class DeliverTenantWebhook implements ShouldQueue
         $sig = 'sha256=' . hash_hmac('sha256', $body, (string) $hook->secret);
         $code = null;
         try {
-            $code = Http::timeout(10)
-                ->withHeaders(['X-Webhook-Event' => $this->event, 'X-Webhook-Signature' => $sig])
-                ->withBody($body, 'application/json')->post($hook->url)->status();
+            $code = $this->postValidated($hook->url,
+                ['X-Webhook-Event' => $this->event, 'X-Webhook-Signature' => $sig], $body);
+        } catch (\InvalidArgumentException $e) {
+            // SSRF-guard rejection (or redirect loop): fail fast, no retries.
+            $this->recordFailure($hook, $e->getMessage(), 1);
+            return;
         } catch (\Throwable $e) {
             $code = null;
         }
@@ -62,12 +65,38 @@ class DeliverTenantWebhook implements ShouldQueue
     {
         $hook = TenantWebhook::find($this->hookId);
         if (!$hook) return;
+        $this->recordFailure($hook, $e->getMessage());
+    }
+
+    protected function recordFailure(TenantWebhook $hook, string $message, ?int $attempts = null): void
+    {
         $fc = (int) $hook->failure_count + 1;
-        $hook->update(['failure_count' => $fc, 'last_error' => mb_substr($e->getMessage(), 0, 500),
+        $hook->update(['failure_count' => $fc, 'last_error' => mb_substr($message, 0, 500),
             'status' => (!$this->test && $fc >= 20) ? 'disabled' : $hook->status]);
         WebhookDelivery::create(['tenant_webhook_id' => $hook->id, 'event' => $this->event,
-            'payload' => $this->data, 'error' => mb_substr($e->getMessage(), 0, 500), 'attempt' => $this->tries]);
+            'payload' => $this->data, 'error' => mb_substr($message, 0, 500), 'attempt' => $attempts ?? $this->tries]);
         $this->prune($hook->id);
+    }
+
+    /** POST with per-hop SSRF validation; follows up to 3 redirects. */
+    protected function postValidated(string $url, array $headers, string $body): ?int
+    {
+        $current = $url;
+        for ($hop = 0; $hop <= 3; $hop++) {
+            \App\Services\WebhookUrlGuard::assertPublicUrl($current);
+            try {
+                $res = Http::timeout(10)->withHeaders($headers)->withBody($body, 'application/json')
+                    ->withoutRedirecting()->post($current);
+            } catch (\Throwable $e) {
+                return null;
+            }
+            $code = $res->status();
+            if (!in_array($code, [301, 302, 303, 307, 308], true)) return $code;
+            $loc = trim((string) $res->header('Location'));
+            if ($loc === '') return $code;
+            $current = \App\Services\WebhookUrlGuard::resolveRedirect($current, $loc);
+        }
+        throw new \InvalidArgumentException('too many redirects');
     }
 
     protected function prune(int $hookId): void

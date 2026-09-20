@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef } from 'react';
-import { api, contactName, initials, avatarColor, fmtPhone, primaryPhone, contactId, hasSmsNumber } from '../api/client';
+import { api, contactName, initials, avatarColor, fmtPhone, fmtDateTime, primaryPhone, contactId, hasSmsNumber } from '../api/client';
 import ContactForm, { EMPTY_CONTACT } from '../components/ContactForm';
 import { toastError, toastSuccess } from '../lib/toast';
+import { contactMatches } from './Scheduler';
 import { useSocket } from '../context/SocketContext';
 import { useAuth } from '../context/AuthContext';
 
@@ -17,11 +18,31 @@ export default function Contacts() {
   const [activeId, setActiveId] = useState(null);
   const [editing, setEditing] = useState(null); // null | {} for new | contact for edit
   const [importRes, setImportRes] = useState(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncInfo, setSyncInfo] = useState(null);
   const [companies, setCompanies] = useState([]);
   const fileRef = useRef(null);
   const { lastSync } = useSocket();
 
-  const reload = () => api.contacts().then(setList).catch((e) => toastError('Failed to load: ' + e.message));
+  const reload = () => {
+    api.contacts().then(setList).catch((e) => toastError('Failed to load: ' + e.message));
+    api.contactSyncStatus().then(setSyncInfo).catch(() => {});
+  };
+  // Manual two-way sync with the Dynalink portal (admin only):
+  // portal edits come in, contacts added here get pushed up.
+  const resync = async () => {
+    setSyncing(true);
+    try {
+      const r = await api.resyncContacts();
+      setSyncInfo({ count: r.count, last_synced_at: r.last_synced_at });
+      reload();
+      const pushed = r.pushed ? `, ${r.pushed} pushed to portal` : '';
+      const removed = r.removed ? `, ${r.removed} removed` : '';
+      const failed = r.errors?.length ? ` (${r.errors.length} warning(s))` : '';
+      toastSuccess(`Synced — ${r.created || 0} added, ${r.updated || 0} updated${pushed}${removed}${failed}`);
+    } catch (e) { toastError(e?.response?.data?.message || 'Resync failed.'); }
+    finally { setSyncing(false); }
+  };
   useEffect(() => {
     reload();
     api.companies().then(setCompanies).catch(() => {});
@@ -43,8 +64,10 @@ export default function Contacts() {
   const hiddenCount = list.filter((c) => !hasSmsNumber(c)).length;
   const filtered = list.filter((c) => {
     if (!showExtensions && !hasSmsNumber(c)) return false;
-    return !q.trim() || `${contactName(c)} ${c.company || ''} ${c.email || ''}`.toLowerCase().includes(q.toLowerCase());
+    return contactMatches(c, q);
   });
+  const [listLimit, setListLimit] = useState(100);
+  const shownContacts = filtered.length > listLimit ? filtered.slice(0, listLimit) : filtered;
   const active = list.find((c) => selKey(c) === activeId);
 
   const downloadTemplate = () => {
@@ -73,6 +96,22 @@ export default function Contacts() {
             <button onClick={() => fileRef.current?.click()} title="Upload CSV" className="flex-1 border text-xs font-medium rounded-lg py-2 hover:bg-slate-50">⬆ Upload CSV</button>
             <input ref={fileRef} type="file" accept=".csv" className="hidden" onChange={(e) => onImportFile(e.target.files?.[0])} />
           </div>
+          {!isAgent && (
+            <button onClick={resync} disabled={syncing}
+              className="w-full border text-[11px] font-medium rounded-lg py-1.5 hover:bg-slate-50 disabled:opacity-50">
+              {syncing ? '⟳ Resyncing…' : '⟳ Resync from portal'}
+            </button>
+          )}
+          {syncInfo?.last_synced_at && (
+            <p className="text-[11px] text-slate-400">
+              Synced {fmtDateTime(syncInfo.last_synced_at)}{syncInfo.count != null ? ` • ${syncInfo.count} in local database` : ''}
+            </p>
+          )}
+          {!isAgent && (
+            <p className="text-[11px] text-slate-400">
+              Contacts load from the local database. Resync pulls edits made directly in the portal and pushes contacts added here back up.
+            </p>
+          )}
           <button onClick={downloadTemplate} className="w-full text-[11px] text-brand-600 hover:underline">⬇ Download CSV template</button>
           {hiddenCount > 0 && (
             <label className="flex items-center gap-2 text-[11px] text-slate-500">
@@ -89,20 +128,31 @@ export default function Contacts() {
           )}
         </div>
         <div className="flex-1 overflow-y-auto chat-scroll">
-          {filtered.map((c) => {
+          {shownContacts.map((c) => {
             const name = contactName(c);
             const key = selKey(c);
             return (
               <button key={key} onClick={() => setActiveId(key)}
                 className={`w-full text-left px-3 py-2.5 border-b flex items-center gap-3 ${activeId === key ? 'bg-brand-50' : 'hover:bg-slate-50'}`}>
                 <span className={`w-10 h-10 rounded-full ${avatarColor(name)} text-white flex items-center justify-center text-sm font-bold shrink-0`}>{initials(name)}</span>
-                <span className="min-w-0">
+                <span className="min-w-0 flex-1">
                   <span className="block text-sm font-medium text-slate-800 truncate">{name}</span>
-                  <span className="block text-xs text-slate-500 truncate">{c.company || fmtPhone(primaryPhone(c)) || '—'}</span>
+                  <span className="block text-xs text-slate-500 truncate">{fmtPhone(primaryPhone(c)) || '—'}</span>
                 </span>
+                {c.company && (
+                  <span title={c.company}
+                    className="ml-auto shrink-0 max-w-[45%] truncate rounded-full bg-slate-100 border border-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
+                    {c.company}
+                  </span>
+                )}
               </button>
             );
           })}
+          {filtered.length > shownContacts.length && (
+            <button onClick={() => setListLimit((l) => l + 100)} className="w-full text-center text-xs text-brand-600 hover:underline py-2">
+              ↓ Show more ({filtered.length - shownContacts.length} hidden)
+            </button>
+          )}
           {filtered.length === 0 && <div className="p-6 text-sm text-slate-400 text-center">No contacts.</div>}
         </div>
       </div>

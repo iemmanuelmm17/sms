@@ -91,7 +91,8 @@ class SendScheduledMessage implements ShouldQueue
         // "Company: body\n<footer>" — footer is Action A's live text.
         $companySvc = app(\App\Services\CompanySettingsService::class);
         $text = $companySvc->resolve($m->domain, $text, (string) ($m->created_by_name ?? ''));
-        if (count($m->recipients ?? []) >= 5) {
+        // Bulk TCPA wrap — off when the composer's "Add TCPA Script Footer" is unchecked.
+        if (count($m->recipients ?? []) >= 5 && $m->tcpa_script !== false) {
             $company = $companySvc->name($m->domain);
             $footer = \App\Models\AutoReply::where('domain', $m->domain)->where('user', $m->user)
                 ->where('default_key', 'opt_out')->value('message')
@@ -143,6 +144,54 @@ class SendScheduledMessage implements ShouldQueue
         }
     }
 
+    /**
+     * Clone a finished recurring occurrence at its next slot and dispatch the
+     * per-recipient jobs. Called once, when the last recipient reports.
+     *
+     * Recipients come from the snapshot taken when the series was created, so
+     * a series sends to the same audience every time — predictable, and it
+     * can't surprise someone by growing under them.
+     */
+    protected function spawnNextOccurrence(ScheduledMessage $m): void
+    {
+        $freq = (string) ($m->recurrence ?? '');
+        if ($freq === '') return;
+
+        // Guard: logResult runs per recipient, so several workers can land on
+        // the "all done" state at once. Only the first one may spawn.
+        $guard = "sched:recur:spawn:{$m->id}";
+        if (!\Illuminate\Support\Facades\Cache::add($guard, 1, now()->addHours(12))) return;
+
+        $interval = max(1, (int) ($m->recur_interval ?: 1));
+        $base = $m->send_at ? \Carbon\Carbon::parse($m->send_at) : now();
+        $next = match ($freq) {
+            'daily'   => $base->copy()->addDays($interval),
+            'weekly'  => $base->copy()->addWeeks($interval),
+            'monthly' => $base->copy()->addMonthsNoOverflow($interval),
+            default   => null,
+        };
+        if (!$next) return;
+
+        $idx = ((int) ($m->recur_index ?? 0)) + 1;                        // occurrences already sent
+        if ($m->recur_until && $next->gt($m->recur_until)) return;        // ended by date
+        if ($m->recur_occurrences && $idx > (int) $m->recur_occurrences) return; // ended by count
+
+        $copy = $m->replicate();
+        $copy->parent_id = $m->parent_id ?: $m->id;
+        $copy->recur_index = $idx;
+        $copy->send_at = $next;
+        $copy->status = 'pending';
+        $copy->send_log = [];
+        $copy->created_at = now();
+        $copy->updated_at = now();
+        $copy->save();
+
+        foreach (array_values((array) ($m->recipients ?? [])) as $i => $r) {
+            self::dispatch($copy->id, $i)->delay($next->copy()->addSeconds($i * 2));
+        }
+        DataChanged::send($m->domain, $m->user, 'scheduled', 'saved', $copy->id);
+    }
+
     protected function logResult(ScheduledMessage $m, array $recipient, bool $ok, string $detail): void
     {
         $log = $m->send_log ?? [];
@@ -164,6 +213,11 @@ class SendScheduledMessage implements ShouldQueue
             $m->status = 'sending';
         }
         $m->save();
+        // Recurring series: once every recipient of this occurrence has a
+        // result, queue up the next one (no cron — the queue drives it).
+        if (in_array($m->status, ['sent', 'partial'], true)) {
+            try { $this->spawnNextOccurrence($m); } catch (\Throwable $e) { /* never break reporting */ }
+        }
         DataChanged::send($m->domain, $m->user, 'scheduled', 'saved', $m->id);
     }
 
@@ -181,3 +235,4 @@ class SendScheduledMessage implements ShouldQueue
         });
     }
 }
+

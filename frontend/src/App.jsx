@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { BrandProvider } from './context/BrandContext';
 import { useEffect, Component, Suspense, lazy } from 'react';
 import { api, setUnauthorizedHandler } from './api/client';
 import { SocketProvider } from './context/SocketContext';
@@ -135,6 +136,7 @@ export default function App() {
   return (
     <AuthProvider>
       <SuperAuthProvider>
+      <BrandProvider>
       <BrowserRouter>
         <SessionManager />
         <Routes>
@@ -195,6 +197,7 @@ export default function App() {
           <Route path="*" element={<Navigate to="/app/messages" replace />} />
         </Routes>
       </BrowserRouter>
+      </BrandProvider>
       </SuperAuthProvider>
     </AuthProvider>
   );

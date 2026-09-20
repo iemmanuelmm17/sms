@@ -21,6 +21,50 @@ use Illuminate\Support\Facades\Log;
  */
 trait ResolvesActor
 {
+    /**
+     * Requests that must keep working even when the password has expired —
+     * otherwise an expired session could never recover, or even log out.
+     */
+    protected static function passwordExpiryExempt(Request $r): bool
+    {
+        $uri  = trim((string) ($r->route()?->uri() ?? ''), '/');
+        $path = trim($r->path(), '/');
+
+        $exempt = [
+            'api/logout',
+            'api/me',
+            'api/refresh',
+            'api/agent/ping',
+            'api/auth/expired-password',
+            'api/auth/password-expiry/dismiss',
+            'api/auth/verify-password',
+        ];
+
+        return in_array($uri, $exempt, true) || in_array($path, $exempt, true);
+    }
+
+    /**
+     * Day-0 gate for ALREADY-AUTHENTICATED sessions.
+     *
+     * Login is blocked separately (AuthController). This catches the case the
+     * login gate can't: a session that rolls past password_expires_at while
+     * the user is signed in. The next authenticated request is refused with
+     * 409 + code=password_expired, which the SPA turns into the forced-change
+     * screen instead of letting them keep working until they happen to log out.
+     */
+    protected function assertPasswordNotExpired(Request $r, $user): void
+    {
+        if (!$user || empty($user->password_expires_at)) return;
+        if (!$user->password_expires_at->lte(now())) return;
+        if (self::passwordExpiryExempt($r)) return;
+
+        abort(response()->json([
+            'code'                => 'password_expired',
+            'message'             => 'Your password has expired. Choose a new one to continue.',
+            'password_expires_at' => $user->password_expires_at->toJSON(),
+        ], 409));
+    }
+
     /** Identity + data scope. 401 when neither session is valid. */
     protected function actor(Request $r): array
     {
@@ -39,6 +83,8 @@ trait ResolvesActor
                 $r->session()->forget('agent');
                 abort(response()->json(['message' => 'Unauthenticated'], 401));
             }
+            $this->assertPasswordNotExpired($r, $agent);
+
             return [
                 'role' => 'agent', 'domain' => $agent->domain, 'user' => $agent->user,
                 'token' => null, // lazy: dtoken() resolves the service token on demand
@@ -54,6 +100,8 @@ trait ResolvesActor
                 $r->session()->forget('tenant');
                 abort(response()->json(['message' => 'Unauthenticated'], 401));
             }
+            $this->assertPasswordNotExpired($r, $admin);
+
             return [
                 'role' => 'admin', 'domain' => $admin->tenant->domain, 'user' => $admin->tenant->dynalink_user,
                 'token' => null, // resolved per-request from the tenant credential

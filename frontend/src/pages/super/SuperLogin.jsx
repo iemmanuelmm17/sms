@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useSuperAuth } from '../../context/SuperAuthContext';
 import { api } from '../../api/client';
+import { useBrand } from '../../context/BrandContext';
+import BrandMark from '../../components/BrandMark';
 
 const fmtCountdown = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
@@ -12,6 +14,7 @@ export default function SuperLogin() {
   const [busy, setBusy] = useState(false);
   const [lockSecs, setLockSecs] = useState(0);
   const { superLogin } = useSuperAuth();
+  const { appName } = useBrand();
   const nav = useNavigate();
   const reason = useLocation().state?.reason;
   const demo = api.isDemo;
@@ -44,9 +47,9 @@ export default function SuperLogin() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-900 px-4">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-8">
-        <div className="w-12 h-12 rounded-xl bg-slate-900 text-white flex items-center justify-center text-2xl mb-4">🛡️</div>
+        <BrandMark glyph="🛡️" box="w-12 h-12 rounded-xl bg-slate-900 text-white text-2xl" />
         <h1 className="text-2xl font-bold text-slate-900">Superadmin</h1>
-        <p className="text-sm text-slate-500 mb-4">Tenant management portal</p>
+        <p className="text-sm text-slate-500 mb-4">{appName} — Tenant management portal</p>
         {reason && (
           <div className="mb-4 text-xs bg-sky-50 border border-sky-200 text-sky-800 rounded-lg p-3">
             {reason === 'idle' ? 'Signed out after 30 minutes of inactivity.' : 'Your session expired — please sign in again.'}

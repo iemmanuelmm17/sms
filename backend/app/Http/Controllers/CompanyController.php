@@ -58,7 +58,7 @@ class CompanyController extends Controller
         $out = [];
         foreach (Storage::files($dir) as $file) {
             if (pathinfo($file, PATHINFO_EXTENSION) !== 'json') continue;
-            $data = json_decode(Storage::get($file), true);
+            $data = \App\Services\JsonFileStore::read($file);
             if ($data) $out[] = $data;
         }
         usort($out, fn ($a, $b) => strcmp($a['name'] ?? '', $b['name'] ?? ''));
@@ -69,8 +69,9 @@ class CompanyController extends Controller
     {
         $this->assertUuid($id); // traversal defense: {id} reaches the filesystem
         $file = $this->dir($domain) . "/{$id}.json";
-        abort_unless(Storage::exists($file), 404, 'Company not found');
-        return json_decode(Storage::get($file), true);
+        $data = \App\Services\JsonFileStore::read($file);
+        abort_unless(is_array($data) && $data !== [], 404, 'Company not found');
+        return $data;
     }
 
     /** [contactCount, groupCount] currently attached to this company. */
@@ -92,7 +93,7 @@ class CompanyController extends Controller
         if (Storage::exists($gdir)) {
             foreach (Storage::files($gdir) as $file) {
                 if (pathinfo($file, PATHINFO_EXTENSION) !== 'json') continue;
-                $g = json_decode(Storage::get($file), true);
+                $g = \App\Services\JsonFileStore::read($file, []);
                 if (($g['company_id'] ?? '') === $company['id']) $groupCount++;
             }
         }
@@ -150,7 +151,7 @@ class CompanyController extends Controller
             'created_by' => $s['user'] ?? null, 'created_by_name' => $s['display_name'] ?? null,
             'updated_by' => $s['user'] ?? null, 'updated_by_name' => $s['display_name'] ?? null,
         ];
-        Storage::put($this->dir($s['domain']) . "/{$company['id']}.json", json_encode($company, JSON_PRETTY_PRINT));
+        \App\Services\JsonFileStore::put($this->dir($s['domain']) . "/{$company['id']}.json", $company);
         DataChanged::send($s['domain'], $s['user'], 'companies', 'saved', $company['id']);
         return response()->json($company, 201);
     }
@@ -189,9 +190,12 @@ class CompanyController extends Controller
             $data['name'] = trim($data['name']);
         }
 
-        $company = array_merge($company, $data, ['updated_at' => now()->toISOString(),
-            'updated_by' => $s['user'] ?? null, 'updated_by_name' => $s['display_name'] ?? null]);
-        Storage::put($this->dir($s['domain']) . "/{$id}.json", json_encode($company, JSON_PRETTY_PRINT));
+        $file = $this->dir($s['domain']) . "/{$id}.json";
+        $company = \App\Services\JsonFileStore::mutate($file, function ($fresh) use ($data, $s) {
+            return array_merge(is_array($fresh) ? $fresh : [], $data, ['updated_at' => now()->toISOString(),
+                'updated_by' => $s['user'] ?? null, 'updated_by_name' => $s['display_name'] ?? null]);
+        }, true);
+        abort_unless($company !== null, 404, 'Company not found');
         DataChanged::send($s['domain'], $s['user'], 'companies', 'saved', $id);
         return response()->json($company);
     }
@@ -209,7 +213,7 @@ class CompanyController extends Controller
             if ($groupCount > 0) $reasons[] = "{$groupCount} group(s)";
             abort(response()->json(['message' => 'Cannot delete "' . $company['name'] . '" — still assigned: ' . implode(' and ', $reasons) . '.'], 422));
         }
-        Storage::delete($this->dir($s['domain']) . "/{$id}.json");
+        \App\Services\JsonFileStore::delete($this->dir($s['domain']) . "/{$id}.json");
         DataChanged::send($s['domain'], $s['user'], 'companies', 'deleted', $id);
         return response()->json(['ok' => true]);
     }

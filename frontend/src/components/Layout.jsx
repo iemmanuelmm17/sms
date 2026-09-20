@@ -1,14 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { PwaBanner } from './PwaInstall';
 import {
   BarChart3, Bot, Building2, CalendarClock, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight,
-  Ellipsis, Hash, Headset, Hourglass, Inbox, LayoutTemplate, LogOut, MessageSquarePlus,
+  Ellipsis, Hash, Headset, Hourglass, Inbox, KeyRound, LayoutTemplate, LogOut, MessageSquarePlus,
   Plug, ScrollText, Search, Settings as SettingsIcon, Share2, ShieldOff, UserX, Users, UsersRound, X,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useBrand } from '../context/BrandContext';
 import { useSocket } from '../context/SocketContext';
 import { useTheme } from '../context/ThemeContext';
-import { api, agentName, fmtPhone, initials } from '../api/client';
+import { api, agentName, fmtPhone, initials, setPasswordExpiredHandler } from '../api/client';
+import ChangePasswordModal from './ChangePasswordModal';
+import ForcedPasswordChange from './ForcedPasswordChange';
+import PasswordExpiryWarning from './PasswordExpiryWarning';
 
 const NAV = [
   { title: 'Main panel', items: [
@@ -53,7 +58,8 @@ const href = (n) => (n.params
   : n.path);
 
 export default function Layout({ children }) {
-  const { user, logout } = useAuth();
+  const { user, logout, setUser } = useAuth();
+  const { appName, logoUrl } = useBrand();
   const { connected, lastEvent, lastSync } = useSocket();
   const { dark, toggle } = useTheme();
   const nav = useNavigate();
@@ -225,6 +231,32 @@ export default function Layout({ children }) {
   // Header avatar menu.
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef(null);
+
+  // ---- Password expiry ----
+  const [pwOpen, setPwOpen] = useState(false);       // avatar menu > Change password
+  const [expiredAt, setExpiredAt] = useState(null);  // non-null => forced-change screen
+  const [warnOpen, setWarnOpen] = useState(false);   // pre-expiry advisory
+
+  // No local password row on a legacy break-glass Dynalink session.
+  const canChangePassword = user?.role === 'agent' || !!user?.password_expires_at;
+
+  // /me reports the state on load; ResolvesActor's 409 reports sessions that
+  // roll past expiry while the user is already signed in.
+  useEffect(() => {
+    if (user?.password_expired) setExpiredAt(user.password_expires_at || '1');
+    else setExpiredAt(null);
+  }, [user?.password_expired, user?.password_expires_at]);
+
+  useEffect(() => {
+    setPasswordExpiredHandler((d) => setExpiredAt(d?.password_expires_at || '1'));
+    return () => setPasswordExpiredHandler(null);
+  }, []);
+
+  // Advisory window (5 days out). The server already suppressed it when this
+  // exact cycle was dismissed, so any value here genuinely needs showing.
+  useEffect(() => {
+    setWarnOpen(!!user?.password_warning);
+  }, [user?.password_warning, user?.password_expires_at]);
   useEffect(() => {
     if (!menuOpen) return;
     const onDown = (e) => { if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false); };
@@ -297,6 +329,7 @@ export default function Layout({ children }) {
     const active = matchLink(n);
     return (
       <Link key={n.id} to={href(n)} title={n.tip ? `${n.label} — ${n.tip}` : (n.group ? `${n.group} — ${n.label}` : n.label)}
+        data-tour={n.id === 'queue' ? 'queue' : n.id === 'settings' ? 'settings-nav' : undefined}
         className={rowCls(active)}>
         <Icon className="w-6 h-6 shrink-0" />
         <span className="text-base flex-1 text-left truncate">{n.label}</span>
@@ -519,7 +552,7 @@ export default function Layout({ children }) {
       {/* Main */}
       <div className="flex-1 flex flex-col min-w-0 pb-[calc(4.25rem+env(safe-area-inset-bottom))] md:pb-0">
         <header className="h-12 bg-white border-b flex items-center px-4 gap-3 shrink-0">
-          <span className="font-semibold text-slate-800">SMS Messaging</span>
+          <span className="flex items-center gap-2">{logoUrl && <img src={logoUrl} alt="" className="w-6 h-6 rounded object-contain" />}<span className="font-semibold text-slate-800">{appName}</span></span>
           {api.isDemo && (
             <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">
               DEMO MODE — set VITE_API_URL for live backend
@@ -543,6 +576,12 @@ export default function Layout({ children }) {
                   <p className="text-xs text-slate-500">{roleLabel} • <span className="truncate">{user?.username}</span></p>
                 </div>
                 <div className="border-t my-1" />
+                {canChangePassword && (
+                  <button onClick={() => { setMenuOpen(false); setPwOpen(true); }}
+                    className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                    <KeyRound className="w-4 h-4" /> Change password
+                  </button>
+                )}
                 <button onClick={doLogout}
                   className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                   <LogOut className="w-4 h-4" /> Sign out
@@ -551,6 +590,7 @@ export default function Layout({ children }) {
             )}
           </div>
         </header>
+        <PwaBanner />
         <div className="flex-1 min-h-0">{children}</div>
       </div>
       {/* Mobile bottom tab bar (tablet/desktop keep the sidebar) */}
@@ -639,6 +679,27 @@ export default function Layout({ children }) {
             </div>
           </div>
         </div>
+      )}
+      {/* Password expiry — hard block wins over the advisory popup. */}
+      {expiredAt !== null && (
+        <ForcedPasswordChange
+          expiresAt={expiredAt}
+          onDone={() => {
+            setExpiredAt(null);
+            try { sessionStorage.removeItem('sms-password-expired'); } catch {}
+          }}
+        />
+      )}
+      {expiredAt === null && warnOpen && (
+        <PasswordExpiryWarning
+          expiresAt={user?.password_expires_at}
+          daysLeft={user?.password_days_left}
+          onClose={() => setWarnOpen(false)}
+          onChangeNow={() => { setWarnOpen(false); setPwOpen(true); }}
+        />
+      )}
+      {expiredAt === null && pwOpen && (
+        <ChangePasswordModal onClose={() => setPwOpen(false)} />
       )}
       {!convoOpen && !typing && (
         <button onClick={goCompose} title="New message"

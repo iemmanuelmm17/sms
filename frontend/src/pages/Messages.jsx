@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { api, fmtPhone, contactName, initials, avatarColor, fmtTime, primaryPhone, contactId, hasSmsNumber, agentName, zonedTimeToUtc, getTimezone, fmtDateTime, dynalinkTs, getUndoSend } from '../api/client';
 
@@ -15,13 +15,42 @@ const fmtAge = (ts) => {
 };
 import { segLabel, smsSegments, MMS_MAX_BYTES, MMS_MAX_LABEL } from '../lib/segments';
 import { toastError, toastSuccess } from '../lib/toast';
+import { Search, Archive, Ban, MoreVertical, X } from 'lucide-react';
+import ConfirmModal from '../components/ConfirmModal';
+import { quietFromSettings, QUIET_DEFAULTS, isQuiet as inQuietHours, quietLabel } from '../lib/quietHours';
 import { quickAddContact } from '../components/QuickAddContact';
 import Modal from '../components/Modal';
+import useEscape from '../lib/useEscape';
 import { createPortal } from 'react-dom';
 import { useSocket } from '../context/SocketContext';
 import { useAuth } from '../context/AuthContext';
+import Onboarding from '../components/onboarding/Onboarding';
 
 const digits = (v) => String(v ?? '').replace(/\D/g, '');
+/** Local calendar day key — used to group bubbles under a date block. */
+const dayKey = (ts) => { const d = new Date(parseTs(ts)); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
+const dayLabel = (ts) => {
+  const d = new Date(parseTs(ts));
+  const now = new Date();
+  const yest = new Date(now); yest.setDate(now.getDate() - 1);
+  const k = dayKey(ts);
+  if (k === dayKey(now.getTime())) return 'Today';
+  if (k === dayKey(yest.getTime())) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase();
+};
+const PHONE_FIELDS = [
+  ['phonenumber-cell', 'Cellphone'], ['phonenumber-work', 'Work'],
+  ['phonenumber-home', 'Home'], ['phonenumber-fax', 'Fax'],
+];
+/** Which of the contact's own numbers is this thread on? (Cell / Work / Home) */
+const contactPhoneLabel = (c, phone) => {
+  if (!c) return '';
+  const d = digits(phone);
+  if (digits(c['phonenumber-cell']) === d) return 'Cell';
+  if (digits(c['phonenumber-work']) === d) return 'Work';
+  if (digits(c['phonenumber-home']) === d) return 'Home';
+  return '';
+};
 const asArray = (v) => (Array.isArray(v) ? v : []);
 const parseTs = (t) => {
   if (!t) return 0;
@@ -92,6 +121,7 @@ const agentOf = (agents, meta, sid) => {
 
 export default function Messages() {
   const [sessions, setSessions] = useState([]);
+  const [sessionsLoaded, setSessionsLoaded] = useState(false); // boot fetch settled?
   const [contacts, setContacts] = useState([]);
   const [numbers, setNumbers] = useState([]);
   const [templates, setTemplates] = useState([]);
@@ -102,6 +132,8 @@ export default function Messages() {
   const [meta, setMeta] = useState({});
   const [optOuts, setOptOuts] = useState([]);
   const [companyName, setCompanyName] = useState([]);
+  const [quiet, setQuiet] = useState(QUIET_DEFAULTS);      // TCPA quiet hours (warn, never block)
+  const [quietWarn, setQuietWarn] = useState(null);        // { go } — pending send awaiting confirmation
   const [tip, setTip] = useState(null); // {sid, s, x, y} hover tooltip
   const tipTimer = useRef(null);
   const prevEls = useRef(new Map());
@@ -132,6 +164,12 @@ export default function Messages() {
     else if (f !== 'main') next.agent = String(f);
     setSearchParams(next, { replace: true });
   };
+  /** Top tabs — All | Unread | Archived | Spam. Archive/Spam reuse the folder
+   *  state so the URL stays shareable; the sidebar's other folders still win. */
+  const setTab = (key) => {
+    setShowUnreadOnly(key === 'unread');
+    goFolder(key === 'archive' ? 'archive' : key === 'spam' ? 'spam' : 'main');
+  };
   useEffect(() => {
     const numDigits = digits(searchParams.get('number') || '');
     setNumberFilter(numDigits.length >= 7 && numDigits.length <= 15 ? numDigits : null);
@@ -151,9 +189,13 @@ export default function Messages() {
   const [activeId, setActiveId] = useState(null);
   const [msgs, setMsgs] = useState([]);
   const [q, setQ] = useState('');
-  const [showSearch, setShowSearch] = useState(false);
   const [showUnreadOnly, setShowUnreadOnly] = useState(false);
+  const [optStates, setOptStates] = useState({});   // digits => 'opt_in' | 'opt_out'
+  const activeTab = folder === 'archive' ? 'archive' : folder === 'spam' ? 'spam' : (showUnreadOnly ? 'unread' : (folder === 'main' ? 'all' : null));
   const [chatSearch, setChatSearch] = useState('');
+  const [chatSearchOpen, setChatSearchOpen] = useState(false);  // search row under the header
+  const [panelContactId, setPanelContactId] = useState(null);    // right-side contact panel
+  const [companies, setCompanies] = useState([]);               // company picker in the contact panel
   const [draft, setDraft] = useState('');
   const [fromNumber, setFromNumber] = useState('');
   const [showNew, setShowNew] = useState(false);
@@ -164,6 +206,9 @@ export default function Messages() {
   const [exportPos, setExportPos] = useState(null);
   const [ctx, setCtx] = useState(null); // right-click menu {x,y,sid}
   const [ctxAssign, setCtxAssign] = useState(false);
+  // Inline overlays (no Modal wrapper) — Esc closes them.
+  useEscape(() => { setCtx(null); setCtxAssign(false); }, !!ctx);
+  useEscape(() => setShowExport(false), showExport);
   const [delAsk, setDelAsk] = useState(null); // sid awaiting password-confirmed delete
   const draftRef = useRef(null);
   const [showAttach, setShowAttach] = useState(false);
@@ -217,14 +262,21 @@ export default function Messages() {
       ]);
       setSessions(s); setContacts(c); setNumbers(n); setTemplates(t); setAgents(a); setMeta(m);
       api.optOuts().then((d) => setOptOuts(Array.isArray(d) ? d : [])).catch(() => {});
-      api.companySettings().then((d) => { setCompanyName(d?.company_name || ''); setSharedNums(d?.number_shared || {}); setMainNum(digits(d?.main_number || user?.main_number || '')); }).catch(() => {});
+      api.companySettings().then((d) => { setCompanyName(d?.company_name || ''); setSharedNums(d?.number_shared || {}); setQuiet(quietFromSettings(d)); setMainNum(digits(d?.main_number || user?.main_number || '')); }).catch(() => {});
+      api.companies().then(setCompanies).catch(() => {});
+      // TCPA badges in the conversation header ("Opted In" / "Opted Out").
+      api.optEvents().then((rows) => {
+        const m = {};
+        (rows || []).forEach((r) => { const d = digits(r.phone_number); if (d) m[d] = r.direction; });
+        setOptStates(m);
+      }).catch(() => {});
       if (user?.role === 'agent') {
         const a = (user?.assigned_numbers || []).map(digits);
         const opts = (n || []).filter((x) => a.includes(digits(x.number)));
         const pick = opts.find((x) => digits(x.number) === digits(user?.default_number)) || opts[0];
         setFromNumber(pick ? String(pick.number) : '');
       } else if (n?.[0]?.number) setFromNumber(String(n[0].number));
-    })();
+    })().catch(() => {}).finally(() => setSessionsLoaded(true));
     const onContactsChanged = () => api.contacts().then(setContacts).catch(() => {});
     window.addEventListener('contacts-changed', onContactsChanged);
     return () => window.removeEventListener('contacts-changed', onContactsChanged);
@@ -232,6 +284,7 @@ export default function Messages() {
 
   useEffect(() => {
     if (!activeId) { setMsgs([]); return; }
+    setMsgLimit(100);
     api.sessionMessages(activeId).then((m) => setMsgs((p) => mergeServerMsgs(p, m, activeId)));
     setSessions((prev) => prev.map((s) => s['messagesession-id'] === activeId ? { ...s, 'messagesession-last-status': 'read' } : s));
     api.markSessionRead(activeId).catch(() => {}); // tell other instances
@@ -469,6 +522,9 @@ export default function Messages() {
     const pb = meta[String(b['messagesession-id'])]?.pinned ? 1 : 0;
     return pb - pa;
   });
+  // Long inboxes render windowed (150 rows) — the full list stays searchable.
+  const [sessLimit, setSessLimit] = useState(150);
+  const shownSessions = filtered.length > sessLimit ? filtered.slice(0, sessLimit) : filtered;
 
   const assignAgent = async (sid, agentId) => {
     // Claiming from Queue moves the thread to the agent's folder.
@@ -555,6 +611,8 @@ export default function Messages() {
   const activeStatus = active ? (meta[String(active['messagesession-id'])]?.status || 'active') : 'active';
   const activeImportant = active ? !!meta[String(active['messagesession-id'])]?.important : false;
   const visibleMsgs = msgs.filter((m) => !chatSearch.trim() || (m.text || '').toLowerCase().includes(chatSearch.toLowerCase()));
+  const [msgLimit, setMsgLimit] = useState(100);
+  const shownMsgs = visibleMsgs.length > msgLimit ? visibleMsgs.slice(-msgLimit) : visibleMsgs;
 
   const defaultSchedAt = () => {
     const d = new Date(Date.now() + 3600000);
@@ -637,9 +695,17 @@ export default function Messages() {
     };
     // Undo-send (Settings → delay 1-5s, or off for instant send).
     const undo = getUndoSend();
-    if (!undo.enabled) { setDraft(''); setAttach(null); doSend(payload); return; }
-    setPending({ payload, draft, attach, secs: undo.secs });
-    setDraft(''); setAttach(null);
+    const go = () => {
+      if (!undo.enabled) { setDraft(''); setAttach(null); doSend(payload); return; }
+      setPending({ payload, draft, attach, secs: undo.secs });
+      setDraft(''); setAttach(null);
+    };
+    // Quiet hours: warn, but never block — they can still send.
+    if (inQuietHours(new Date(), quiet, getTimezone())) {
+      setQuietWarn({ go, to: activeContact ? contactName(activeContact) : fmtPhone(active['messagesession-remote']) });
+      return;
+    }
+    go();
   };
   const cancelPending = () => {
     if (!pending) return;
@@ -702,46 +768,47 @@ export default function Messages() {
     setShowTpl(false);
   };
   const pickDollar = (v) => setDraft((d) => d.replace(/\$[A-Za-z]*$/, v + ' '));
+  useEscape(() => { setChatSearchOpen(false); setChatSearch(''); }, chatSearchOpen);
 
   return (
-    <div className="h-full flex min-h-0">
+    <div className="h-full flex flex-col min-h-0">
+      <Onboarding />
+      <div className="flex-1 flex min-h-0">
       {/* ---------- Side panel: folders + conversation list ---------- */}
       <div className={`${activeId ? 'hidden md:flex' : 'flex'} w-full md:w-64 lg:w-80 bg-white border-r flex-col shrink-0`}>
         <div className="p-3 border-b space-y-2">
           <div className="flex items-center gap-2">
             <button onClick={() => setShowNew(true)}
               className="flex-1 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-lg py-2">+ New Message</button>
-            <button onClick={() => setShowSearch((v) => !v)} title="Search"
-              className="w-9 h-9 rounded-lg border hover:bg-slate-50 text-slate-600">🔍</button>
             <button onClick={() => { setSelectMode((v) => !v); setSelected([]); }}
               title={selectMode ? 'Exit bulk select' : 'Bulk select (archive/spam multiple)'}
-              className={`h-9 px-2 rounded-lg border text-xs font-medium ${selectMode ? 'bg-brand-600 border-brand-600 text-white' : 'hover:bg-slate-50 text-slate-600'}`}>{selectMode ? '✕' : '☑ Select'}</button>
+              className={`h-9 px-2.5 rounded-lg border text-xs font-medium ${selectMode ? 'bg-brand-600 border-brand-600 text-white' : 'hover:bg-slate-50 text-slate-600'}`}>{selectMode ? '✕' : '☑ Select'}</button>
           </div>
-          {showSearch && (
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search messages…"
-              className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
-          )}
-          {/* Archive/Spam live here — folders moved to the sidebar */}
-          <div className="flex items-center gap-3 px-1 text-xs">
-            <button onClick={() => goFolder('archive')} className={`hover:underline ${folder === 'archive' ? 'font-bold text-slate-800' : 'text-slate-500'}`}>🗃 Archived ({archivedSessions.length})</button>
-            <button onClick={() => goFolder('spam')} className={`hover:underline ${folder === 'spam' ? 'font-bold text-slate-800' : 'text-slate-500'}`}>🚫 Spam ({spamSessions.length})</button>
-            {(folder === 'archive' || folder === 'spam') && (
-              <button onClick={() => goFolder('main')} className="ml-auto text-brand-600 hover:underline font-medium">← Back to Inbox</button>
-            )}
+          <div className="relative">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm pointer-events-none">🔍</span>
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search contacts, numbers, keywords…"
+              className="w-full border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
           </div>
-          <div className="flex gap-1 bg-slate-100 rounded-lg p-1">
-            <button onClick={() => setShowUnreadOnly(false)}
-              className={`flex-1 text-xs font-medium rounded-md py-1 ${!showUnreadOnly ? 'bg-white shadow text-slate-800' : 'text-slate-500'}`}>
-              All messages
-            </button>
-            <button onClick={() => setShowUnreadOnly(true)}
-              className={`flex-1 text-xs font-medium rounded-md py-1 ${showUnreadOnly ? 'bg-white shadow text-slate-800' : 'text-slate-500'}`}>
-              Unread{unreadCount > 0 ? ` (${unreadCount})` : ''}
-            </button>
+          {/* All / Unread / Archived / Spam — queue, unassigned and agent
+              folders still live in the sidebar. */}
+          <div className="flex items-center gap-1 pt-0.5">
+            {[['all', 'All', 0], ['unread', 'Unread', unreadCount],
+              ['archive', 'Archived', archivedSessions.length],
+              ['spam', 'Spam', spamSessions.length]].map(([key, label, count]) => {
+              const on = activeTab === key;
+              return (
+                <button key={key} onClick={() => setTab(key)}
+                  className={`relative px-2.5 py-2 text-xs font-semibold rounded-t-lg ${on ? 'text-brand-700' : 'text-slate-500 hover:text-slate-700'}`}>
+                  {label}
+                  {count > 0 ? <span className={`ml-1 font-medium ${on ? 'text-brand-600' : 'text-slate-400'}`}>({count})</span> : ''}
+                  {on && <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-brand-600" />}
+                </button>
+              );
+            })}
           </div>
         </div>
         <div className="flex-1 overflow-y-auto chat-scroll">
-          {filtered.map((s) => {
+          {shownSessions.map((s) => {
             const sid = String(s['messagesession-id']);
             const c = contactByPhone[digits(s['messagesession-remote'])];
             const name = c ? contactName(c) : fmtPhone(s['messagesession-remote']);
@@ -752,8 +819,7 @@ export default function Messages() {
             const agent = agentOf(agents, meta, sid);
             return (
               <button key={s['messagesession-id']} onClick={() => (selectMode ? toggleSel(sid) : setActiveId(s['messagesession-id']))} onContextMenu={(e) => { e.preventDefault(); setCtxAssign(false); setCtx({ x: e.clientX, y: e.clientY, sid }); }}
-                style={agent ? { borderLeft: `3px solid ${agent.tag_color}`, ...((!isActive && !unread) ? { backgroundColor: `${agent.tag_color}14` } : {}) } : undefined}
-                className={`group w-full text-left px-3 py-2.5 border-b flex items-center gap-3 transition ${isActive ? 'bg-brand-50' : unread ? 'bg-amber-50/60' : 'hover:bg-slate-50'}`}>
+                className={`group w-full text-left px-3 py-2.5 border-b border-slate-100 flex items-center gap-3 bg-white border-l-2 ${isActive ? 'border-l-brand-600' : 'border-l-transparent'}`}>
                 {selectMode && (
                   <input type="checkbox" checked={selected.includes(sid)} onChange={() => toggleSel(sid)}
                     onClick={(e) => e.stopPropagation()} className="w-4 h-4 shrink-0 accent-brand-600" />
@@ -769,8 +835,8 @@ export default function Messages() {
                   {agent && (
                     <span title={`Handled by ${agentName(agent)}`}
                       style={{ backgroundColor: agent.tag_color }}
-                      className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full border-2 border-white text-white text-[8px] font-bold flex items-center justify-center">
-                      {initials(agentName(agent))}
+                      className="absolute -bottom-1 -right-1 max-w-[72px] truncate rounded-full border-2 border-white px-1.5 py-px text-[9px] font-bold text-white leading-tight">
+                      {agentName(agent).trim().split(/\s+/)[0]}
                     </span>
                   )}
                 </span>
@@ -870,8 +936,39 @@ export default function Messages() {
               </div>
             </>, document.body);
           })()}
+          {quietWarn && (
+            <ConfirmModal
+              title="Sending outside quiet hours"
+              icon="🌙"
+              onClose={() => setQuietWarn(null)}
+              actions={[
+                { label: 'Cancel', onClick: () => setQuietWarn(null) },
+                { label: 'Send anyway', onClick: () => { const go = quietWarn.go; setQuietWarn(null); go(); } },
+              ]}>
+              It's currently inside your quiet hours (<strong>{quietLabel(quiet)}</strong>).
+              Under TCPA, marketing texts should land between 8:00 AM and 9:00 PM in the recipient's local time.
+              <div className="mt-1.5">Sending to <strong>{quietWarn.to}</strong> now may breach that window. You can still continue, or wait until {quietLabel(quiet).split('–')[1]?.trim()}.</div>
+            </ConfirmModal>
+          )}
           {delAsk && <DeletePwModal sid={delAsk} onClose={() => setDelAsk(null)} onDone={async () => { const sid = delAsk; setDelAsk(null); await setStatus(sid, 'deleted'); toastSuccess('Conversation deleted'); }} />}
-          {filtered.length === 0 && (
+          {filtered.length > shownSessions.length && (
+            <button onClick={() => setSessLimit((l) => l + 150)} className="w-full text-center text-xs text-brand-600 hover:underline py-2">
+              ↓ Show more ({filtered.length - shownSessions.length} hidden)
+            </button>
+          )}
+          {!sessionsLoaded ? (
+            <div className="p-3 space-y-3" aria-label="Loading conversations">
+              {[0, 1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className="flex items-center gap-3 animate-pulse">
+                  <div className="w-10 h-10 rounded-full bg-slate-200 shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 bg-slate-200 rounded w-2/3" />
+                    <div className="h-2.5 bg-slate-100 rounded w-full" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : filtered.length === 0 ? (
             <div className="p-6 text-sm text-slate-400 text-center">
               {showUnreadOnly ? 'No unread messages. 🎉'
                 : folder === 'archive' ? 'Nothing archived.'
@@ -881,7 +978,7 @@ export default function Messages() {
                 : folder !== 'main' ? 'No conversations in this folder.'
                 : 'No conversations found.'}
             </div>
-          )}
+          ) : null}
         </div>
         {selectMode && (
           <div className="p-2 border-t bg-slate-50 space-y-2">
@@ -922,53 +1019,80 @@ export default function Messages() {
           </div>
         ) : (
           <>
-            <div className="h-14 bg-white border-b flex items-center px-3 sm:px-4 gap-2 shrink-0">
+            <div className="bg-white border-b shrink-0">
+              <div className="flex items-start px-3 sm:px-4 py-2.5 gap-2.5">
               <button onClick={() => setActiveId(null)} title="Back to conversations"
                 className="md:hidden w-9 h-9 -ml-1 rounded-lg hover:bg-slate-100 text-slate-700 text-xl font-bold shrink-0">←</button>
-              <input value={chatSearch} onChange={(e) => setChatSearch(e.target.value)} placeholder="🔍 Search…"
-                className="w-24 sm:w-36 border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
-              <div className="flex-1 min-w-0 text-center">
-                <div className="font-semibold text-slate-800 truncate flex items-center justify-center gap-1.5">
-                  {activeAgent && (
-                    <span title={`Handled by ${agentName(activeAgent)}`}
-                      style={{ backgroundColor: activeAgent.tag_color }}
-                      className="w-5 h-5 rounded-full text-white text-[8px] font-bold inline-flex items-center justify-center shrink-0">
-                      {initials(agentName(activeAgent))}
+              {activeContact ? (
+                <button type="button" onClick={() => setPanelContactId(contactId(activeContact))}
+                  title={`View / edit ${contactName(activeContact)}`}
+                  className={`w-9 h-9 mt-0.5 rounded-full text-white text-[11px] font-bold inline-flex items-center justify-center shrink-0 hover:ring-2 hover:ring-offset-2 hover:ring-brand-400 ${avatarColor(contactName(activeContact))}`}>
+                  {initials(contactName(activeContact))}
+                </button>
+              ) : (
+                <span title="Not in your contacts"
+                  className="w-9 h-9 mt-0.5 rounded-full bg-slate-400 text-white text-[11px] font-bold inline-flex items-center justify-center shrink-0">
+                  {initials(fmtPhone(active['messagesession-remote']))}
+                </span>
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="text-[10px] font-bold uppercase tracking-wide bg-slate-100 text-slate-500 rounded-full px-2 py-0.5 shrink-0">SMS</span>
+                  <span className="font-semibold text-slate-800 truncate">
+                    {activeContact ? contactName(activeContact) : fmtPhone(active['messagesession-remote'])}
+                  </span>
+                  {contactPhoneLabel(activeContact, active['messagesession-remote']) && (
+                    <span className="text-[10px] font-semibold text-slate-500 bg-slate-100 rounded-full px-1.5 py-0.5 shrink-0">
+                      {contactPhoneLabel(activeContact, active['messagesession-remote'])}
                     </span>
                   )}
-                  <span className="truncate">{activeContact ? contactName(activeContact) : fmtPhone(active['messagesession-remote'])}</span>
                 </div>
-                <div className="text-[11px] text-slate-400">{fmtPhone(active['messagesession-remote'])}{activeContact?.company ? ` • ${activeContact.company}` : ''}</div>
+                <div className="flex items-center gap-1.5 text-[11px] text-slate-400 mt-0.5 flex-wrap">
+                  <span>{fmtPhone(active['messagesession-remote'])}</span>
+                  {activeContact?.company ? <span>• {activeContact.company}</span> : ''}
+                  {optStates[digits(active['messagesession-remote'])] === 'opt_in' && (
+                    <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-100 rounded-full px-1.5 py-0.5">✓ Opted In</span>
+                  )}
+                  {optStates[digits(active['messagesession-remote'])] === 'opt_out' && (
+                    <span className="text-[10px] font-semibold text-red-700 bg-red-100 rounded-full px-1.5 py-0.5">⛔ Opted Out</span>
+                  )}
+                  {!optStates[digits(active['messagesession-remote'])] && <span className="text-slate-300">• No opt-in record</span>}
+                </div>
               </div>
-              <select value={activeAgent ? String(activeAgent.id) : ''} title="Assign agent"
-                onChange={(e) => assignAgent(String(activeId), e.target.value || null)}
-                className="hidden md:block border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 text-slate-600 max-w-[128px]">
-                <option value="">👤 Unassigned</option>
-                {isAgent ? (<>
-                  <option value={user?.id}>✅ Claim for me</option>
-                  {activeAgent && String(activeAgent.id) !== String(user?.id) && <option value={activeAgent.id} disabled>👤 {agentName(activeAgent)} (assigned)</option>}
-                </>) : assignable.map((a) => <option key={a.id} value={a.id}>{agentName(a)}</option>)}
-              </select>
-              <button onClick={() => toggleImportant(String(activeId))}
-                title={activeImportant ? 'Remove high importance' : 'Mark as high importance'}
-                className={`hidden md:block border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 hover:bg-slate-50 ${activeImportant ? '' : 'grayscale opacity-60'}`}>❗</button>
-              <button onClick={() => setStatus(String(activeId), activeStatus === 'archived' ? 'active' : 'archived')}
-                title={activeStatus === 'archived' ? 'Unarchive (back to inbox)' : 'Archive conversation'}
-                className="hidden md:block border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 hover:bg-slate-50">{activeStatus === 'archived' ? '📥' : '🗃'}</button>
-              <button onClick={() => setStatus(String(activeId), activeStatus === 'spam' ? 'active' : 'spam')}
-                title={activeStatus === 'spam' ? 'Not spam (back to inbox)' : 'Mark as spam'}
-                className="hidden md:block border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 hover:bg-slate-50">{activeStatus === 'spam' ? '✓' : '🚫'}</button>
-              {!activeContact && (
-                <button onClick={() => quickAddContact(active['messagesession-remote'])} title="Add as contact"
-                  className="hidden md:block border rounded-lg px-2.5 py-1.5 text-xs hover:bg-slate-50 whitespace-nowrap">＋ Add contact</button>
-              )}
-              <select value={fromNumber} onChange={(e) => setFromNumber(e.target.value)} title="Sending number"
-                className="hidden md:block border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 text-slate-600 max-w-[128px]">
-                {(isAgent ? agentAllowedOpts : numbers).map((n) => <option key={n.number} value={String(n.number)}>From: {fmtPhone(n.number)}</option>)}{isAgent && agentAllowedOpts.length === 0 && <option value="">No number assigned</option>}
-              </select>
-              <div className="relative">
-                <button ref={exportBtnRef} onClick={toggleExport} title="More actions"
-                  className="border rounded-lg px-2.5 py-1.5 text-xs hover:bg-slate-50 font-bold">⋮</button>
+              <div className="ml-auto flex items-center gap-1.5 shrink-0">
+                <select value={activeAgent ? String(activeAgent.id) : ''} title="Assign agent"
+                  onChange={(e) => assignAgent(String(activeId), e.target.value || null)}
+                  className="hidden md:block border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 text-slate-600 min-w-[160px] max-w-[220px]">
+                  <option value="">Agent: Unassigned</option>
+                  {isAgent ? (<>
+                    <option value={user?.id}>Agent: Claim for me</option>
+                    {activeAgent && String(activeAgent.id) !== String(user?.id) && <option value={activeAgent.id} disabled>Agent: {agentName(activeAgent)} (assigned)</option>}
+                  </>) : assignable.map((a) => <option key={a.id} value={a.id}>Agent: {agentName(a)}</option>)}
+                </select>
+                <select value={fromNumber} onChange={(e) => setFromNumber(e.target.value)} title="Sending number"
+                  className="hidden md:block border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 text-slate-600 min-w-[170px] max-w-[250px]">
+                  {(isAgent ? agentAllowedOpts : numbers).map((n) => <option key={n.number} value={String(n.number)}>From: {fmtPhone(n.number)}{digits(n.number) === mainNum ? ' (Default)' : ''}</option>)}{isAgent && agentAllowedOpts.length === 0 && <option value="">No number assigned</option>}
+                </select>
+                <button onClick={() => setChatSearchOpen((v) => !v)}
+                  title={chatSearchOpen ? 'Close search' : 'Search conversation'}
+                  className={`w-8 h-8 rounded-lg border flex items-center justify-center hover:bg-slate-50 ${chatSearchOpen ? 'bg-brand-50 border-brand-200 text-brand-700' : 'text-slate-600'}`}>
+                  <Search size={15} />
+                </button>
+                <button onClick={() => setStatus(String(activeId), activeStatus === 'archived' ? 'active' : 'archived')}
+                  title={activeStatus === 'archived' ? 'Unarchive (back to inbox)' : 'Archive conversation'}
+                  className={`w-8 h-8 rounded-lg border flex items-center justify-center hover:bg-slate-50 ${activeStatus === 'archived' ? 'bg-brand-50 border-brand-200 text-brand-700' : 'text-slate-600'}`}>
+                  <Archive size={15} />
+                </button>
+                <button onClick={() => setStatus(String(activeId), activeStatus === 'spam' ? 'active' : 'spam')}
+                  title={activeStatus === 'spam' ? 'Not spam (back to inbox)' : 'Mark as spam'}
+                  className={`w-8 h-8 rounded-lg border flex items-center justify-center hover:bg-slate-50 ${activeStatus === 'spam' ? 'bg-red-50 border-red-200 text-red-600' : 'text-slate-600'}`}>
+                  <Ban size={15} />
+                </button>
+                <div className="relative">
+                  <button ref={exportBtnRef} onClick={toggleExport} title="More actions"
+                    className="w-8 h-8 rounded-lg border flex items-center justify-center hover:bg-slate-50 text-slate-600">
+                    <MoreVertical size={15} />
+                  </button>
                 {showExport && exportPos && createPortal(<>
                   <div className="fixed inset-0 z-[90]" onClick={() => setShowExport(false)} />
                   <div className="fixed z-[100] w-64 md:w-48 bg-white border rounded-xl shadow-xl overflow-hidden" style={{ top: exportPos.top, right: exportPos.right }}>
@@ -984,7 +1108,7 @@ export default function Messages() {
                       </select>
                       <select value={fromNumber} onChange={(e) => setFromNumber(e.target.value)} aria-label="Sending number"
                         className="w-full border rounded-lg px-2 py-2 text-xs text-slate-600">
-                        {(isAgent ? agentAllowedOpts : numbers).map((n) => <option key={n.number} value={String(n.number)}>From: {fmtPhone(n.number)}</option>)}{isAgent && agentAllowedOpts.length === 0 && <option value="">No number assigned</option>}
+                        {(isAgent ? agentAllowedOpts : numbers).map((n) => <option key={n.number} value={String(n.number)}>From: {fmtPhone(n.number)}{digits(n.number) === mainNum ? ' (Default)' : ''}</option>)}{isAgent && agentAllowedOpts.length === 0 && <option value="">No number assigned</option>}
                       </select>
                       <div className="flex gap-1.5">
                         <button onClick={() => toggleImportant(String(activeId))} title="Importance" className="flex-1 border rounded-lg py-2 text-sm">❗</button>
@@ -995,35 +1119,82 @@ export default function Messages() {
                         <button onClick={() => quickAddContact(active['messagesession-remote'])} className="w-full border rounded-lg py-2 text-xs">＋ Add contact</button>
                       )}
                     </div>
+                    <button onClick={() => { setShowExport(false); toggleImportant(String(activeId)); }}
+                      className="w-full text-left px-3 py-2 text-xs hover:bg-slate-50 flex items-center gap-2">
+                      <span>❗</span> {activeImportant ? 'Remove high importance' : 'Mark as high importance'}
+                    </button>
+                    {!activeContact && (
+                      <button onClick={() => { setShowExport(false); quickAddContact(active['messagesession-remote']); }}
+                        className="w-full text-left px-3 py-2 text-xs hover:bg-slate-50 flex items-center gap-2">
+                        <span>＋</span> Add as contact
+                      </button>
+                    )}
                     <div className="px-3 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Export conversation</div>
                     <button onClick={() => exportChat('txt')} className="w-full text-left px-3 py-2 text-xs hover:bg-slate-50">📄 Plain text (.txt)</button>
                     <button onClick={() => exportChat('csv')} className="w-full text-left px-3 py-2 text-xs hover:bg-slate-50">📊 Spreadsheet (.csv)</button>
+                    <div className="border-t border-slate-100" />
+                    <button onClick={() => { setShowExport(false); setActiveId(null); }}
+                      className="w-full text-left px-3 py-2 text-xs hover:bg-slate-50">✕ Close conversation</button>
                   </div>
                 </>, document.body)}
               </div>
-              <button onClick={() => setActiveId(null)} title="Close"
-                className="hidden md:block w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-500 font-bold">✕</button>
+                </div>
+              </div>
+              {chatSearchOpen && (
+                <div className="px-3 sm:px-4 pb-2.5 flex items-center gap-2">
+                  <Search size={14} className="text-slate-400 shrink-0" />
+                  <input autoFocus value={chatSearch} onChange={(e) => setChatSearch(e.target.value)}
+                    placeholder="Search this conversation…"
+                    className="flex-1 border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
+                  {chatSearch.trim() && (
+                    <>
+                      <span className="text-[11px] text-slate-400 shrink-0">
+                        {visibleMsgs.length} match{visibleMsgs.length === 1 ? '' : 'es'}
+                      </span>
+                      <button onClick={() => setChatSearch('')} title="Clear" className="text-slate-400 hover:text-slate-700 shrink-0">
+                        <X size={14} />
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="flex-1 overflow-y-auto chat-scroll p-4 space-y-2">
-              {visibleMsgs.map((m) => {
+              {visibleMsgs.length > shownMsgs.length && (
+                <button onClick={() => setMsgLimit((l) => l + 100)} className="w-full text-center text-xs text-brand-600 hover:underline py-1">
+                  ↑ Load earlier messages ({visibleMsgs.length - shownMsgs.length} hidden)
+                </button>
+              )}
+              {shownMsgs.map((m, i) => {
                 const inbound = m.direction === 'orig';
+                const prev = i > 0 ? shownMsgs[i - 1] : null;
+                const newDay = !prev || dayKey(prev.timestamp) !== dayKey(m.timestamp);
                 return (
-                  <div key={m.id} className={`flex ${inbound ? 'justify-start' : 'justify-end'}`}>
+                  <Fragment key={m.id}>
+                  {newDay && (
+                    <div className="flex items-center gap-3 pt-2 pb-0.5 select-none">
+                      <span className="h-px flex-1 bg-slate-200" />
+                      <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{dayLabel(m.timestamp)}</span>
+                      <span className="h-px flex-1 bg-slate-200" />
+                    </div>
+                  )}
+                  <div className={`flex ${inbound ? 'justify-start' : 'justify-end'}`}>
                     <div className={`max-w-[70%] rounded-2xl px-3.5 py-2 text-sm shadow-sm whitespace-pre-wrap break-words ${inbound ? 'bg-white text-slate-800 rounded-tl-sm' : 'bg-brand-600 text-white rounded-tr-sm'}`}>
                       {m['file-access-url'] && <a href={m['file-access-url']} target="_blank" rel="noreferrer" className="underline text-xs block mb-1">📎 View attachment</a>}
                       {m.text || <em className="opacity-60">[media message]</em>}
                       <div className={`text-[10px] mt-1 ${inbound ? 'text-slate-400' : 'text-brand-100'}`}>
-                        {fmtDateTime(m.timestamp)}{m.direction === 'term' && m.status ? <> • <StatusTag status={m.status} ts={m.timestamp} /></> : ''}{m.direction === 'term' && /fail|error/i.test(String(m.status || '')) && m._payload ? <> • <button onClick={() => doSend(m._payload, m.id)} disabled={sending} title={m._error || 'Send failed'} className="underline font-bold hover:opacity-80 disabled:opacity-50">Retry</button></> : ''}
+                        {fmtTime(m.timestamp)}{inbound ? ' • Received' : ''}{m.direction === 'term' && m.status ? <> • <StatusTag status={m.status} ts={m.timestamp} /></> : ''}{m.direction === 'term' && /fail|error/i.test(String(m.status || '')) && m._payload ? <> • <button onClick={() => doSend(m._payload, m.id)} disabled={sending} title={m._error || 'Send failed'} className="underline font-bold hover:opacity-80 disabled:opacity-50">Retry</button></> : ''}
                       </div>
                     </div>
                   </div>
+                  </Fragment>
                 );
               })}
               <div ref={bottomRef} />
             </div>
 
-            <div className="bg-white border-t p-3 shrink-0">
+            <div data-tour="composer" className="bg-white border-t p-3 shrink-0">
               {attach && (
                 <div className="mb-2 flex items-center gap-2 text-xs bg-slate-50 border rounded-lg px-2 py-1.5 w-fit">
                   📎 {attach.name} ({Math.round(attach.size / 1024)} KB)
@@ -1131,12 +1302,21 @@ export default function Messages() {
         )}
       </div>
 
+      {panelContactId && (() => {
+        const pc = contacts.find((x) => String(contactId(x)) === String(panelContactId));
+        return pc ? (
+          <ContactPanel key={String(panelContactId)} contact={pc} companies={companies}
+            onClose={() => setPanelContactId(null)}
+            onSaved={() => { api.contacts().then(setContacts).catch(() => {}); setPanelContactId(null); }} />
+        ) : null;
+      })()}
       {showNew && (
         <NewMessageModal contacts={contacts} numbers={numbers} defaultFrom={fromNumber}
           templates={templates} contactByPhone={contactByPhone} companyName={companyName}
           senderName={senderName} user={user} myName={myName} onClose={() => setShowNew(false)}
           onSent={() => { setShowNew(false); api.sessions().then(setSessions); }} />
       )}
+      </div>
     </div>
   );
 }
@@ -1452,5 +1632,99 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
           className="bg-brand-700 hover:bg-brand-800 disabled:opacity-50 text-white rounded-r-lg px-4 py-2.5 text-sm font-semibold border-l border-brand-500">🕐 ▾</button>
       </div>
     </Modal>
+  );
+}
+
+/**
+ * Right-side contact panel — opened by clicking the conversation avatar when
+ * the number belongs to a saved contact. Editable fields, Update + Close,
+ * Escape cancels (no save).
+ */
+function ContactPanel({ contact, companies = [], onClose, onSaved }) {
+  const [f, setF] = useState({ ...contact });
+  const [busy, setBusy] = useState(false);
+  useEscape(onClose, true);
+  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+
+  const save = async () => {
+    if (!String(f['name-first-name'] || '').trim()) return toastError('First name is required.');
+    if (!String(f['name-last-name'] || '').trim()) return toastError('Last name is required.');
+    if (!String(f['phonenumber-cell'] || '').trim()) return toastError('Cellphone number is required.');
+    for (const [k, label] of PHONE_FIELDS) {
+      const v = String(f[k] || '').trim();
+      if (v && digits(v).length < 10) return toastError(`${label} number is invalid — needs at least 10 digits.`);
+    }
+    setBusy(true);
+    try {
+      await api.updateContact(contactId(contact), f);
+      // A company with no match gets created, same as the Contacts page.
+      const co = String(f.company || '').trim();
+      if (co && !companies.some((c) => (c.name || '').toLowerCase() === co.toLowerCase())) {
+        try { await api.createCompany({ name: co }); } catch (e) { /* non-fatal */ }
+      }
+      toastSuccess('Contact updated');
+      onSaved(f);
+    } catch (e) { toastError('Update failed: ' + (e?.response?.data?.message || e.message)); }
+    finally { setBusy(false); }
+  };
+
+  const input = (k, label, ph = '') => (
+    <div>
+      <label className="text-xs font-medium text-slate-600">{label}</label>
+      <input value={f[k] || ''} onChange={(e) => set(k, e.target.value)} placeholder={ph}
+        className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mt-1" />
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-[95] flex justify-end">
+      <div className="absolute inset-0 bg-slate-900/20" onClick={onClose} />
+      <div className="relative h-full w-full sm:w-96 bg-white border-l shadow-2xl flex flex-col">
+        <div className="flex items-center gap-3 px-4 py-3 border-b shrink-0">
+          <span className={`w-10 h-10 rounded-full text-white text-sm font-bold inline-flex items-center justify-center shrink-0 ${avatarColor(contactName(f))}`}>
+            {initials(contactName(f))}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="font-semibold text-slate-800 truncate">{contactName(f) || 'Contact'}</div>
+            <div className="text-[11px] text-slate-400 truncate">{f.company || 'No company'}</div>
+          </div>
+          <button onClick={onClose} title="Close (Esc)" className="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-500 font-bold shrink-0">✕</button>
+        </div>
+        <div className="flex-1 overflow-y-auto chat-scroll p-4 space-y-2.5">
+          <div className="grid grid-cols-2 gap-2">
+            {input('name-first-name', 'First name *')}
+            {input('name-last-name', 'Last name *')}
+          </div>
+          {input('name-middle-name', 'Middle name')}
+          {input('email', 'Email')}
+          <div>
+            <label className="text-xs font-medium text-slate-600">Company</label>
+            <input value={f.company || ''} onChange={(e) => set('company', e.target.value)}
+              placeholder="Type or pick a company…" list="msg-contact-company-list"
+              className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mt-1" />
+            <datalist id="msg-contact-company-list">
+              {[...new Set(companies.map((g) => g.name).filter(Boolean))].map((c) => <option key={c} value={c} />)}
+            </datalist>
+            {String(f.company || '').trim() && !companies.some((c) => (c.name || '').toLowerCase() === String(f.company).trim().toLowerCase()) && (
+              <p className="text-[11px] text-brand-700 mt-1">✨ New company — it will be created on save.</p>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {input('phonenumber-cell', 'Cellphone *')}
+            {input('phonenumber-work', 'Work')}
+            {input('phonenumber-home', 'Home')}
+            {input('phonenumber-fax', 'Fax')}
+          </div>
+          <p className="text-[11px] text-slate-400">Phone numbers need 10+ digits. Short work extensions can't receive SMS.</p>
+        </div>
+        <div className="border-t p-3 flex gap-2 shrink-0">
+          <button type="button" onClick={onClose} className="flex-1 border rounded-lg py-2 text-sm hover:bg-slate-50">Close</button>
+          <button type="button" onClick={save} disabled={busy}
+            className="flex-1 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg py-2 text-sm font-semibold">
+            {busy ? 'Updating…' : 'Update'}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
