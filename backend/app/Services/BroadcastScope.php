@@ -30,6 +30,19 @@ class BroadcastScope
                 return ['domain' => $admin->tenant->domain, 'user' => $admin->tenant->dynalink_user, 'via' => 'tenant'];
             }
         }
+        if ($p = $session->get('agent_portal')) {
+            $identity = \App\Models\AgentIdentity::find($p['id'] ?? null);
+            if ($identity && $identity->isActive()) {
+                // Portal agents listen on the TENANT scope, because shared
+                // threads are owned by other extensions — listening on their
+                // own extension would miss every shared-number event.
+                $tenant = \App\Models\Tenant::where('domain', $identity->domain)->first();
+                if ($tenant && $tenant->isActive()) {
+                    return ['domain' => $tenant->domain, 'user' => $tenant->dynalink_user, 'via' => 'agent_portal'];
+                }
+            }
+            return null;
+        }
         if ($a = $session->get('agent')) {
             $agent = Agent::find($a['id'] ?? null);
             if ($agent && ($agent->status ?: 'active') === 'active'

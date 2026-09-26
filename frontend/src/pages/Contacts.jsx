@@ -87,7 +87,7 @@ export default function Contacts() {
 
   return (
     <div className="h-full flex flex-col md:flex-row min-h-0">
-      <div className="w-full md:w-80 bg-white border-b md:border-b-0 md:border-r flex flex-col shrink-0 max-h-[45%] md:max-h-none">
+      <div className="w-full md:w-64 lg:w-80 bg-white border-b md:border-b-0 md:border-r flex flex-col shrink-0 max-h-[45%] md:max-h-none">
         <div className="p-3 border-b space-y-2">
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="🔍 Search contacts…"
             className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />

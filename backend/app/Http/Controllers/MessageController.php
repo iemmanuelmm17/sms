@@ -12,6 +12,30 @@ use App\Models\SentMessageLog;
 class MessageController extends Controller
 {
     use ResolvesActor;
+    /**
+     * NS-API user to post a new message as.
+     *
+     * A message must be sent by the extension that OWNS the from-number. For
+     * a granted SHARED number that is someone else, so posting as the caller's
+     * own extension makes the provider reject it as an invalid from-number.
+     * Admins and legacy sessions keep their existing scope.
+     */
+    protected function senderFor(Request $request, array $s, ?string $fromNumber): string
+    {
+        $digits = preg_replace('/\D/', '', (string) $fromNumber);
+        if ($digits === '') return $s['user'];
+        try {
+            $owner = app(\App\Services\DynalinkService::class)
+                ->numberOwner($this->dtoken($request), $s['domain'], $digits);
+            if ($owner !== null && $owner !== '') return $owner;
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('senderFor: owner lookup failed', [
+                'domain' => $s['domain'], 'number' => $digits, 'error' => $e->getMessage(),
+            ]);
+        }
+        return $s['user'];   // fall back rather than block the send
+    }
+
     public function __construct(protected DynalinkService $dynalink, protected OptOutService $optouts) {}
 
     protected function sess(Request $r): array
@@ -61,7 +85,8 @@ class MessageController extends Controller
         }
 
         [$status, $body] = $this->dynalink->sendNew(
-            $this->dtoken(request()), $s['domain'], $s['user'], $payload
+            $this->dtoken(request()), $s['domain'],
+            $this->senderFor($request, $s, $payload['from-number'] ?? null), $payload
         );
 
         if ($status >= 200 && $status < 300) {
@@ -139,7 +164,8 @@ class MessageController extends Controller
 
         // Single destination → plain new-message call.
         if (count($dests) === 1) {
-            [$status, $body] = $this->dynalink->sendNew($this->dtoken(request()), $s['domain'], $s['user'], [
+            [$status, $body] = $this->dynalink->sendNew($this->dtoken(request()), $s['domain'],
+                $this->senderFor($request, $s, $data['from-number'] ?? null), [
                 'type'        => $data['type'] ?? 'sms',
                 'message'     => $data['message'],
                 'destination' => $dests[0],

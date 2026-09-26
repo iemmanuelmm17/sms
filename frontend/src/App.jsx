@@ -1,15 +1,18 @@
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { AGENTS_ENABLED } from './lib/features';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { BrandProvider } from './context/BrandContext';
 import { useEffect, Component, Suspense, lazy } from 'react';
 import { api, setUnauthorizedHandler } from './api/client';
 import { SocketProvider } from './context/SocketContext';
+import { ReferenceDataProvider } from './context/ReferenceDataContext';
 import Layout from './components/Layout';
 import Notifier from './components/Notifier';
 import Toasts from './components/Toasts';
 import QuickAddContact from './components/QuickAddContact';
 import Login from './pages/Login';
 const Messages = lazy(() => import('./pages/Messages'));
+const Users = lazy(() => import('./pages/Users'));
 const Scheduler = lazy(() => import('./pages/Scheduler'));
 const Contacts = lazy(() => import('./pages/Contacts'));
 const Companies = lazy(() => import('./pages/Companies'));
@@ -146,6 +149,9 @@ export default function App() {
             <Guard>
               <ErrorBoundary>
               <SocketProvider>
+                {/* Above the router: reference data must survive route changes,
+                    otherwise every return to Messages refetches all of it. */}
+                <ReferenceDataProvider>
                 <Layout>
                   <Suspense fallback={<PageLoader />}>
                   <Routes>
@@ -153,7 +159,10 @@ export default function App() {
                     <Route path="scheduler" element={<Scheduler />} />
                     <Route path="contacts" element={<Contacts />} />
                     <Route path="companies" element={<Companies />} />
-                    <Route path="agents" element={<Agents />} />
+                    {AGENTS_ENABLED && <Route path="agents" element={<Agents />} />}
+                    <Route path="users" element={<Users />} />
+                    {/* Old path kept so existing links/bookmarks don't 404. */}
+                    <Route path="people" element={<Navigate to="/app/users" replace />} />
                     <Route path="templates" element={<Templates />} />
                     <Route path="auto-reply" element={<AutoReply />} />
                     <Route path="settings" element={<Settings />} />
@@ -166,6 +175,7 @@ export default function App() {
                   </Routes>
                   </Suspense>
                 </Layout>
+                </ReferenceDataProvider>
                 <Notifier />
                 <Toasts />
                 <QuickAddContact />

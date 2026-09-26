@@ -129,6 +129,15 @@ Route::get('/settings/password-expiry', [TenantSettingsController::class, 'show'
 Route::put('/settings/password-expiry', [TenantSettingsController::class, 'update']);
 
 Route::get('/sms-numbers', [SmsNumberController::class, 'index']);
+// Domain-wide inventory for the admin Numbers page (admin-only, enforced in the controller).
+Route::get('/domain-sms-numbers', [SmsNumberController::class, 'domainIndex']);
+
+// Portal-agent roster + shared-number grants (admin-only, enforced in the controller).
+Route::get('/agent-identities', [\App\Http\Controllers\AgentIdentityController::class, 'index']);
+Route::put('/agent-identities/{ext}/status', [\App\Http\Controllers\AgentIdentityController::class, 'status']);
+Route::put('/agent-identities/{ext}/grants', [\App\Http\Controllers\AgentIdentityController::class, 'grants']);
+Route::post('/agent-identities/{ext}/resync', [\App\Http\Controllers\AgentIdentityController::class, 'resync']);
+Route::post('/agent-identities/{ext}/unlock', [\App\Http\Controllers\AgentIdentityController::class, 'unlock']);
 Route::get('/subscriptions', [SubscriptionController::class, 'index']);
 Route::post('/subscriptions/ensure', [SubscriptionController::class, 'ensure'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':20,1');
 Route::delete('/subscriptions/{model}', [SubscriptionController::class, 'destroy'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':20,1');

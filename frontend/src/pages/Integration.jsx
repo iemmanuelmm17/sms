@@ -80,7 +80,8 @@ function RevioCreds({ entry, onChange }) {
       setUsername('');
       setClientCode('');
       setPassword('');
-      onChange({ provider: 'revio', label: 'Rev.io', configured: false, username: '', client_code: '', status: 'unconfigured', numbers: [], spiels: {}, spiels_customized: [] });
+      onChange({ ...entry, configured: false, username: '', client_code: '', status: 'unconfigured',
+        last_checked_at: null, last_error: null, numbers: [], spiels_customized: [] });
       toastSuccess('Rev.io disconnected.');
     } catch (ex) {
       toastError(ex?.response?.data?.message || 'Disconnect failed.');
@@ -116,28 +117,30 @@ function RevioCreds({ entry, onChange }) {
           <label className="text-xs font-medium text-slate-600">Client Code</label>
           <input value={clientCode} onChange={(e) => setClientCode(e.target.value)} className={input} autoComplete="off" />
         </div>
-        <div className="flex items-center gap-2 pt-1">
+        <div className="flex items-center gap-2 pt-1 flex-wrap">
+          {configured && (
+            <button
+              type="button" onClick={test} disabled={busy}
+              title="Re-check the saved credentials without changing them"
+              className="text-sm border rounded-lg px-4 py-2 text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+            >
+              {busy ? 'Working…' : 'Test connection'}
+            </button>
+          )}
           <button
             type="submit" disabled={busy}
+            title="Verify these credentials against Rev.io, then store them"
             className="text-sm bg-slate-900 text-white rounded-lg px-4 py-2 hover:bg-slate-700 disabled:opacity-50"
           >
-            {busy ? 'Working…' : 'Save & test'}
+            {busy ? 'Working…' : 'Save & test connection'}
           </button>
           {configured && (
-            <>
-              <button
-                type="button" onClick={test} disabled={busy}
-                className="text-sm border rounded-lg px-4 py-2 text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-              >
-                Test connection
-              </button>
-              <button
-                type="button" onClick={disconnect} disabled={busy}
-                className="text-sm text-red-600 hover:underline ml-auto disabled:opacity-50"
-              >
-                Disconnect
-              </button>
-            </>
+            <button
+              type="button" onClick={disconnect} disabled={busy}
+              className="text-sm text-red-600 hover:underline ml-auto disabled:opacity-50 py-2"
+            >
+              Disconnect
+            </button>
           )}
         </div>
       </form>
@@ -150,6 +153,7 @@ function NumbersSection({ entry, onChange }) {
   const [sel, setSel] = useState(entry?.numbers || []);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [q, setQ] = useState('');
 
   useEffect(() => {
     let dead = false;
@@ -184,32 +188,94 @@ function NumbersSection({ entry, onChange }) {
     }
   };
 
+  // Accounts can have 20+ numbers: search by digits or formatted text.
+  const nq = digits(q);
+  const shown = !q.trim() ? all : all.filter((n) => {
+    const d = digits(n);
+    return (nq && d.includes(nq)) || fmtNum(n).toLowerCase().includes(q.trim().toLowerCase());
+  });
+  const shownDigits = shown.map(digits);
+  const allShownOn = shownDigits.length > 0 && shownDigits.every((d) => sel.includes(d));
+  const dirty = JSON.stringify([...sel].sort()) !== JSON.stringify([...(entry?.numbers || [])].sort());
+
   return (
     <div>
-      <h3 className="text-sm font-bold text-slate-900">Assigned SMS numbers</h3>
-      <p className="text-xs text-slate-400 mb-2">The dialog answers only on checked numbers. Each number can serve one integration at a time.</p>
-      {!loaded && <div className="text-sm text-slate-500">Loading numbers…</div>}
-      {loaded && all.length === 0 && <div className="text-sm text-slate-500">No SMS numbers found on this account.</div>}
-      {loaded && all.length > 0 && (
-        <div className="border rounded-lg divide-y max-h-48 overflow-y-auto mb-3">
-          {all.map((n) => {
-            const d = digits(n);
-            const checked = sel.includes(d);
-            return (
-              <label key={d} className="flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 cursor-pointer">
-                <input type="checkbox" checked={checked} onChange={() => toggle(n)} className="accent-slate-900" />
-                <span>{fmtNum(n)}</span>
-              </label>
-            );
-          })}
+      <div className="flex items-start gap-2 flex-wrap">
+        <div className="flex-1 min-w-0">
+          <h3 className="text-sm font-bold text-slate-900">Assigned SMS numbers</h3>
+          <p className="text-xs text-slate-400">The dialog answers only on checked numbers. Each number can serve one integration at a time.</p>
         </div>
+        {sel.length > 0 && (
+          <span className="text-[11px] font-semibold text-brand-700 bg-brand-50 border border-brand-200 rounded-full px-2 py-0.5 shrink-0">
+            {sel.length} assigned
+          </span>
+        )}
+      </div>
+
+      {!loaded && <div className="text-sm text-slate-500 mt-2">Loading numbers…</div>}
+      {loaded && all.length === 0 && <div className="text-sm text-slate-500 mt-2">No SMS numbers found on this account.</div>}
+
+      {loaded && all.length > 0 && (
+        <>
+          {all.length > 5 && (
+            <input
+              value={q} onChange={(e) => setQ(e.target.value)}
+              placeholder="🔍 Search numbers…" aria-label="Search SMS numbers"
+              className="w-full border rounded-lg px-3 py-2 text-sm mt-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
+            />
+          )}
+          <div className="flex items-center gap-2 flex-wrap mt-2 text-[11px]">
+            <button type="button" onClick={() => setSel((p) => [...new Set([...p, ...shownDigits])])}
+              disabled={allShownOn}
+              className="font-medium text-brand-600 hover:underline py-1 disabled:opacity-40 disabled:no-underline">
+              Select {q.trim() ? 'matching' : 'all'}
+            </button>
+            <span className="text-slate-300">|</span>
+            <button type="button" onClick={() => setSel((p) => p.filter((d) => !shownDigits.includes(d)))}
+              disabled={!shownDigits.some((d) => sel.includes(d))}
+              className="font-medium text-brand-600 hover:underline py-1 disabled:opacity-40 disabled:no-underline">
+              Clear {q.trim() ? 'matching' : 'all'}
+            </button>
+            <span className="text-slate-400 ml-auto">
+              {q.trim() ? `${shown.length} of ${all.length} shown` : `${all.length} number${all.length === 1 ? '' : 's'}`}
+            </span>
+          </div>
+
+          <div className="border rounded-lg divide-y max-h-64 overflow-y-auto mt-1.5">
+            {shown.map((n) => {
+              const d = digits(n);
+              const checked = sel.includes(d);
+              return (
+                <label key={d} className="flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 cursor-pointer">
+                  <input type="checkbox" checked={checked} onChange={() => toggle(n)} className="accent-slate-900 shrink-0" />
+                  <span className="min-w-0 truncate">{fmtNum(n)}</span>
+                  {checked && <span className="ml-auto text-[10px] font-semibold text-brand-700 shrink-0">assigned</span>}
+                </label>
+              );
+            })}
+            {shown.length === 0 && (
+              <div className="px-3 py-3 text-xs text-slate-400">No numbers match “{q.trim()}”.</div>
+            )}
+          </div>
+        </>
       )}
-      <button
-        type="button" onClick={save} disabled={busy || !loaded}
-        className="text-sm bg-slate-900 text-white rounded-lg px-4 py-2 hover:bg-slate-700 disabled:opacity-50"
-      >
-        {busy ? 'Saving…' : 'Save numbers'}
-      </button>
+
+      <div className="flex items-center gap-2 flex-wrap mt-3">
+        <button
+          type="button" onClick={save} disabled={busy || !loaded || !dirty}
+          title={dirty ? 'Save assigned numbers' : 'No changes to save'}
+          className="text-sm bg-slate-900 text-white rounded-lg px-4 py-2 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {busy ? 'Saving…' : dirty ? 'Save numbers' : 'Saved'}
+        </button>
+        {dirty && (
+          <>
+            <button type="button" onClick={() => setSel(entry?.numbers || [])}
+              className="text-sm text-slate-500 hover:text-slate-700 font-medium px-2 py-2">Discard</button>
+            <span className="text-[11px] text-amber-700">Unsaved changes</span>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -521,12 +587,81 @@ function SpielsSection({ entry, onChange }) {
   );
 }
 
+const REVIO_TABS = [
+  { id: 'connection', label: 'Connection' },
+  { id: 'routing',    label: 'Numbers & hours' },
+  { id: 'behavior',   label: 'Tickets & verification' },
+  { id: 'messages',   label: 'Dialog messages' },
+];
+
+function RevioTabs({ entry, onChange }) {
+  const [tab, setTab] = useState('connection');
+  const configured = !!entry.configured;
+
+  // Credentials gate everything else: an unconfigured account has nothing to
+  // route or script yet, so those tabs stay disabled rather than showing
+  // controls whose saves would fail.
+  useEffect(() => { if (!configured && tab !== 'connection') setTab('connection'); }, [configured, tab]);
+
+  return (
+    <div>
+      <div role="tablist" aria-label="Rev.io settings"
+        className="flex gap-1 border-b overflow-x-auto min-w-0 -mx-5 px-5">
+        {REVIO_TABS.map((t) => {
+          const locked = !configured && t.id !== 'connection';
+          const active = tab === t.id;
+          return (
+            <button
+              key={t.id} role="tab" type="button"
+              aria-selected={active} aria-controls={`revio-panel-${t.id}`}
+              disabled={locked}
+              title={locked ? 'Connect Rev.io first' : undefined}
+              onClick={() => setTab(t.id)}
+              className={`text-sm font-medium px-3 py-2 whitespace-nowrap shrink-0 border-b-2 -mb-px transition-colors ${
+                active
+                  ? 'border-brand-600 text-brand-700'
+                  : locked
+                    ? 'border-transparent text-slate-300 cursor-not-allowed'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              {t.label}
+              {locked && <span aria-hidden="true" className="ml-1 text-[10px]">🔒</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      <div id={`revio-panel-${tab}`} role="tabpanel" className="pt-5">
+        {tab === 'connection' && <RevioCreds entry={entry} onChange={onChange} />}
+
+        {tab === 'routing' && (
+          <div className="space-y-6">
+            <NumbersSection entry={entry} onChange={onChange} />
+            <div className="border-t pt-5"><HoursSection entry={entry} onChange={onChange} /></div>
+          </div>
+        )}
+
+        {tab === 'behavior' && (
+          <div className="space-y-6">
+            <TicketSection entry={entry} onChange={onChange} />
+            <div className="border-t pt-5"><SettingsSection entry={entry} onChange={onChange} /></div>
+            <div className="border-t pt-5"><VerificationSection entry={entry} onChange={onChange} /></div>
+          </div>
+        )}
+
+        {tab === 'messages' && <SpielsSection entry={entry} onChange={onChange} />}
+      </div>
+    </div>
+  );
+}
+
 function ProviderCard({ entry, open, onToggle, onChange }) {
   const isRevio = entry.provider === 'revio';
   return (
     <div className="bg-white border rounded-xl max-w-2xl overflow-hidden">
       <button
-        type="button" onClick={onToggle}
+        type="button" onClick={onToggle} aria-expanded={open}
         className="w-full flex items-center gap-3 px-5 py-4 hover:bg-slate-50 text-left"
       >
         <svg
@@ -535,28 +670,14 @@ function ProviderCard({ entry, open, onToggle, onChange }) {
         >
           <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
         </svg>
-        <span className="text-base font-bold text-slate-900">{entry.label || entry.provider}</span>
-        <span className="ml-auto"><StatusPill status={entry.status} /></span>
+        <span className="text-base font-bold text-slate-900 min-w-0 truncate">{entry.label || entry.provider}</span>
+        <span className="ml-auto shrink-0"><StatusPill status={entry.status} /></span>
       </button>
       {open && (
-        <div className="px-5 pb-5 pt-1 border-t space-y-6">
-          {isRevio ? (
-            <>
-              <RevioCreds entry={entry} onChange={onChange} />
-              {entry.configured && (
-                <>
-                  <div className="border-t pt-5"><NumbersSection entry={entry} onChange={onChange} /></div>
-                  <div className="border-t pt-5"><VerificationSection entry={entry} onChange={onChange} /></div>
-                  <div className="border-t pt-5"><HoursSection entry={entry} onChange={onChange} /></div>
-                  <div className="border-t pt-5"><TicketSection entry={entry} onChange={onChange} /></div>
-                  <div className="border-t pt-5"><SettingsSection entry={entry} onChange={onChange} /></div>
-                  <div className="border-t pt-5"><SpielsSection entry={entry} onChange={onChange} /></div>
-                </>
-              )}
-            </>
-          ) : (
-            <p className="text-sm text-slate-500">Configuration for this provider is coming soon.</p>
-          )}
+        <div className="px-5 pb-5 border-t">
+          {isRevio
+            ? <RevioTabs entry={entry} onChange={onChange} />
+            : <p className="text-sm text-slate-500 pt-5">Configuration for this provider is coming soon.</p>}
         </div>
       )}
     </div>

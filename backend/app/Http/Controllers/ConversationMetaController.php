@@ -17,10 +17,29 @@ use Illuminate\Http\Request;
 class ConversationMetaController extends Controller
 {
     use ResolvesActor;
+    /**
+     * Conversation metadata is TENANT-WIDE, not per viewer.
+     *
+     * It used to be keyed on the viewing actor, which gave every user a private
+     * copy — two agents on the same shared number could not see each other's
+     * queue, and an admin saw neither. Reads and writes are now scoped by
+     * domain alone; `user` is still written for provenance but is not part of
+     * the identity (see migration 000049).
+     */
     protected function scope(Request $r): array
     {
         $a = $this->actor($r);
         return [$a['domain'], $a['user']];
+    }
+
+    /** Find-or-make the single shared row for a conversation. */
+    protected function rowFor(string $domain, string $user, string $sessionId): ConversationMeta
+    {
+        $m = ConversationMeta::where('domain', $domain)->where('session_id', $sessionId)->first();
+        if ($m) return $m;
+        return new ConversationMeta([
+            'domain' => $domain, 'user' => $user, 'session_id' => $sessionId,
+        ]);
     }
 
     /** GET /api/conversation-meta */
@@ -29,7 +48,7 @@ class ConversationMetaController extends Controller
         [$domain, $user] = $this->scope($request);
         try {
             return response()->json(
-                ConversationMeta::where('domain', $domain)->where('user', $user)->get()
+                ConversationMeta::where('domain', $domain)->get()
                     ->mapWithKeys(fn($m) => [$m->session_id => $this->shape($m)])
             );
         } catch (QueryException $e) {
@@ -42,31 +61,52 @@ class ConversationMetaController extends Controller
     {
         [$domain, $user] = $this->scope($request);
         $data = $request->validate([
-            'agent_id'  => 'sometimes|nullable|integer|exists:agents,id',
-            'pinned'    => 'sometimes|boolean',
-            'status'    => 'sometimes|in:active,archived,spam,deleted,queued',
-            'important' => 'sometimes|boolean',
+            'agent_id'    => 'sometimes|nullable|integer|exists:agents,id',
+            'identity_id' => 'sometimes|nullable|integer|exists:agent_identities,id',
+            'pinned'      => 'sometimes|boolean',
+            'status'      => 'sometimes|in:active,archived,spam,deleted,queued',
+            'important'   => 'sometimes|boolean',
         ]);
         $actor = $this->actor($request);
-        if ($actor['role'] === 'agent' && array_key_exists('agent_id', $data)
-            && $data['agent_id'] !== null && (int) $data['agent_id'] !== (int) $actor['agent_id']) {
-            abort(403, 'Agents can only assign conversations to themselves.');
+
+        // Portal users claim via identity_id (they have no legacy agents row).
+        if (($actor['role'] ?? '') === 'agent' && !empty($actor['portal_auth'])) {
+            if (array_key_exists('agent_id', $data) && $data['agent_id'] !== null) {
+                abort(403, 'Agents can only assign conversations to themselves.');
+            }
+            if (array_key_exists('identity_id', $data) && $data['identity_id'] !== null
+                && (int) $data['identity_id'] !== (int) ($actor['identity_id'] ?? 0)) {
+                abort(403, 'Agents can only assign conversations to themselves.');
+            }
+            // Claiming as an identity clears any stale legacy assignment.
+            if (array_key_exists('identity_id', $data)) $data['agent_id'] = null;
+        } elseif (($actor['role'] ?? '') === 'agent') {
+            if (array_key_exists('agent_id', $data)
+                && $data['agent_id'] !== null && (int) $data['agent_id'] !== (int) $actor['agent_id']) {
+                abort(403, 'Agents can only assign conversations to themselves.');
+            }
         }
         $prevAgent = null;
+        if (array_key_exists('identity_id', $data)) {
+            $prevAgent = ConversationMeta::where('domain', $domain)
+                ->where('session_id', $sessionId)->value('identity_id');
+        }
         if (array_key_exists('agent_id', $data)) {
-            $prevAgent = ConversationMeta::where('domain', $domain)->where('user', $user)
+            $prevAgent = ConversationMeta::where('domain', $domain)
                 ->where('session_id', $sessionId)->value('agent_id');
         }
         try {
-            $m = ConversationMeta::updateOrCreate(
-                ['domain' => $domain, 'user' => $user, 'session_id' => $sessionId],
-                $data
-            );
+            $m = $this->rowFor($domain, $user, $sessionId);
+            $m->fill($data);
+            $m->save();
         } catch (QueryException $e) {
             return $this->migrateHint();
         }
-        if (array_key_exists('agent_id', $data) && (string) ($prevAgent ?? '') !== (string) ($m->agent_id ?? '')) {
-            $this->audit($request, 'conversation.assigned', ['session_id' => $sessionId, 'from' => $prevAgent, 'to' => $m->agent_id]);
+        $nowAssigned = $m->identity_id ?? $m->agent_id;
+        if ((array_key_exists('agent_id', $data) || array_key_exists('identity_id', $data))
+            && (string) ($prevAgent ?? '') !== (string) ($nowAssigned ?? '')) {
+            $this->audit($request, 'conversation.assigned',
+                ['session_id' => $sessionId, 'from' => $prevAgent, 'to' => $nowAssigned]);
         }
         DataChanged::send($domain, $user, 'convo-meta', 'saved', $sessionId, $this->shape($m));
         return response()->json($this->shape($m));
@@ -86,8 +126,9 @@ class ConversationMetaController extends Controller
     protected function shape(ConversationMeta $m): array
     {
         return [
-            'agent_id'  => $m->agent_id,
-            'pinned'    => (bool) $m->pinned,
+            'agent_id'    => $m->agent_id,
+            'identity_id' => $m->identity_id,
+            'pinned'      => (bool) $m->pinned,
             'status'    => $m->status ?? 'active',
             'important' => (bool) $m->important,
             'updated_at' => $m->updated_at?->toDateTimeString(),

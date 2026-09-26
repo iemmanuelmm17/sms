@@ -45,7 +45,7 @@ export default function Templates() {
 
   return (
     <div className="h-full flex flex-col md:flex-row min-h-0">
-      <div className="w-full md:w-80 bg-white border-b md:border-b-0 md:border-r flex flex-col shrink-0 max-h-[45%] md:max-h-none">
+      <div className="w-full md:w-64 lg:w-80 bg-white border-b md:border-b-0 md:border-r flex flex-col shrink-0 max-h-[45%] md:max-h-none">
         <div className="p-3 border-b">
           <button onClick={startNew} className="w-full bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-lg py-2">+ New Template</button>
         </div>

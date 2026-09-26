@@ -68,7 +68,7 @@ export default function TenantDetail() {
       const list = Array.isArray(r?.numbers) ? r.numbers : [];
       setMainNums(list);
       setMainPick(list[0]?.digits || '');
-      if (!list.length) toastError('No assigned SMS numbers on this account.');
+      if (!list.length) toastError('No SMS numbers found on this domain.');
     } catch (e) { toastError(e?.response?.data?.message || 'Could not load SMS numbers.'); }
     finally { setLoadingMain(false); }
   };
@@ -201,13 +201,18 @@ export default function TenantDetail() {
             ) : mainNums.length === 0 ? (
               <div><button type="button" onClick={loadMainNums} disabled={loadingMain}
                 className="mt-1 text-sm border rounded-lg px-4 py-2 hover:bg-slate-50 disabled:opacity-50">
-                {loadingMain ? 'Loading…' : 'Load assigned numbers'}</button></div>
+                {loadingMain ? 'Loading…' : 'Load domain SMS numbers'}</button></div>
             ) : (
               <div className="mt-1 border rounded-lg p-2 space-y-1 max-h-36 overflow-y-auto bg-white">
                 {mainNums.map((n) => (
                   <label key={n.digits} className="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="radio" name="main-pick" checked={mainPick === n.digits} onChange={() => setMainPick(n.digits)} />
-                    {fmtPhone(n.number)}
+                    <input type="radio" name="main-pick" checked={mainPick === n.digits} onChange={() => setMainPick(n.digits)} className="shrink-0" />
+                    <span className="min-w-0 truncate">{fmtPhone(n.number)}</span>
+                    {n.dest && (
+                      <span className="text-[11px] font-medium text-slate-500 bg-slate-100 border border-slate-200 rounded-full px-2 py-0.5 shrink-0">
+                        ext {n.dest}
+                      </span>
+                    )}
                   </label>
                 ))}
                 <button type="button" onClick={setMainOnce} disabled={settingMain || !mainPick}

@@ -54,7 +54,7 @@ export default function Scheduler() {
     partial: items.filter((m) => m.status === 'partial').length,
   };
   const shown = tab === 'all' ? items : items.filter((m) => m.status === tab);
-  const tabCls = (t) => `px-3 py-2.5 text-xs font-semibold border-b-2 -mb-px ${tab === t ? 'border-brand-600 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-600'}`;
+  const tabCls = (t) => `px-3 py-2.5 text-xs font-semibold border-b-2 -mb-px whitespace-nowrap shrink-0 ${tab === t ? 'border-brand-600 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-600'}`;
 
   const statusBadge = (s) => ({
     pending: 'bg-amber-100 text-amber-800', sending: 'bg-blue-100 text-blue-800',
@@ -64,8 +64,8 @@ export default function Scheduler() {
 
   return (
     <div className="h-full flex flex-col md:flex-row min-h-0">
-      <div className="w-full md:w-96 bg-white border-b md:border-b-0 md:border-r flex flex-col shrink-0 max-h-[45%] md:max-h-none">
-        <div className="px-3 flex gap-1 border-b shrink-0">
+      <div className="w-full md:w-64 lg:w-96 bg-white border-b md:border-b-0 md:border-r flex flex-col shrink-0 max-h-[45%] md:max-h-none">
+        <div className="px-3 flex gap-1 border-b shrink-0 min-w-0 overflow-x-auto">
           <button onClick={() => setTab('all')} className={tabCls('all')}>All ({counts.all})</button>
           <button onClick={() => setTab('pending')} className={tabCls('pending')}>Pending ({counts.pending})</button>
           <button onClick={() => setTab('partial')} className={tabCls('partial')}>Partial ({counts.partial})</button>
@@ -104,23 +104,23 @@ export default function Scheduler() {
                   ✓ {m.send_log.filter((l) => l.ok).length}/{m.send_log.length} delivered
                 </div>
               )}
-              <div className="flex gap-3 mt-1.5">
-                <button onClick={() => setViewItem(m)} className="text-[11px] text-brand-600 hover:underline">View</button>
-                <button onClick={() => setReportItem(m)} className="text-[11px] text-brand-600 hover:underline">Report</button>
+              <div className="flex gap-3 mt-1.5 flex-wrap">
+                <button onClick={() => setViewItem(m)} className="text-[11px] text-brand-600 hover:underline py-1">View</button>
+                <button onClick={() => setReportItem(m)} className="text-[11px] text-brand-600 hover:underline py-1">Report</button>
                 {m.status === 'pending' && (
                   <>
-                    <button onClick={() => setEditItem(m)} className="text-[11px] text-brand-600 hover:underline">Update</button>
+                    <button onClick={() => setEditItem(m)} className="text-[11px] text-brand-600 hover:underline py-1">Update</button>
                     <button onClick={() => {
                       if (!confirm(`Send this message NOW to ${m.recipients?.length || 0} recipient(s)?\n\n"${(m.message || '').slice(0, 100)}"\n\nThe scheduled time will be ignored.`)) return;
                       api.sendNowScheduled(m.id).then(() => { reload(); toastSuccess('Sending now…'); }).catch((e) => toastError(e?.response?.data?.message || e.message));
-                    }} className="text-[11px] text-emerald-700 hover:underline font-semibold">⚡ Send now</button>
-                    <button onClick={() => api.cancelScheduled(m.id).then(() => { reload(); toastSuccess('Cancelled'); }).catch((e) => toastError(e.message))} className="text-[11px] text-amber-700 hover:underline">Cancel</button>
+                    }} className="text-[11px] text-emerald-700 hover:underline font-semibold py-1">⚡ Send now</button>
+                    <button onClick={() => api.cancelScheduled(m.id).then(() => { reload(); toastSuccess('Cancelled'); }).catch((e) => toastError(e.message))} className="text-[11px] text-amber-700 hover:underline py-1">Cancel</button>
                   </>
                 )}
                 {m.status === 'partial' && (
                   <button
                     onClick={() => api.retryScheduled(m.id).then(() => { reload(); toastSuccess('Retrying failed recipients…'); }).catch((e) => toastError(e?.response?.data?.message || e.message))}
-                    className="text-[11px] text-emerald-700 hover:underline font-semibold">↻ Retry failed</button>
+                    className="text-[11px] text-emerald-700 hover:underline font-semibold py-1">↻ Retry failed</button>
                 )}
                 {m.status !== 'sent' && (
                   <button onClick={() => {
@@ -128,7 +128,7 @@ export default function Scheduler() {
                       ? `Delete this PENDING message?\n\n"${(m.name || m.message || '').slice(0, 80)}"\n\nIt has NOT been sent yet — deleting cancels it for all ${m.recipients?.length || 0} recipient(s).`
                       : `Delete this ${m.status} message?\n\n"${(m.name || m.message || '').slice(0, 80)}"`;
                     if (confirm(msg)) api.deleteScheduled(m.id).then(() => { reload(); toastSuccess('Deleted'); }).catch((e) => toastError(e.message));
-                  }} className="text-[11px] text-red-600 hover:underline">Delete</button>
+                  }} className="text-[11px] text-red-600 hover:underline py-1">Delete</button>
                 )}
               </div>
             </div>
@@ -143,7 +143,7 @@ export default function Scheduler() {
         </div>
       </div>
       <div className="flex-1 bg-slate-50 p-4 md:p-6 overflow-y-auto">
-        <h2 className="text-lg font-bold text-slate-800 mb-1">Scheduled SMS / MMS</h2>
+        <h2 className="text-fluid-lg font-bold text-slate-800 mb-1">Scheduled SMS / MMS</h2>
         {user?.role === 'agent' && <p className="text-xs text-slate-400 mb-3">Showing only messages you scheduled.</p>}
         <p className="text-sm text-slate-500 mb-4">
           Messages are sent <strong>one-by-one to each contact</strong> — never as a single blast.
@@ -155,7 +155,7 @@ export default function Scheduler() {
         </p>
         <div className="bg-white rounded-xl border p-4 text-sm text-slate-600">
           <p className="font-semibold mb-2">How it works</p>
-          <ol className="list-decimal ml-5 space-y-1">
+          <ol className="list-decimal ml-5 space-y-1 break-words">
             <li>Compose the message (or insert a template), optionally attach an image for MMS.</li>
             <li>Pick date/time + timezone — the selected timezone wins over the server timezone.</li>
             <li>Choose recipients: contacts, groups, a company, and/or CSV rows.</li>
@@ -258,11 +258,20 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
   const [name, setName] = useState('');
   const [message, setMessage] = useState('');
   const isAgent = user?.role === 'agent';
+  // assigned_numbers = everything the agent may SEND from, which now includes
+  // granted shared lines. Those are owned by another extension, so they are
+  // absent from api.smsNumbers() and need a synthetic option.
   const allowed = isAgent ? (user?.assigned_numbers || []).map((v) => String(v).replace(/\D/g, '')) : [];
+  const sendOpts = (() => {
+    if (!isAgent) return numbers;
+    const mine = numbers.filter((n) => allowed.includes(String(n.number).replace(/\D/g, '')));
+    const have = new Set(mine.map((n) => String(n.number).replace(/\D/g, '')));
+    return [...mine, ...allowed.filter((d) => d && !have.has(d)).map((d) => ({ number: d }))];
+  })();
   const [from, setFrom] = useState(isAgent ? '' : (numbers[0] ? String(numbers[0].number) : ''));
   useEffect(() => {
     if (!isAgent) return;
-    const opts = numbers.filter((n) => allowed.includes(String(n.number).replace(/\D/g, '')));
+    const opts = sendOpts;
     if (!opts.length) { if (from) setFrom(''); return; }
     if (!opts.some((n) => String(n.number) === from)) {
       const dd = String(user?.default_number || '').replace(/\D/g, '');
@@ -386,9 +395,7 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
   const dupeCount = Math.max(0, estCount - selectedDigits.size);
   const totalRecipients = (selectedDigits.size + optInAdded) || 0;
   const hasRecipients = () => !!(selContacts.length || selGroups.length || company || csvRows.length || manualRows.length);
-  const fromOptions = isAgent
-    ? numbers.filter((n) => allowed.includes(String(n.number).replace(/\D/g, '')))
-    : numbers;
+  const fromOptions = sendOpts;   // includes granted shared lines for agents
   const shownBody = complianceOn ? wrappedPreview : message;
   const estDispatch = asap ? 'Immediately' : fmtDateTimeIn(zonedTimeToUtc(sendAt, tz).toISOString(), tz);
 
@@ -617,7 +624,7 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
       {/* Recipients */}
       <div className="border-t mt-4 pt-3">
         <p className={section}>Send To</p>
-        <div className="flex gap-2 mt-1.5">
+        <div className="flex gap-2 mt-1.5 flex-wrap">
           <button type="button" onClick={() => setSendTab('contacts')} className={tabCls('contacts')}>👥 Contacts &amp; Groups</button>
           <button type="button" onClick={() => setSendTab('csv')} className={tabCls('csv')}>⬆ Upload CSV</button>
           <button type="button" onClick={() => setSendTab('manual')} className={tabCls('manual')}>⌨ Enter Numbers</button>

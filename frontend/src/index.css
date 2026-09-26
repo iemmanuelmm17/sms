@@ -2,6 +2,14 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Fluid type (item 6): scales smoothly between breakpoints instead of jumping.
+   min/max are in rem so browser zoom still scales them linearly. */
+@layer utilities {
+  .text-fluid-base { font-size: clamp(0.875rem, 0.8rem + 0.25vw, 1rem); }
+  .text-fluid-lg   { font-size: clamp(1.0625rem, 0.95rem + 0.55vw, 1.375rem); }
+  .text-fluid-xl   { font-size: clamp(1.1875rem, 1.05rem + 0.7vw, 1.625rem); }
+}
+
 /* UI consistency: every clickable/keyboard-focusable element fades color/bg/border
    on hover/focus instead of snapping. Matches tooltip 150ms timing. */
 button, a, input, select, textarea, [role="button"] {
@@ -34,6 +42,9 @@ button, a, input, select, textarea, [role="button"] {
 .dark .bg-red-50 { background-color: rgba(220, 38, 38, 0.14) !important; }
 .dark .bg-violet-100 { background-color: rgba(139, 92, 246, 0.25) !important; }
 .dark .bg-gray-300 { background-color: #475569 !important; }
+.dark .bg-brand-100 { background-color: rgba(37, 99, 235, 0.3) !important; }
+.dark .bg-emerald-50 { background-color: rgba(16, 185, 129, 0.16) !important; }
+.dark .bg-emerald-500 { background-color: #10b981 !important; }
 
 .dark .hover\:bg-slate-50:hover { background-color: #1e293b !important; }
 .dark .hover\:bg-slate-100:hover { background-color: #334155 !important; }
@@ -48,13 +59,16 @@ button, a, input, select, textarea, [role="button"] {
 .dark .text-brand-700 { color: #bfdbfe !important; }
 .dark .text-red-600 { color: #fca5a5 !important; }
 .dark .text-amber-800, .dark .text-amber-700 { color: #fcd34d !important; }
-.dark .text-emerald-600, .dark .text-emerald-800 { color: #6ee7b7 !important; }
+.dark .text-emerald-600, .dark .text-emerald-800, .dark .text-emerald-700 { color: #6ee7b7 !important; }
 .dark .text-blue-800 { color: #93c5fd !important; }
 .dark .text-orange-800 { color: #fdba74 !important; }
 .dark .text-violet-800 { color: #c4b5fd !important; }
 
 .dark .border, .dark .border-b, .dark .border-t, .dark .border-l, .dark .border-r,
 .dark .border-red-200, .dark .border-amber-200, .dark .border-slate-700 { border-color: #334155 !important; }
+/* Tinted pill borders keep their hue in dark mode (they carry meaning). */
+.dark .border-brand-200, .dark .border-brand-100 { border-color: rgba(37, 99, 235, 0.45) !important; }
+.dark .border-emerald-200 { border-color: rgba(16, 185, 129, 0.45) !important; }
 .dark .divide-y > :not([hidden]) ~ :not([hidden]) { border-color: #334155 !important; }
 
 .dark input, .dark textarea, .dark select { background-color: #0f172a !important; color: #e2e8f0 !important; border-color: #475569 !important; }

@@ -18,7 +18,13 @@ class OnboardingController extends Controller
     public function update(Request $request)
     {
         $actor = $this->actor($request); // 401 unless a session is valid
-        if (($actor['role'] ?? '') === 'agent') {
+        if (($actor['role'] ?? '') === 'agent' && !empty($actor['identity_id'])) {
+            // Portal agents have no legacy Agent row — Agent::findOrFail(null)
+            // was returning 404 here, which silently broke the onboarding
+            // Skip / Get started buttons.
+            $model = \App\Models\AgentIdentity::findOrFail($actor['identity_id']);
+            $role = 'agent';
+        } elseif (($actor['role'] ?? '') === 'agent' && !empty($actor['agent_id'])) {
             $model = Agent::findOrFail($actor['agent_id']);
             $role = 'agent';
         } elseif (!empty($actor['tenant_admin_id'])) {

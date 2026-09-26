@@ -263,7 +263,7 @@ export default function AuditLog() {
     <div className="h-full overflow-y-auto bg-slate-50 p-4 md:p-6">
       <div className="max-w-5xl mx-auto">
         <div className="flex items-center justify-between mb-1">
-          <h2 className="text-lg font-bold text-slate-800">📋 Audit Log</h2>
+          <h2 className="text-fluid-lg font-bold text-slate-800">📋 Audit Log</h2>
           <button onClick={exportCsv} className="text-xs border rounded-lg px-3 py-1.5 hover:bg-white text-slate-600">⬇️ Export CSV</button>
         </div>
         <p className="text-xs text-slate-400 mb-4">Sign-ins, lockouts, password resets, agent changes, number settings, opt-outs, templates, scheduled sends, auto-replies, and assignments. Newest first — rows are never edited or deleted.</p>
@@ -276,12 +276,12 @@ export default function AuditLog() {
           {locks.users.length === 0 && locks.ips.length === 0 ? (
             <p className="text-xs text-slate-400">All clear — nobody is locked out right now.</p>
           ) : (
-            <div className="grid md:grid-cols-2 gap-3">
+            <div className="grid md:grid-cols-2 gap-3 [&>*]:min-w-0">
               <div>
                 <div className="text-[11px] font-semibold text-slate-500 mb-1">USERNAMES</div>
                 {locks.users.length === 0 && <p className="text-xs text-slate-400">—</p>}
                 {locks.users.map((u) => (
-                  <div key={u.username} className="flex items-center gap-2 text-xs py-1 border-b last:border-0">
+                  <div key={u.username} className="flex items-center gap-2 text-xs py-1 border-b last:border-0 min-w-0 flex-wrap">
                     <span className="font-mono text-slate-700 truncate flex-1">{u.username}</span>
                     <span className="text-amber-700 whitespace-nowrap">🔒 {u.fails} fails · retry in {fmtLeft(u.retry_after_secs)}</span>
                     <button onClick={() => unlockUser(u.username)} className="border border-emerald-200 text-emerald-700 rounded-lg px-2 py-0.5 hover:bg-emerald-50 font-semibold">Unlock</button>
@@ -292,7 +292,7 @@ export default function AuditLog() {
                 <div className="text-[11px] font-semibold text-slate-500 mb-1">IP ADDRESSES</div>
                 {locks.ips.length === 0 && <p className="text-xs text-slate-400">—</p>}
                 {locks.ips.map((x) => (
-                  <div key={x.ip} className="flex items-center gap-2 text-xs py-1 border-b last:border-0">
+                  <div key={x.ip} className="flex items-center gap-2 text-xs py-1 border-b last:border-0 min-w-0 flex-wrap">
                     <span className="font-mono text-slate-700 truncate flex-1">{x.ip}</span>
                     <span className="text-amber-700 whitespace-nowrap">🔒 {x.fails} fails · retry in {fmtLeft(x.retry_after_secs)}</span>
                     <button onClick={() => unlockIp(x.ip)} className="border border-emerald-200 text-emerald-700 rounded-lg px-2 py-0.5 hover:bg-emerald-50 font-semibold">Unlock</button>
@@ -303,7 +303,7 @@ export default function AuditLog() {
           )}
         </div>
 
-        <form onSubmit={apply} className="bg-white rounded-xl border p-3 mb-4 grid grid-cols-2 md:grid-cols-6 gap-2">
+        <form onSubmit={apply} className="bg-white rounded-xl border p-3 mb-4 grid grid-cols-2 md:grid-cols-6 gap-2 [&>*]:min-w-0">
           <select value={f.action} onChange={(e) => setF({ ...f, action: e.target.value })} className={input}>
             <option value="">All events</option>
             {actions.map((a) => <option key={a} value={a}>{label(a)}</option>)}

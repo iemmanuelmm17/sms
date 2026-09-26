@@ -79,8 +79,24 @@ class SentMessageLog extends Model
     {
         if (isset($s['tenant_id'])) return (int) $s['tenant_id'];
         if (($s['role'] ?? null) === 'agent') {
+            // Portal agents' `user` is their own EXTENSION, not the tenant's
+            // dynalink_user, so the (domain,user) lookup returned null and the
+            // send was logged with no tenant — invisible to every report.
+            if (!empty($s['portal_auth'])) return static::tenantIdForDomain($s['domain']);
             return static::tenantIdFor($s['domain'], $s['user']);
         }
         return null;
+    }
+
+    /** Tenant that owns a domain (portal agents are scoped by domain alone). */
+    public static function tenantIdForDomain(string $domain): ?int
+    {
+        try {
+            $id = Cache::remember("tenant:iddom:{$domain}", 3600,
+                fn() => Tenant::where('domain', $domain)->value('id'));
+            return $id === null ? null : (int) $id;
+        } catch (\Throwable $e) {
+            return null;
+        }
     }
 }

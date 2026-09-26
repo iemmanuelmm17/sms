@@ -45,12 +45,30 @@ class AgentController extends Controller
     public function directory(Request $request)
     {
         $actor = $this->actor($request);
-        $list = \Illuminate\Support\Facades\Cache::remember(Agent::listKey($actor['domain'], $actor['user']) . ':dir', 120, function () use ($actor) {
-            return Agent::where('domain', $actor['domain'])->where('user', $actor['user'])
+        $list = \Illuminate\Support\Facades\Cache::remember(Agent::listKey($actor['domain'], $actor['user']) . ':dir2', 120, function () use ($actor) {
+            $rows = Agent::where('domain', $actor['domain'])->where('user', $actor['user'])
                 ->where('status', 'active')->orderBy('first_name')->orderBy('last_name')->get()
-                ->map(fn($a) => ['id' => $a->id, 'first_name' => $a->first_name,
+                ->map(fn($a) => ['id' => $a->id, 'kind' => 'agent', 'first_name' => $a->first_name,
                     'last_name' => $a->last_name, 'tag_color' => $a->tag_color,
                     'numbers' => $a->assignedNumbers()])->values()->toArray();
+
+            // Portal users live in agent_identities. Without them an admin sees
+            // every thread they have claimed as "Unassigned", because the
+            // assignment resolves against a directory they are missing from.
+            foreach (\App\Models\AgentIdentity::where('domain', $actor['domain'])
+                ->where('status', 'active')->orderBy('ext')->get() as $i) {
+                $name = $i->displayName();
+                $parts = preg_split('/\s+/', trim($name)) ?: [];
+                $rows[] = [
+                    'id' => $i->id, 'kind' => 'identity',
+                    'first_name' => $parts[0] ?? $i->ext,
+                    'last_name' => count($parts) > 1 ? implode(' ', array_slice($parts, 1)) : '',
+                    'tag_color' => $i->tag_color,
+                    'ext' => $i->ext,
+                    'numbers' => [],
+                ];
+            }
+            return $rows;
         });
         return response()->json($list);
     }

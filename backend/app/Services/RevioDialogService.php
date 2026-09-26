@@ -511,10 +511,12 @@ class RevioDialogService
             return $this->withFooter($integration, IntegrationSpiels::get($integration, 'system_error'));
         }
         try {
-            ConversationMeta::updateOrCreate(
-                ['domain' => $domain, 'user' => $user, 'session_id' => $newId],
-                ['status' => 'queued', 'agent_id' => null]
-            );
+            // Metadata is tenant-wide now: key on (domain, session_id) only,
+            // or the handoff would queue into a row nobody else can see.
+            $row = ConversationMeta::where('domain', $domain)
+                ->where('session_id', $newId)->first()
+                ?: new ConversationMeta(['domain' => $domain, 'user' => $user, 'session_id' => $newId]);
+            $row->fill(['status' => 'queued', 'agent_id' => null, 'identity_id' => null])->save();
         } catch (\Throwable $e) {
             Log::warning('Integration queue assignment failed: ' . $e->getMessage());
         }

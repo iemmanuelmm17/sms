@@ -48,7 +48,13 @@ class CompanySettingsController extends Controller
             'number_email.*.enabled' => 'sometimes|boolean',
             'number_shared' => 'sometimes|array',
             'number_shared.*' => 'boolean',
+            'number_meta' => 'sometimes|array',
+            'number_meta.*' => 'sometimes|array',
+            'number_meta.*.label' => 'sometimes|nullable|string|max:60',
+            'number_meta.*.tags' => 'sometimes|array|max:8',
+            'number_meta.*.tags.*' => 'string|max:24',
             'quiet_hours' => 'sometimes|array',
+            'tcpa_footer' => 'sometimes|string|max:320',
             'quiet_hours.enabled' => 'sometimes|boolean',
             'quiet_hours.start' => 'sometimes|nullable|string|regex:/^\d{1,2}:\d{2}$/',
             'quiet_hours.end' => 'sometimes|nullable|string|regex:/^\d{1,2}:\d{2}$/',
@@ -76,6 +82,32 @@ class CompanySettingsController extends Controller
                     return response()->json(['message' => 'Invalid SMS number key.'], 422);
                 }
                 $this->settings->setNumberShared($s['domain'], $d, (bool) $v);
+            }
+            $saved = $this->settings->get($s['domain']);
+        }
+        if (array_key_exists('tcpa_footer', $data)) {
+            $this->settings->setTcpaFooter($s['domain'], (string) $data['tcpa_footer']);
+            $this->audit($request, 'tcpa.footer-changed', ['len' => mb_strlen((string) $data['tcpa_footer'])]);
+            $saved = $this->settings->get($s['domain']);
+        }
+        if (array_key_exists('number_meta', $data) && is_array($data['number_meta'])) {
+            foreach ($data['number_meta'] as $k => $cfg) {
+                $d = preg_replace('/\D/', '', (string) $k);
+                if (strlen($d) < 7 || strlen($d) > 15) {
+                    return response()->json(['message' => 'Invalid SMS number key.'], 422);
+                }
+                $cfg = (array) $cfg;
+                $label = array_key_exists('label', $cfg) ? (string) $cfg['label'] : (string) ($prev['number_meta'][$d]['label'] ?? '');
+                $tags = array_key_exists('tags', $cfg) ? (array) $cfg['tags'] : (array) ($prev['number_meta'][$d]['tags'] ?? []);
+                $sig = array_key_exists('signature', $cfg) ? (bool) $cfg['signature'] : null;
+                $this->settings->setNumberMeta($s['domain'], $d, $label, $tags, $sig);
+                $was = (array) ($prev['number_meta'][$d] ?? []);
+                $sigChanged = $sig !== null && (bool) ($was['signature'] ?? false) !== $sig;
+                if (($was['label'] ?? '') !== trim($label)
+                    || array_values((array) ($was['tags'] ?? [])) !== array_values($tags) || $sigChanged) {
+                    $this->audit($request, 'number.meta-changed', ['number' => $d, 'label' => trim($label),
+                        'tags' => array_values($tags), 'signature' => $sig ?? (bool) ($was['signature'] ?? false)]);
+                }
             }
             $saved = $this->settings->get($s['domain']);
         }

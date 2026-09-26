@@ -76,6 +76,23 @@ trait ResolvesActor
                 'agent_id' => null, 'username' => ($s['user'] ?? '') . '@' . ($s['domain'] ?? ''),
             ];
         }
+        if ($p = $r->session()->get('agent_portal')) {
+            $identity = \App\Models\AgentIdentity::find($p['id'] ?? null);
+            if (!$identity || !$identity->isActive()) {
+                $r->session()->forget('agent_portal');
+                abort(response()->json(['message' => 'Unauthenticated'], 401));
+            }
+            return [
+                'role' => 'agent', 'domain' => $identity->domain, 'user' => $identity->ext,
+                'token' => null,                 // always rides the tenant superadmin token
+                'display_name' => $identity->displayName(),   // portal name; falls back to ext
+                'agent_id' => null,              // legacy Agent row id; none for portal agents
+                'identity_id' => $identity->id,
+                'ext' => $identity->ext,
+                'username' => $identity->ext . '@' . $identity->domain,
+                'portal_auth' => true,
+            ];
+        }
         if ($a = $r->session()->get('agent')) {
             $agent = Agent::find($a['id'] ?? null);
             if (!$agent || $agent->status !== 'active'
@@ -180,6 +197,15 @@ trait ResolvesActor
             abort_unless($tenant && $tenant->isActive(), 503, 'Tenant messaging is unavailable.');
             return $tenant->accessToken();
         }
+        // Portal agents ALWAYS ride the tenant superadmin token: their own
+        // portal token can only see their own extension, so it could never
+        // read or reply on a shared number owned by someone else.
+        if (!empty($a['portal_auth'])) {
+            $tenant = Tenant::where('domain', $a['domain'])->first();
+            abort_unless($tenant && $tenant->isActive(), 503, 'Tenant messaging is unavailable.');
+            return $tenant->accessToken();
+        }
+
         // Agents ride their owner's tenant token when one exists…
         $tenant = Tenant::where('domain', $a['domain'])->where('dynalink_user', $a['user'])->first();
         if ($tenant && $tenant->isActive()) {
@@ -211,16 +237,45 @@ trait ResolvesActor
      * Agents may only send/schedule from numbers their admin assigned.
      * Admins pass through. 422 (never a silent override) on violation.
      */
+    /**
+     * Gate on which from-number an agent may send from.
+     *
+     * SECURITY: for portal agents this is the ONLY thing standing between an
+     * agent and sending as any number on the domain — every call runs on the
+     * tenant superadmin token, which can send as anything. It therefore uses
+     * AgentAccess::sendableNumbers(). The read path uses readableNumbers()
+     * from the same service, so the two sets can never drift apart.
+     */
     protected function assertAgentNumber(Request $r, ?string $number): void
     {
         $a = $this->actor($r);
         if ($a['role'] !== 'agent') return;
+
+        $digits = preg_replace('/\D/', '', (string) $number);
+
+        if (!empty($a['portal_auth'])) {
+            $access = app(\App\Services\AgentAccess::class);
+            $ext = $a['ext'] ?? $a['user'];
+            $allowed = $access->sendableNumbers($a['domain'], $ext, $this->dtoken($r));
+            if (!$allowed) {
+                abort(response()->json(
+                    ['message' => 'No SMS numbers available to you — ask your admin.'], 422));
+            }
+            if (!in_array($digits, $allowed, true)) {
+                // Distinguish "can't see it" from "can see it but may not send".
+                $readable = $access->readableNumbers($a['domain'], $ext, $this->dtoken($r));
+                abort(response()->json(['message' => in_array($digits, $readable, true)
+                    ? 'You can view this shared number but not send from it — ask your admin for access.'
+                    : 'You can only send from your own or shared numbers.'], 403));
+            }
+            return;
+        }
+
         $agent = Agent::find($a['agent_id']);
         $allowed = $agent ? $agent->assignedNumbers() : [];
         if (!$allowed) {
             abort(response()->json(['message' => 'No SMS number assigned — ask your admin.'], 422));
         }
-        $digits = preg_replace('/\D/', '', (string) $number);
         abort_unless(in_array($digits, $allowed, true), response()->json(
             ['message' => 'Choose one of your assigned numbers.'], 422));
     }

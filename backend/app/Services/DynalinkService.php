@@ -6,6 +6,7 @@ use GuzzleHttp\Exception\ConnectException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use App\Services\ApiServerPool;
 
 /**
  * Dynalink NS-API v2 client.
@@ -38,7 +39,7 @@ class DynalinkService
     /** Password-grant login → returns full token payload. */
     public function login(string $username, string $password): array
     {
-        $res = $this->authApi()->post("{$this->authBase}/tokens", [
+        $res = $this->authApi()->post($this->authHost() . "/tokens", [
             'grant_type'    => 'password',
             'client_id'     => $this->clientId,
             'client_secret' => $this->clientSecret,
@@ -57,7 +58,7 @@ class DynalinkService
     /** Refresh-token grant. */
     public function refreshToken(string $refreshToken): array
     {
-        $res = $this->authApi()->post("{$this->authBase}/tokens", [
+        $res = $this->authApi()->post($this->authHost() . "/tokens", [
             'grant_type'    => 'refresh_token',
             'client_id'     => $this->clientId,
             'client_secret' => $this->clientSecret,
@@ -84,6 +85,25 @@ class DynalinkService
     protected function authApi()
     {
         return Http::acceptJson()->timeout(10)->withMiddleware($this->providerGuard());
+    }
+
+    /**
+     * Host used to mint tokens.
+     *
+     * Deliberately NOT rotated by default: an access token issued by one node
+     * is only reusable on another if the cluster shares session state. Rotating
+     * blindly would produce intermittent 401s that look like random logouts.
+     * Set DYNALINK_POOL_AUTH=true once you have confirmed tokens are portable.
+     */
+    protected function authHost(): string
+    {
+        if (!filter_var(config('services.dynalink.pool_auth', false), FILTER_VALIDATE_BOOL)) {
+            return $this->authBase;
+        }
+        $pooled = ApiServerPool::next();
+        if ($pooled === null) return $this->authBase;
+        $path = parse_url($this->authBase, PHP_URL_PATH) ?: '';
+        return rtrim($pooled, '/') . $path;
     }
 
     /**
@@ -114,6 +134,12 @@ class DynalinkService
 
     protected function abortUnreachable(ConnectException $e): never
     {
+        // Take the failing host out of rotation briefly, so the pool stops
+        // feeding a predictable share of requests into a dead node.
+        try {
+            $uri = method_exists($e, 'getRequest') ? (string) $e->getRequest()->getUri() : '';
+            if ($uri !== '') ApiServerPool::penalize($uri);
+        } catch (\Throwable $ignored) {}
         Log::warning('Dynalink unreachable', ['error' => $e->getMessage()]);
         abort(response()->json([
             'message' => "We couldn't reach the messaging provider. Please try again in a moment.",
@@ -121,20 +147,169 @@ class DynalinkService
         ], 503));
     }
 
+    /**
+     * Base host for domain/user scoped endpoints (smsnumbers, messagesessions,
+     * messages, contacts).
+     *
+     * Defaults to authBase — the NMS host that issues the token and serves the
+     * documented /domains/... endpoints. Set DYNALINK_USE_CORE_FOR_USER=true to
+     * restore the old coreBase behaviour if a deployment needs it.
+     */
+    protected function domainHost(): string
+    {
+        $base = filter_var(config('services.dynalink.use_core_for_user', false), FILTER_VALIDATE_BOOL)
+            ? $this->coreBase
+            : $this->authBase;
+
+        // Spread read/write traffic over the superadmin's server pool. Returns
+        // $base untouched when no pool is configured.
+        $pooled = ApiServerPool::next();
+        if ($pooled === null) return $base;
+
+        // Keep the path (e.g. /ns-api/v2) from the configured base — pool
+        // entries are hosts, and losing the API prefix would 404 everything.
+        $path = parse_url($base, PHP_URL_PATH) ?: '';
+        return rtrim($pooled, '/') . $path;
+    }
+
     protected function userPath(string $domain, string $user): string
     {
-        return "{$this->coreBase}/domains/{$domain}/users/{$user}";
+        return "{$this->domainHost()}/domains/{$domain}/users/{$user}";
     }
 
     /* ------------------------------------------------------------------
      | SMS numbers (getsmsnumber.txt)
      * ------------------------------------------------------------------ */
 
+    /**
+     * NS-API list endpoints page at 100 by default, which silently truncated
+     * the number inventory on larger domains. Every smsnumbers call passes an
+     * explicit limit so the full list comes back in one request.
+     */
+    public const NUMBERS_LIMIT = 999;
+
     /** Number inventory rarely changes: 5-min cache, TTL-only (provisioning happens outside the app). */
     public function smsNumbers(string $token, string $domain, string $user): array
     {
         return \Illuminate\Support\Facades\Cache::remember("dl:numbers:{$domain}:{$user}", 300,
-            fn() => $this->api($token)->get($this->userPath($domain, $user) . '/smsnumbers')->json() ?? []);
+            fn() => $this->asList($this->api($token)
+                ->get($this->userPath($domain, $user) . '/smsnumbers', ['limit' => self::NUMBERS_LIMIT])
+                ->json()));
+    }
+
+    /**
+     * Every SMS number on the domain — the admin Numbers page inventory.
+     *
+     *   GET /domains/{domain}/smsnumbers
+     *
+     * This is domain-scoped, not user-scoped, so it returns numbers the
+     * calling identity is not personally assigned. Admin-only by routing.
+     */
+    public function domainSmsNumbers(string $token, string $domain): array
+    {
+        // NOTE: domain-scoped endpoints live on the NMS host (authBase), the
+        // same host that issued the token — not coreBase. Hitting coreBase
+        // here returned nothing for domains whose inventory is on NMS, which
+        // made accounts look like they had no SMS numbers at all.
+        return \Illuminate\Support\Facades\Cache::remember("dl:dnumbers:{$domain}", 300,
+            fn() => $this->asList($this->api($token)
+                ->get("{$this->domainHost()}/domains/{$domain}/smsnumbers", ['limit' => self::NUMBERS_LIMIT])
+                ->json()));
+    }
+
+    /**
+     * One portal user's profile.
+     *
+     *   GET /domains/{domain}/users/{ext}
+     *
+     * Source of the agent's real name — without it a signature falls back to
+     * the bare extension. Cached briefly: it is read on login and on resync,
+     * and the portal is the system of record so it rarely changes.
+     */
+    public function userProfile(string $token, string $domain, string $ext): array
+    {
+        $res = $this->api($token)->get($this->userPath($domain, $ext));
+        if ($res->failed()) return [];
+        $d = $res->json();
+        return is_array($d) ? $d : [];
+    }
+
+    /**
+     * Shape a portal profile into the fields we store locally.
+     * Missing keys degrade to null rather than throwing.
+     */
+    public static function shapeUser(array $row): array
+    {
+        $first = trim((string) ($row['name-first-name'] ?? ''));
+        $last  = trim((string) ($row['name-last-name'] ?? ''));
+        $full  = trim($first . ' ' . $last);
+        return [
+            'first_name'  => $first !== '' ? $first : null,
+            'last_name'   => $last !== '' ? $last : null,
+            'full_name'   => $full !== '' ? $full : null,
+            'email'       => trim((string) ($row['email'] ?? '')) ?: null,
+            'department'  => trim((string) ($row['department'] ?? '')) ?: null,
+            'site'        => trim((string) ($row['site'] ?? '')) ?: null,
+        ];
+    }
+
+    /**
+     * digits => owning extension ("dest") for every SMS number on the domain.
+     *
+     * The NS-API scopes message sessions per USER, and a number's sessions live
+     * under the extension the number is assigned to — not under the admin who
+     * is looking at them. This map is how an admin view resolves the right
+     * $user for a given number.
+     */
+    public function numberOwners(string $token, string $domain): array
+    {
+        // Cached as a derived map: the inventory behind it is already cached,
+        // but rebuilding this on every session request costs a full re-parse
+        // of the domain list on large accounts.
+        return \Illuminate\Support\Facades\Cache::remember("dl:owners:{$domain}", 300, function () use ($token, $domain) {
+            $map = [];
+            foreach ($this->domainSmsNumbers($token, $domain) as $row) {
+                if (!is_array($row)) continue;
+                $d = preg_replace('/\D/', '', (string) ($row['number'] ?? ''));
+                $dest = isset($row['dest']) ? trim((string) $row['dest']) : '';
+                if ($d !== '' && $dest !== '') $map[$d] = $dest;
+            }
+            return $map;
+        }) ?? [];
+    }
+
+    /** Owning extension for one number, or null when it is unassigned/unknown. */
+    public function numberOwner(string $token, string $domain, string $digits): ?string
+    {
+        return $this->numberOwners($token, $domain)[$digits] ?? null;
+    }
+
+    public static function forgetDomainNumbers(string $domain): void
+    {
+        try {
+            \Illuminate\Support\Facades\Cache::forget("dl:dnumbers:{$domain}");
+            \Illuminate\Support\Facades\Cache::forget("dl:owners:{$domain}");   // derived from the same data
+        } catch (\Throwable $e) {}
+    }
+
+    /**
+     * Normalize one NS-API smsnumber row to the four fields the UI shows.
+     * Unknown/missing keys degrade to null rather than throwing, because
+     * the provider omits fields on some carriers.
+     */
+    public static function shapeNumber(array $row): array
+    {
+        $num = (string) ($row['number'] ?? '');
+        return [
+            'number'             => $num,
+            'digits'             => preg_replace('/\D/', '', $num),
+            'dest'               => isset($row['dest']) ? (string) $row['dest'] : null,
+            'mms_capable'        => filter_var($row['mms-capable'] ?? false, FILTER_VALIDATE_BOOL),
+            'group_mms_capable'  => filter_var($row['group-mms-capable'] ?? false, FILTER_VALIDATE_BOOL),
+            'application'        => $row['application'] ?? null,
+            'carrier'            => $row['carrier'] ?? null,
+            'domain'             => $row['domain'] ?? null,
+        ];
     }
 
     /* ------------------------------------------------------------------
@@ -154,23 +329,29 @@ class DynalinkService
         try { \Illuminate\Support\Facades\Cache::forget(self::sessionsKey($domain, $user)); } catch (\Throwable $e) {}
     }
 
-    public function sessions(string $token, string $domain, string $user): array
+    public function sessions(string $token, string $domain, string $user, ?int $limit = null): array
     {
-        $key = self::sessionsKey($domain, $user);
+        $key = self::sessionsKey($domain, $user) . ($limit ? ":l{$limit}" : '');
+        $fetch = function () use ($token, $domain, $user, $limit) {
+            $url = $this->userPath($domain, $user) . '/messagesessions';
+            $res = $limit
+                ? $this->api($token)->get($url, ['limit' => $limit])
+                : $this->api($token)->get($url);
+            return $this->asList($res->json());
+        };
         try {
-            return \Illuminate\Support\Facades\Cache::remember($key, self::SESSIONS_TTL, function () use ($token, $domain, $user) {
-                return $this->api($token)->get($this->userPath($domain, $user) . '/messagesessions')->json() ?? [];
-            }) ?? [];
+            return \Illuminate\Support\Facades\Cache::remember($key, self::SESSIONS_TTL, $fetch) ?? [];
         } catch (\Throwable $e) {
-            return $this->api($token)->get($this->userPath($domain, $user) . '/messagesessions')->json() ?? [];
+            return $fetch();
         }
     }
 
-    public function sessionMessages(string $token, string $domain, string $user, string $sessionId): array
+    public function sessionMessages(string $token, string $domain, string $user, string $sessionId, ?int $limit = null): array
     {
-        return $this->api($token)
-            ->get($this->userPath($domain, $user) . "/messagesessions/{$sessionId}/messages")
-            ->json() ?? [];
+        return $this->asList($this->api($token)
+            ->get($this->userPath($domain, $user) . "/messagesessions/{$sessionId}/messages",
+                ['limit' => $limit ?: self::NUMBERS_LIMIT])
+            ->json());
     }
 
     /**
@@ -213,7 +394,8 @@ class DynalinkService
     public function contacts(string $token, string $domain, string $user): array
     {
         return \Illuminate\Support\Facades\Cache::remember("dl:contacts:{$domain}:{$user}", 120, function () use ($token, $domain, $user) {
-            $res = $this->api($token)->get($this->userPath($domain, $user) . '/contacts');
+            $res = $this->api($token)->get($this->userPath($domain, $user) . '/contacts',
+                ['limit' => self::NUMBERS_LIMIT]);
             $data = $res->json();
             // API sometimes returns a single object instead of array
             if (isset($data['uid']) || isset($data['unique-id'])) {
@@ -314,8 +496,11 @@ class DynalinkService
         if (is_array($data) && array_is_list($data)) {
             return $data;
         }
-        // Single contact object → wrap.
-        if (is_array($data) && (isset($data['uid']) || isset($data['unique-id']))) {
+        // Single object → wrap. Covers contacts (uid/unique-id), the smsnumbers
+        // endpoints (number), and message sessions (messagesession-id), any of
+        // which return a bare object when the collection has exactly one row.
+        if (is_array($data) && (isset($data['uid']) || isset($data['unique-id'])
+            || isset($data['number']) || isset($data['messagesession-id']))) {
             return [$data];
         }
         return [];

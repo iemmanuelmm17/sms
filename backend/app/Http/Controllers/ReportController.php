@@ -58,14 +58,63 @@ class ReportController extends Controller
         return ['mode' => 'tenant', 'tenant_id' => (int) $tenant->id];
     }
 
+    /**
+     * Portal agents get reporting for THEIR numbers only.
+     *
+     * Same tenant rows an admin would see, then narrowed to the agent's
+     * visible set (own portal-assigned numbers + granted shared ones) via the
+     * same AgentAccess used by the inbox and the send guard — so reporting can
+     * never expose traffic the agent cannot already read.
+     *
+     * A visible set of [] means "no numbers", which must produce an EMPTY
+     * report, never an unfiltered one.
+     */
+    protected function agentScope(Request $r): array
+    {
+        $a = $this->actor($r);
+        $numbers = [];
+        try {
+            $numbers = app(\App\Services\AgentAccess::class)->readableNumbers(
+                $a['domain'], $a['ext'] ?? $a['user'], $this->dtoken($r));
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('agent reporting: visibleNumbers failed',
+                ['domain' => $a['domain'], 'error' => $e->getMessage()]);
+            $numbers = [];   // fail closed
+        }
+        $tenant = \App\Models\Tenant::where('domain', $a['domain'])->first();
+        return [
+            'mode' => 'agent',
+            'tenant_id' => $tenant?->id,
+            'domain' => $a['domain'],
+            'numbers' => $numbers,
+        ];
+    }
+
     protected function scope(Request $r): array
     {
         if ($r->attributes->get('superadmin')) return $this->superScope($r);
+        $a = $this->actor($r);
+        if (($a['role'] ?? '') === 'agent') {
+            // Portal agents are allowed; legacy local agents still 403.
+            abort_unless(!empty($a['portal_auth']), 403, 'Reporting is not available for this account.');
+            return $this->agentScope($r);
+        }
         return $this->adminScope($r);
     }
 
     protected function applyScope($q, array $scope)
     {
+        if ($scope['mode'] === 'agent') {
+            if ($scope['tenant_id']) $q->where('tenant_id', $scope['tenant_id']);
+            else $q->where('domain', $scope['domain']);
+            // Plain, indexed whereIn. Legacy rows with formatted numbers are
+            // normalised once by migration 000048, so no per-query string
+            // munging is needed — the previous nested REPLACE() was both
+            // unindexable and invalid on SQLite.
+            $want = $scope['numbers'];
+            if ($want === []) return $q->whereRaw('1 = 0');   // fail closed
+            return $q->whereIn('from_number', $want);
+        }
         if ($scope['mode'] === 'tenant') return $q->where('tenant_id', $scope['tenant_id']);
         if ($scope['mode'] === 'legacy') {
             return $q->where('domain', $scope['domain'])->where('user', $scope['user'])->whereNull('tenant_id');

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { friendlyError } from '../lib/toast';
 
 const STYLE = { error: 'bg-red-600', success: 'bg-emerald-600', info: 'bg-slate-900' };
 const ICON = { error: '⛔', success: '✅', info: 'ℹ️' };
@@ -10,8 +11,13 @@ export default function Toasts() {
     const h = (e) => {
       const { type, message } = e.detail || {};
       if (!message) return;
+      // Sanitize at the point of DISPLAY, not only in fireToast(): anything
+      // dispatching 'app-toast' directly would otherwise bypass it and put
+      // raw HTTP/JS detail on screen. Technical text belongs in the Laravel
+      // log and the console, never in a toast.
+      const safe = (type || 'info') === 'error' ? friendlyError(message) : String(message);
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      setItems((t) => [...t.slice(-3), { id, type: type || 'info', message }]);
+      setItems((t) => [...t.slice(-3), { id, type: type || 'info', message: safe }]);
       setTimeout(() => setItems((t) => t.filter((x) => x.id !== id)), type === 'error' ? 7000 : 4000);
     };
     window.addEventListener('app-toast', h);

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Agent;
+use App\Models\AgentIdentity;
 use App\Models\TenantAdmin;
 
 /**
@@ -10,6 +11,7 @@ use App\Models\TenantAdmin;
  * Agents: installed → push → tag → first_send.
  * Tenant admins: installed → push → agent_created → numbers_reviewed.
  * `done` is DERIVED (every role step stamped), never stored.
+ * Portal agents (AgentIdentity) use the same agent steps.
  * Legacy Dynalink (break-glass) sessions have no row → no onboarding.
  */
 class OnboardingService
@@ -23,13 +25,13 @@ class OnboardingService
         return $role === 'agent' ? self::AGENT_STEPS : self::ADMIN_STEPS;
     }
 
-    public static function roleOf(Agent|TenantAdmin $model): string
+    public static function roleOf(Agent|AgentIdentity|TenantAdmin $model): string
     {
-        return $model instanceof Agent ? 'agent' : 'admin';
+        return ($model instanceof Agent || $model instanceof AgentIdentity) ? 'agent' : 'admin';
     }
 
     /** Normalized state for the /me payload and the PUT response. */
-    public static function state(Agent|TenantAdmin $model): array
+    public static function state(Agent|AgentIdentity|TenantAdmin $model): array
     {
         $raw = is_array($model->onboarding) ? $model->onboarding : [];
         $want = self::stepsFor(self::roleOf($model));
@@ -44,7 +46,7 @@ class OnboardingService
     }
 
     /** Stamp one step (idempotent); returns fresh state. Unknown steps ignored. */
-    public static function mark(Agent|TenantAdmin $model, string $step): array
+    public static function mark(Agent|AgentIdentity|TenantAdmin $model, string $step): array
     {
         if (!in_array($step, self::stepsFor(self::roleOf($model)), true)) return self::state($model);
         $raw = is_array($model->onboarding) ? $model->onboarding : [];
@@ -58,7 +60,7 @@ class OnboardingService
     }
 
     /** Set welcome/tour/dismiss flags; returns fresh state. */
-    public static function flags(Agent|TenantAdmin $model, array $flags): array
+    public static function flags(Agent|AgentIdentity|TenantAdmin $model, array $flags): array
     {
         $raw = is_array($model->onboarding) ? $model->onboarding : [];
         foreach (self::FLAGS as $f) {
@@ -72,9 +74,12 @@ class OnboardingService
     public static function markAgentStep(array $actor, string $step): void
     {
         try {
-            if (($actor['role'] ?? '') !== 'agent' || empty($actor['agent_id'])) return;
-            $agent = Agent::find($actor['agent_id']);
-            if ($agent) self::mark($agent, $step);
+            if (($actor['role'] ?? '') !== 'agent') return;
+            // Portal agents carry identity_id; legacy agents carry agent_id.
+            $model = !empty($actor['identity_id'])
+                ? AgentIdentity::find($actor['identity_id'])
+                : (!empty($actor['agent_id']) ? Agent::find($actor['agent_id']) : null);
+            if ($model) self::mark($model, $step);
         } catch (\Throwable $e) { /* onboarding must never break the hot path */ }
     }
 

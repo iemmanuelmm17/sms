@@ -17,7 +17,9 @@ import { segLabel, smsSegments, MMS_MAX_BYTES, MMS_MAX_LABEL } from '../lib/segm
 import { toastError, toastSuccess } from '../lib/toast';
 import { Search, Archive, Ban, MoreVertical, X } from 'lucide-react';
 import ConfirmModal from '../components/ConfirmModal';
-import { quietFromSettings, QUIET_DEFAULTS, isQuiet as inQuietHours, quietLabel } from '../lib/quietHours';
+import { quietFromSettings, QUIET_DEFAULTS, isQuiet as inQuietHours, quietLabel,
+  isQuietSnoozed, snoozeQuietToday } from '../lib/quietHours';
+import { withSignature } from '../lib/signature';
 import { quickAddContact } from '../components/QuickAddContact';
 import Modal from '../components/Modal';
 import useEscape from '../lib/useEscape';
@@ -26,6 +28,8 @@ import { useSocket } from '../context/SocketContext';
 import { useAuth } from '../context/AuthContext';
 import Onboarding from '../components/onboarding/Onboarding';
 
+import { useOnboarding } from '../components/onboarding/useOnboarding';
+import { useReferenceData } from '../context/ReferenceDataContext';
 const digits = (v) => String(v ?? '').replace(/\D/g, '');
 /** Local calendar day key — used to group bubbles under a date block. */
 const dayKey = (ts) => { const d = new Date(parseTs(ts)); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
@@ -74,7 +78,10 @@ const resolveVars = (text, contact, company = '', agent = '') => String(text ?? 
   .replaceAll('$LastName', contact?.['name-last-name'] || '')
   .replaceAll('$CompanyName', company || '')
   .replaceAll('$AgentName', agent || '');
-const withSender = (text, name) => (text && name ? `${text}\n- ${name}` : text);
+// Was `- Full Name`, which printed the whole surname (incl. portal suffixes
+// like "Thompson ACD") and disagreed with the server's own signature format.
+// One shared helper now produces "— First L." for both.
+const withSender = (text, name) => withSignature(text, name);
 // Trailing $token (letters only) anywhere in the draft — mirrors /keyword UX.
 const dollarQuery = (text) => { const m = /\$([A-Za-z]*)$/.exec(text || ''); return m ? m[1].toLowerCase() : null; };
 const dollarMatches = (q) => VARS.filter((v) => v.key.slice(1).toLowerCase().startsWith(q || '')).slice(0, 5);
@@ -114,8 +121,45 @@ function StatusTag({ status, ts }) {
   return <span className={cls} title={s}>{icon} {label}</span>;
 }
 
-const agentOf = (agents, meta, sid) => {
-  const id = meta[String(sid)]?.agent_id;
+/**
+ * Who a thread is assigned to. Portal users are stored in identity_id (they
+ * have no legacy agents row); legacy agents in agent_id. `self` lets a portal
+ * user resolve their own claim without needing a roster to look it up in.
+ */
+/**
+ * Should an MMS attachment be rendered inline?
+ *
+ * Optimistic by design. `mime-type` is only present on messages WE send — a
+ * received MMS carries just `file-access-url`, and provider URLs usually have
+ * no file extension. Requiring either one meant every inbound image fell
+ * through to a plain "View attachment" link.
+ *
+ * So: render an image unless the mime explicitly says otherwise, and fall back
+ * to the link only if the browser actually fails to decode it (onError).
+ */
+const NON_IMG_EXT = /\.(pdf|txt|csv|zip|gz|mp4|mov|avi|mp3|wav|m4a|doc|docx|xls|xlsx|ppt|pptx)(\?|#|$)/i;
+const isImageUrl = (url, mime) => {
+  if (mime) return String(mime).startsWith('image/');   // trust it when present
+  if (!url) return false;
+  return !NON_IMG_EXT.test(String(url));                // assume image otherwise
+};
+
+/**
+ * Last session list per inbox, kept outside React so it survives unmount.
+ *
+ * Returning to Messages paints this immediately and revalidates in the
+ * background — an inbox that is fast but stale would be worse than slow, so
+ * the network result always wins once it lands.
+ */
+const sessionCache = new Map();   // inboxKey -> sessions[]
+
+const agentOf = (agents, meta, sid, self = null) => {
+  const m = meta[String(sid)] || {};
+  if (m.identity_id) {
+    if (self && String(self.id) === String(m.identity_id)) return self;
+    return agents.find((a) => String(a.id) === String(m.identity_id) && a.kind === 'identity') || null;
+  }
+  const id = m.agent_id;
   return id ? agents.find((a) => String(a.id) === String(id)) || null : null;
 };
 
@@ -127,6 +171,14 @@ export default function Messages() {
   const [templates, setTemplates] = useState([]);
   const { user } = useAuth();
   const isAgent = user?.role === 'agent';
+  const isPortal = !!user?.portal_auth;
+  /** Self as a roster-shaped entry, so claims resolve without a directory. */
+  const selfEntry = isPortal ? {
+    id: user?.id, kind: 'identity',
+    first_name: (user?.display_name || user?.ext || '').split(' ')[0] || user?.ext,
+    last_name: (user?.display_name || '').split(' ').slice(1).join(' '),
+    tag_color: user?.color || '#6366f1',
+  } : null;
   const myName = user?.display_name || user?.display || '';
   const [agents, setAgents] = useState([]);
   const [meta, setMeta] = useState({});
@@ -134,6 +186,9 @@ export default function Messages() {
   const [companyName, setCompanyName] = useState([]);
   const [quiet, setQuiet] = useState(QUIET_DEFAULTS);      // TCPA quiet hours (warn, never block)
   const [quietWarn, setQuietWarn] = useState(null);        // { go } — pending send awaiting confirmation
+  const [quietSnooze, setQuietSnooze] = useState(false);   // "don't remind me again today" tick
+  const [lightbox, setLightbox] = useState(null);          // { url } — enlarged MMS image
+  const [badImg, setBadImg] = useState({});                // url -> true when it won't decode
   const [tip, setTip] = useState(null); // {sid, s, x, y} hover tooltip
   const tipTimer = useRef(null);
   const prevEls = useRef(new Map());
@@ -146,10 +201,34 @@ export default function Messages() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [numberFilter, setNumberFilter] = useState(null); // digits: sidebar number-inbox filter (?number=)
   const [sharedNums, setSharedNums] = useState({}); // digits -> true (Numbers page)
-  const [mainNum, setMainNum] = useState('');
+  const [numMeta, setNumMeta] = useState({});       // digits -> { label } for row tags
+  // Seeded from the auth payload so the inbox fetch can start on the FIRST
+  // render instead of waiting for companySettings to round-trip.
+  const [mainNum, setMainNum] = useState(() => digits(user?.main_number || ''));
+  // The number whose inbox is actually FETCHED (admins only). Sessions are
+  // pulled for exactly one number so first paint never fans out across every
+  // extension on the domain.
+  const inboxNum = isAgent ? null : (numberFilter || mainNum || '');
+
   const agentAllowed = isAgent ? (user?.assigned_numbers || []).map(digits) : [];
   const isSharedNum = (s) => !!sharedNums[digits(s['messagesession-sms-number'])];
-  const onMain = (s) => !mainNum || digits(s['messagesession-sms-number']) === mainNum;
+  const numOfSession = (s) => (s ? digits(s['messagesession-sms-number']) : '');
+  // Inbox picker options: main number first, then the rest of the domain.
+  const inboxOptions = (() => {
+    const seen = new Set();
+    const out = [];
+    for (const n of numbers) {
+      const d = digits(n.number);
+      if (!d || seen.has(d)) continue;
+      seen.add(d);
+      out.push({ digits: d, number: n.number, dest: n.dest ?? null });
+    }
+    out.sort((a, b) => (a.digits === mainNum ? -1 : b.digits === mainNum ? 1 : a.digits.localeCompare(b.digits)));
+    return out;
+  })();
+  // Admin sessions are already fetched for exactly one number, so no further
+  // number filtering is needed. Agents still see a multi-number list.
+  const onMain = (s) => isAgent ? true : (!inboxNum || digits(s['messagesession-sms-number']) === inboxNum);
   // Sidebar deep-links drive the folder (?folder= / ?agent=); in-page
   // folder clicks write back so the URL (and nav highlight) stays true.
   const clearNumberFilter = () => {
@@ -168,6 +247,7 @@ export default function Messages() {
    *  state so the URL stays shareable; the sidebar's other folders still win. */
   const setTab = (key) => {
     setShowUnreadOnly(key === 'unread');
+    setShowClaimedOnly(key === 'claimed');
     goFolder(key === 'archive' ? 'archive' : key === 'spam' ? 'spam' : 'main');
   };
   useEffect(() => {
@@ -190,8 +270,10 @@ export default function Messages() {
   const [msgs, setMsgs] = useState([]);
   const [q, setQ] = useState('');
   const [showUnreadOnly, setShowUnreadOnly] = useState(false);
+  const [showClaimedOnly, setShowClaimedOnly] = useState(false);   // "Claimed" tab
   const [optStates, setOptStates] = useState({});   // digits => 'opt_in' | 'opt_out'
-  const activeTab = folder === 'archive' ? 'archive' : folder === 'spam' ? 'spam' : (showUnreadOnly ? 'unread' : (folder === 'main' ? 'all' : null));
+  const activeTab = folder === 'archive' ? 'archive' : folder === 'spam' ? 'spam'
+    : (showUnreadOnly ? 'unread' : (showClaimedOnly ? 'claimed' : (folder === 'main' ? 'all' : null)));
   const [chatSearch, setChatSearch] = useState('');
   const [chatSearchOpen, setChatSearchOpen] = useState(false);  // search row under the header
   const [panelContactId, setPanelContactId] = useState(null);    // right-side contact panel
@@ -229,9 +311,63 @@ export default function Messages() {
     cset.add(id);
     while (cset.size > 300) cset.delete(cset.values().next().value);
   };
+
+  /**
+   * Fingerprints of sends that returned 2xx, for when the provider hands back
+   * no message id. The API response is the source of truth for delivery: if we
+   * were told it went out, no later history read may show it as 'sending'.
+   * Matching by id alone fails here because the id we invent locally is never
+   * the one the provider later reports.
+   */
+  const sentPrintsRef = useRef([]);
+  const printOf = (text, type) =>
+    `${type || 'sms'}|${String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)}`;
+  const confirmSent = (text, type) => {
+    const list = sentPrintsRef.current;
+    list.push({ p: printOf(text, type), at: Date.now() });
+    // Only recent sends matter; an old fingerprint could wrongly promote a
+    // genuinely stuck message that happens to repeat the same words.
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    sentPrintsRef.current = list.filter((x) => x.at > cutoff).slice(-100);
+  };
+  const wasSent = (msg) => {
+    if (!msg || msg.direction !== 'term') return false;
+    const ts = parseTs(msg.timestamp);
+    const p = printOf(msg.text, msg.type);
+    return sentPrintsRef.current.some((x) =>
+      x.p === p && Math.abs(x.at - ts) < 10 * 60 * 1000);
+  };
+  /**
+   * Does a server message correspond to our locally-echoed one?
+   *
+   * The server REWRITES the body before sending — `$CompanyName` variables are
+   * resolved and an agent signature may be appended — so the text we sent is a
+   * prefix of what comes back, not an exact match. Comparing with `===` meant
+   * the twin was never found: our local copy stuck around AND the real message
+   * stayed parked at the provider's 'sending', which is the stuck status.
+   */
+  const sameMessage = (serverMsg, localMsg) => {
+    if (!serverMsg || serverMsg.direction !== 'term') return false;
+    if (serverMsg.type !== localMsg.type) return false;
+    if (Math.abs(parseTs(serverMsg.timestamp) - parseTs(localMsg.timestamp)) >= 120000) return false;
+    const a = String(serverMsg.text ?? '').replace(/\s+/g, ' ').trim();
+    const bText = String(localMsg.text ?? '').replace(/\s+/g, ' ').trim();
+    if (a === bText) return true;
+    // Server appended a signature/footer, or resolved a variable.
+    if (bText && a.startsWith(bText)) return true;
+    if (a && bText.startsWith(a)) return true;
+    // Media-only messages carry no text at all.
+    return bText === '' && a === '';
+  };
+
   const mergeServerMsgs = (prev, server, sid) => {
     const confirmed = confirmedRef.current;
-    const base = (server || []).map((m) => (m && confirmed.has(m.id) ? { ...m, status: 'delivered' } : m));
+    const base = (server || []).map((m) => {
+      if (!m) return m;
+      // Confirmed by id, or by fingerprint when the provider gave us none.
+      if (confirmed.has(m.id) || wasSent(m)) return { ...m, status: 'delivered' };
+      return m;
+    });
     const ids = new Set(base.map((m) => m && m.id));
     const keep = [];
     (prev || []).forEach((m) => {
@@ -241,53 +377,123 @@ export default function Messages() {
       if (String(m.id || '').startsWith('pending-')) { keep.push(m); return; } // in-flight
       if (m._local) {
         // Adopt the provider twin of our id-less fallback, else keep it.
-        const twin = base.find((x) => x && x.direction === 'term' && x.type === m.type && x.text === m.text
-          && Math.abs(parseTs(x.timestamp) - parseTs(m.timestamp)) < 120000);
+        const twin = base.find((x) => sameMessage(x, m));
         if (twin) { confirmDelivered(twin.id); twin.status = 'delivered'; }
         else keep.push(m);
       }
     });
     return sortOldestFirst([...base, ...keep]);
   };
+  const { markStep } = useOnboarding();
+  const ref = useReferenceData();     // survives navigation; see ReferenceDataContext
   const { lastEvent, lastSync, simulateInbound } = useSocket();
   const location = useLocation();
   const bottomRef = useRef(null);
   const fileRef = useRef(null);
 
+  /**
+   * Reference data now comes from a provider ABOVE the router, so returning to
+   * this page reuses it instead of refetching. This effect only mirrors it into
+   * local state (which the rest of the component and its children already read)
+   * and derives the default from-number.
+   */
   useEffect(() => {
-    (async () => {
-      const [s, c, n, t, a, m] = await Promise.all([
-        api.sessions(), api.contacts(), api.smsNumbers(), api.templates(),
-        (isAgent ? api.agentDirectory() : api.agents()).catch(() => []), api.convoMeta().catch(() => ({})),
-      ]);
-      setSessions(s); setContacts(c); setNumbers(n); setTemplates(t); setAgents(a); setMeta(m);
-      api.optOuts().then((d) => setOptOuts(Array.isArray(d) ? d : [])).catch(() => {});
-      api.companySettings().then((d) => { setCompanyName(d?.company_name || ''); setSharedNums(d?.number_shared || {}); setQuiet(quietFromSettings(d)); setMainNum(digits(d?.main_number || user?.main_number || '')); }).catch(() => {});
-      api.companies().then(setCompanies).catch(() => {});
-      // TCPA badges in the conversation header ("Opted In" / "Opted Out").
-      api.optEvents().then((rows) => {
-        const m = {};
-        (rows || []).forEach((r) => { const d = digits(r.phone_number); if (d) m[d] = r.direction; });
-        setOptStates(m);
-      }).catch(() => {});
+    setContacts(ref.contacts);
+    setTemplates(ref.templates);
+    setMeta(ref.meta);
+    setAgents(ref.agents);
+    setNumbers(ref.numbers);
+    setCompanies(ref.companies);
+    setOptOuts(ref.optOuts);
+    setOptStates(ref.optStates);
+    const d = ref.settings;
+    if (d) {
+      setCompanyName(d.company_name || '');
+      setSharedNums(d.number_shared || {});
+      setNumMeta(d.number_meta || {});
+      setQuiet(quietFromSettings(d));
+      const m = digits(d.main_number || user?.main_number || '');
+      if (m) setMainNum((prev) => (prev === m ? prev : m));   // never blank a working value
+    }
+  }, [ref.contacts, ref.templates, ref.meta, ref.agents, ref.numbers,
+      ref.companies, ref.optOuts, ref.optStates, ref.settings, user]);
+
+  useEffect(() => {
+    const numList = ref.numbers;
+    if (!numList.length) return;
+    // Only seed a default; never fight the smart per-thread selection.
+    setFromNumber((cur) => {
+      if (cur) return cur;
       if (user?.role === 'agent') {
-        const a = (user?.assigned_numbers || []).map(digits);
-        const opts = (n || []).filter((x) => a.includes(digits(x.number)));
+        const allow = (user?.assigned_numbers || []).map(digits);
+        const opts = numList.filter((x) => allow.includes(digits(x.number)));
         const pick = opts.find((x) => digits(x.number) === digits(user?.default_number)) || opts[0];
-        setFromNumber(pick ? String(pick.number) : '');
-      } else if (n?.[0]?.number) setFromNumber(String(n[0].number));
-    })().catch(() => {}).finally(() => setSessionsLoaded(true));
-    const onContactsChanged = () => api.contacts().then(setContacts).catch(() => {});
-    window.addEventListener('contacts-changed', onContactsChanged);
-    return () => window.removeEventListener('contacts-changed', onContactsChanged);
-  }, []);
+        return pick ? String(pick.number) : '';
+      }
+      return numList[0]?.number ? String(numList[0].number) : '';
+    });
+  }, [ref.numbers, user]);
+
+  /**
+   * Sessions for the selected inbox number.
+   *
+   * Admins: refetches whenever the chosen number changes. Waits for a number
+   * to be known (mainNum arrives async with company settings) so we never fire
+   * an unscoped request that would fan out across every extension.
+   * Agents: unchanged — one scoped call for their own user.
+   */
+  /**
+   * Opening the Queue folder loads the shared, cross-number worklist. It is a
+   * separate fetch because the normal inbox is scoped to one number and would
+   * hide queued threads belonging to the others.
+   */
+  const [queueRows, setQueueRows] = useState([]);
+  useEffect(() => {
+    if (folder !== 'queue') return;
+    let dead = false;
+    api.sessions(null, null, 'queued')
+      .then((rows) => { if (!dead) setQueueRows(Array.isArray(rows) ? rows : []); })
+      .catch(() => { if (!dead) setQueueRows([]); });
+    return () => { dead = true; };
+  }, [folder, meta]);
+
+  useEffect(() => {
+    if (!isAgent && !inboxNum) return;        // still resolving the main number
+    let dead = false;
+    const key = isAgent ? 'agent' : String(inboxNum);
+
+    // Paint the previous list for this inbox straight away, then revalidate.
+    const cached = sessionCache.get(key);
+    if (cached) {
+      setSessions(cached);
+      setSessionsLoaded(true);
+    } else {
+      // The open thread belongs to the previous inbox — close it so we never
+      // render a conversation that isn't in the newly-fetched list.
+      setActiveId(null);
+      setSessionsLoaded(false);
+    }
+
+    api.sessions(isAgent ? null : inboxNum)
+      .then((rows) => {
+        const list = Array.isArray(rows) ? rows : [];
+        sessionCache.set(key, list);
+        if (!dead) setSessions(list);
+      })
+      .catch(() => { if (!dead && !cached) setSessions([]); })
+      .finally(() => { if (!dead) setSessionsLoaded(true); });
+    return () => { dead = true; };
+  }, [inboxNum, isAgent]);
 
   useEffect(() => {
     if (!activeId) { setMsgs([]); return; }
     setMsgLimit(100);
-    api.sessionMessages(activeId).then((m) => setMsgs((p) => mergeServerMsgs(p, m, activeId)));
+    // Number hint: lets the server resolve the owning extension from the
+    // number map instead of scanning every extension on the domain.
+    const hint = numOfSession(sessions.find((x) => x['messagesession-id'] === activeId));
+    api.sessionMessages(activeId, hint).then((m) => setMsgs((p) => mergeServerMsgs(p, m, activeId)));
     setSessions((prev) => prev.map((s) => s['messagesession-id'] === activeId ? { ...s, 'messagesession-last-status': 'read' } : s));
-    api.markSessionRead(activeId).catch(() => {}); // tell other instances
+    api.markSessionRead(activeId, hint).catch(() => {}); // tell other instances
   }, [activeId]);
 
   // Global compose FAB (Layout) → open the new-message dialog.
@@ -370,28 +576,23 @@ export default function Messages() {
   useEffect(() => {
     if (!lastSync) return;
     const { resource, action, id, payload } = lastSync;
-    if (resource === 'convo-meta') {
-      api.convoMeta().then(setMeta).catch(() => {});
-    } else if (resource === 'agents') {
-      (isAgent ? api.agentDirectory() : api.agents()).then(setAgents).catch(() => {});
-    } else if (resource === 'contacts') {
-      api.contacts().then(setContacts).catch(() => {});
-    } else if (resource === 'optouts') {
-      api.optOuts().then((d) => setOptOuts(Array.isArray(d) ? d : [])).catch(() => {});
-    } else if (resource === 'company-settings') {
-      api.companySettings().then((d) => setCompanyName(d?.company_name || '')).catch(() => {});
-    } else if (resource === 'templates') {
-      api.templates().then(setTemplates).catch(() => {});
-    } else if (resource === 'sessions' && action === 'read' && id) {
+    // convo-meta / agents / contacts / optouts / company-settings / templates
+    // are refreshed by ReferenceDataProvider, which owns them for the whole
+    // app — refetching here too would double every request.
+    if (resource === 'sessions' && action === 'read' && id) {
       setSessions((prev) => prev.map((s) => String(s['messagesession-id']) === String(id)
         ? { ...s, 'messagesession-last-status': 'read' } : s));
     } else if (resource === 'sessions' && action === 'message-sent') {
-      api.sessions().then(setSessions).catch(() => {});
+      api.sessions(isAgent ? null : inboxNum).then((rows) => {
+        const list = Array.isArray(rows) ? rows : [];
+        sessionCache.set(isAgent ? 'agent' : String(inboxNum), list);
+        setSessions(list);
+      }).catch(() => {});
       const sid = payload?.session_id;
       const remotes = [...(payload?.remotes || []), payload?.remote].filter(Boolean).map((r) => digits(r));
       const openRemote = active ? digits(active['messagesession-remote']) : '';
       if (activeId && (String(sid) === String(activeId) || (openRemote && remotes.includes(openRemote)))) {
-        api.sessionMessages(activeId).then((m) => setMsgs((p) => mergeServerMsgs(p, m, activeId))).catch(() => {});
+        api.sessionMessages(activeId, numOfSession(active)).then((m) => setMsgs((p) => mergeServerMsgs(p, m, activeId))).catch(() => {});
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -487,25 +688,42 @@ export default function Messages() {
     } catch (e) { toastError('Bulk update failed: ' + (e?.response?.data?.message || e.message)); }
   };
 
-  const folderOf = (s) => agentOf(agents, meta, s['messagesession-id'])?.id || null;
+  const folderOf = (s) => agentOf(agents, meta, s['messagesession-id'], selfEntry)?.id || null;
   const statusOf = (s) => meta[String(s['messagesession-id'])]?.status || 'active';
   const isActive = (s) => statusOf(s) === 'active';
+
+  /** Assigned to the signed-in user (identity_id for portal, agent_id for legacy). */
+  const isMine = (s) => {
+    const m = meta[String(s['messagesession-id'])] || {};
+    const own = isPortal ? m.identity_id : m.agent_id;
+    return !!own && String(own) === String(user?.id ?? '');
+  };
+  const claimedCount = sessions.filter((s) => isActive(s) && isMine(s)).length;
+
   const archivedSessions = sessions.filter((s) => statusOf(s) === 'archived');
   const spamSessions = sessions.filter((s) => statusOf(s) === 'spam');
-  const queueSessions = sessions.filter((s) => statusOf(s) === 'queued' && onMain(s));
+  // The queue is a shared worklist: it ignores the Active-line filter and adds
+  // any queued thread from another number that the inbox fetch did not include.
+  const sessionsForView = (() => {
+    if (folder !== 'queue' || queueRows.length === 0) return sessions;
+    const have = new Set(sessions.map((s) => String(s['messagesession-id'])));
+    return [...sessions, ...queueRows.filter((s) => !have.has(String(s['messagesession-id'])))];
+  })();
+  const queueSessions = sessionsForView.filter((s) => statusOf(s) === 'queued');
   const unassignedSessions = sessions.filter((s) => isActive(s) && !folderOf(s) && onMain(s));
 
-  const filtered = sessions.filter((s) => {
-    if (folder === 'main' && (!isActive(s) || (!numberFilter && !onMain(s)))) return false;
+  const filtered = sessionsForView.filter((s) => {
+    if (folder === 'main' && (!isActive(s) || !onMain(s))) return false;
     if (folder === 'archive' && statusOf(s) !== 'archived') return false;
     if (folder === 'spam' && statusOf(s) !== 'spam') return false;
-    if (folder === 'queue' && (statusOf(s) !== 'queued' || (!numberFilter && !onMain(s)))) return false;
-    if (folder === 'unassigned' && (!isActive(s) || folderOf(s) || (!numberFilter && !onMain(s)))) return false;
+    if (folder === 'queue' && statusOf(s) !== 'queued') return false;
+    if (folder === 'unassigned' && (!isActive(s) || folderOf(s) || !onMain(s))) return false;
     if (folder !== 'main' && folder !== 'archive' && folder !== 'spam' && folder !== 'queue' && folder !== 'unassigned'
       && (!isActive(s) || String(folderOf(s) || '') !== String(folder))) return false;
     if (isAgent && !isSharedNum(s) && !agentAllowed.includes(digits(s['messagesession-sms-number']))) return false;
     if (numberFilter && digits(s['messagesession-sms-number']) !== numberFilter) return false;
     if (showUnreadOnly && s['messagesession-last-status'] !== 'unread') return false;
+    if (showClaimedOnly && !isMine(s)) return false;
     if (!q.trim()) return true;
     const c = contactByPhone[digits(s['messagesession-remote'])];
     const hay = `${contactName(c)} ${s['messagesession-remote']} ${s['messagesession-last-message']}`.toLowerCase();
@@ -523,18 +741,88 @@ export default function Messages() {
     return pb - pa;
   });
   // Long inboxes render windowed (150 rows) — the full list stays searchable.
-  const [sessLimit, setSessLimit] = useState(150);
+  // Start small: a large inbox otherwise renders hundreds of rows on first
+  // paint. The list grows as it is scrolled (see the sentinel below).
+  const PAGE = 30;
+  const [sessLimit, setSessLimit] = useState(PAGE);
   const shownSessions = filtered.length > sessLimit ? filtered.slice(0, sessLimit) : filtered;
+  const moreRef = useRef(null);
+  useEffect(() => { setSessLimit(PAGE); }, [folder, activeTab, q, numberFilter, inboxNum]);
+  // Grow the window as the sentinel scrolls into view — no click needed.
+  useEffect(() => {
+    const el = moreRef.current;
+    if (!el || filtered.length <= sessLimit) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) setSessLimit((n) => n + PAGE);
+    }, { rootMargin: '200px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [filtered.length, sessLimit]);
 
   const assignAgent = async (sid, agentId) => {
+    // Which column depends on the TARGET, not on who is assigning: portal
+    // users live in agent_identities, legacy agents in agents. Sending the
+    // wrong one fails validation with a 422 ("exists:agents,id").
+    const val = agentId === null || agentId === undefined || agentId === '' ? null : agentId;
+    const target = val === null ? null : agents.find((a) => String(a.id) === String(val));
+    const targetIsIdentity = val === null
+      ? isPortal                                  // clearing: clear our own column
+      : (target ? target.kind === 'identity' : isPortal);
+    const key = targetIsIdentity ? 'identity_id' : 'agent_id';
     // Claiming from Queue moves the thread to the agent's folder.
-    const patch = (agentId && meta[String(sid)]?.status === 'queued')
-      ? { agent_id: agentId, status: 'active' } : { agent_id: agentId };
+    // Claiming assigns ownership but deliberately leaves the thread IN the
+    // queue: it stays visible to the team until someone actually replies, so
+    // a claim-and-forget can't silently swallow a customer message.
+    const patch = val === null
+      ? { agent_id: null, identity_id: null }     // unassign clears both
+      : { [key]: val };
     setMeta((p) => ({ ...p, [sid]: { ...p[sid], ...patch } }));
     try {
       await api.setConvoMeta(sid, patch);
       window.dispatchEvent(new Event('convo-meta-changed'));
     } catch (e) { toastError('Assign failed: ' + (e?.response?.data?.message || e.message)); }
+  };
+
+  /**
+   * Put a conversation back in the pending queue and drop its assignment —
+   * otherwise it stays owned by whoever claimed it and nobody else picks it up.
+   */
+  const sendToQueue = async (sid) => {
+    const patch = { status: 'queued', agent_id: null, identity_id: null };
+    setMeta((p) => ({ ...p, [sid]: { ...p[sid], ...patch } }));
+    if (String(activeId) === String(sid)) setActiveId(null);
+    try {
+      await api.setConvoMeta(sid, patch);
+      window.dispatchEvent(new Event('convo-meta-changed'));
+      toastSuccess('Moved to the pending queue.');
+    } catch (e) {
+      toastError(e?.response?.data?.message || 'Could not move it to the queue.');
+    }
+  };
+
+  /**
+   * A reply is what resolves a queued conversation. Claiming alone does not,
+   * so the team keeps seeing it until it is genuinely handled.
+   */
+  const clearQueueAfterReply = async (sid) => {
+    if (meta[String(sid)]?.status !== 'queued') return;
+    setMeta((p) => ({ ...p, [sid]: { ...p[sid], status: 'active' } }));
+    try {
+      await api.setConvoMeta(sid, { status: 'active' });
+      window.dispatchEvent(new Event('convo-meta-changed'));
+    } catch { /* the thread simply stays queued; the next reply retries */ }
+  };
+
+  /** Escape hatch for threads that need no reply (spam, wrong number). */
+  const removeFromQueue = async (sid) => {
+    setMeta((p) => ({ ...p, [sid]: { ...p[sid], status: 'active' } }));
+    try {
+      await api.setConvoMeta(sid, { status: 'active' });
+      window.dispatchEvent(new Event('convo-meta-changed'));
+      toastSuccess('Removed from the queue.');
+    } catch (e) {
+      toastError(e?.response?.data?.message || 'Could not update the queue.');
+    }
   };
 
   const togglePin = async (sid) => {
@@ -566,12 +854,12 @@ export default function Messages() {
 
   const markRead = async (sid) => {
     setSessions((p) => p.map((s) => String(s['messagesession-id']) === String(sid) ? { ...s, 'messagesession-last-status': 'read' } : s));
-    try { await api.markSessionRead(sid); }
+    try { await api.markSessionRead(sid, numOfSession(sessions.find((x) => String(x['messagesession-id']) === String(sid)))); }
     catch (e) { toastError('Portal update failed: ' + (e?.response?.data?.message || e.message)); }
   };
   const markUnread = async (sid) => {
     setSessions((p) => p.map((s) => String(s['messagesession-id']) === String(sid) ? { ...s, 'messagesession-last-status': 'unread' } : s));
-    try { await api.markSessionUnread(sid); }
+    try { await api.markSessionUnread(sid, numOfSession(sessions.find((x) => String(x['messagesession-id']) === String(sid)))); }
     catch (e) { toastError('Portal update failed: ' + (e?.response?.data?.message || e.message)); }
   };
   const replyTo = (sid) => {
@@ -591,12 +879,39 @@ export default function Messages() {
       saveExportFile(buildTxtExport(list, remote, c ? contactName(c) : fmtPhone(remote)), 'text/plain', `conversation-${remote}-${new Date().toISOString().slice(0, 10)}.txt`);
     } catch (e) { toastError('Download failed: ' + (e?.response?.data?.message || e.message)); }
   };
+  // Tagging every row with its number is noise when the inbox is already
+  // scoped to one; only show it when the visible threads span several.
+  const showNumTag = (() => {
+    const seen = new Set();
+    for (const s of sessions) {
+      const d = digits(s['messagesession-sms-number']);
+      if (d) seen.add(d);
+      if (seen.size > 1) return true;
+    }
+    return false;
+  })();
+
   const active = sessions.find((s) => s['messagesession-id'] === activeId);
   const activeContact = active ? contactByPhone[digits(active['messagesession-remote'])] : null;
-  const activeAgent = active ? agentOf(agents, meta, active['messagesession-id']) : null;
+  const activeAgent = active ? agentOf(agents, meta, active['messagesession-id'], selfEntry) : null;
   const assignable = agents.filter((a) => (a.status || 'active') === 'active' || (activeAgent && String(a.id) === String(activeAgent.id)));
   // Agents may only send from assigned numbers — keep the thread sender valid.
-  const agentAllowedOpts = isAgent ? numbers.filter((n) => agentAllowed.includes(digits(n.number))) : numbers;
+  /**
+   * From-number options for an agent.
+   *
+   * agentAllowed (user.assigned_numbers) now includes granted SHARED lines,
+   * which are owned by another extension and therefore absent from
+   * api.smsNumbers(). Filtering `numbers` alone silently dropped them, which
+   * is why a shared inbox was readable but had no way to reply. Synthesize a
+   * row for anything permitted but missing.
+   */
+  const agentAllowedOpts = (() => {
+    if (!isAgent) return numbers;
+    const mine = numbers.filter((n) => agentAllowed.includes(digits(n.number)));
+    const have = new Set(mine.map((n) => digits(n.number)));
+    const extra = agentAllowed.filter((d) => d && !have.has(d)).map((d) => ({ number: d }));
+    return [...mine, ...extra];
+  })();
   useEffect(() => {
     if (user?.role !== 'agent') return;
     const opts = numbers.filter((n) => agentAllowed.includes(digits(n.number)));
@@ -607,6 +922,37 @@ export default function Messages() {
       setFromNumber(String(pick.number));
     }
   }, [user, numbers]);
+
+  /**
+   * Smart sender: reply from the number that RECEIVED the message.
+   *
+   * Re-evaluated whenever the open thread changes. A deliberate manual switch
+   * is remembered per thread (fromOverride) so it survives navigating away and
+   * back, but it never leaks onto a different conversation.
+   */
+  const [fromOverride, setFromOverride] = useState({});   // sessionId -> number
+  useEffect(() => {
+    if (!activeId) return;
+    const sess = sessions.find((x) => x['messagesession-id'] === activeId);
+    if (!sess) return;
+    const pickable = (isAgent ? agentAllowedOpts : numbers);
+    if (!pickable.length) return;
+
+    const manual = fromOverride[activeId];
+    if (manual && pickable.some((n) => String(n.number) === manual)) {
+      if (manual !== fromNumber) setFromNumber(manual);
+      return;
+    }
+    const threadNum = digits(sess['messagesession-sms-number']);
+    const match = pickable.find((n) => digits(n.number) === threadNum);
+    if (match && String(match.number) !== fromNumber) setFromNumber(String(match.number));
+  }, [activeId, sessions, numbers, isAgent]);
+
+  /** Manual change on the open thread — remembered for that thread only. */
+  const chooseFrom = (v) => {
+    setFromNumber(v);
+    if (activeId) setFromOverride((p) => ({ ...p, [activeId]: v }));
+  };
   const senderName = user?.display_name || (user?.email ? user.email.split('@')[0] : '') || user?.user || '';
   const activeStatus = active ? (meta[String(active['messagesession-id'])]?.status || 'active') : 'active';
   const activeImportant = active ? !!meta[String(active['messagesession-id'])]?.important : false;
@@ -684,7 +1030,11 @@ export default function Messages() {
   };
 
   const send = () => {
-    if (isAgent && !agentAllowed.includes(digits(fromNumber))) return toastError(agentAllowed.length ? 'Choose one of your assigned numbers.' : 'No SMS number assigned — ask your admin.');
+    if (isAgent && !agentAllowed.includes(digits(fromNumber))) {
+      return toastError(agentAllowed.length
+        ? 'You can only send from your own or granted shared numbers.'
+        : 'No SMS number assigned — ask your admin.');
+    }
     if ((!draft.trim() && !attach) || !activeId || sending || pending) return;
     const base = draft || (attach ? `[Attachment: ${attach.name}]` : '');
     const payload = {
@@ -701,7 +1051,8 @@ export default function Messages() {
       setDraft(''); setAttach(null);
     };
     // Quiet hours: warn, but never block — they can still send.
-    if (inQuietHours(new Date(), quiet, getTimezone())) {
+    // A "don't remind me today" dismissal skips the prompt until midnight.
+    if (inQuietHours(new Date(), quiet, getTimezone()) && !isQuietSnoozed()) {
       setQuietWarn({ go, to: activeContact ? contactName(activeContact) : fmtPhone(active['messagesession-remote']) });
       return;
     }
@@ -719,6 +1070,12 @@ export default function Messages() {
     return () => clearTimeout(t);
   }, [pending]);
   useEffect(() => {
+    if (!lightbox) return;
+    const h = (e) => { if (e.key === 'Escape') setLightbox(null); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [lightbox]);
+  useEffect(() => {
     if (!ctx) return;
     const h = (e) => { if (e.key === 'Escape') setCtx(null); };
     window.addEventListener('keydown', h);
@@ -734,16 +1091,57 @@ export default function Messages() {
       setMsgs((p) => p.map((m) => (m.id === tmpId ? { ...m, status: 'sending', _error: null } : m)));
     }
     try {
-      const sent = await api.sendInSession(activeId, payload);
+      // A conversation belongs to ONE of our numbers. Replying in-session from
+      // a different number is rejected by the provider ("invalid from number"),
+      // which is a dead end for the user. Treat it as intent to reach the same
+      // person from that other number: start a new conversation instead.
+      const threadNum = digits(active?.['messagesession-sms-number']);
+      const chosen = digits(payload['from-number']);
+      const crossNumber = !!threadNum && !!chosen && threadNum !== chosen;
+
+      let sent;
+      if (crossNumber) {
+        sent = await api.sendNew({
+          ...payload,
+          destination: String(active['messagesession-remote']),
+        });
+      } else {
+        sent = await api.sendInSession(activeId, payload);
+      }
+
       // HTTP 2xx = accepted = Delivered. The provider echo (or our fallback)
       // is pinned so later reloads can't drag it back to 'sending'.
       const final = sent.id
         ? { ...sent, status: 'delivered' }
         : { id: `m-${Date.now()}`, timestamp: new Date().toISOString().slice(0, 19).replace('T', ' '), type: payload.type, direction: 'term', dialed: active['messagesession-remote'], text: payload.message, status: 'delivered', 'from-number': Number(digits(fromNumber)), 'messagesession-id': activeId, _local: true };
       confirmDelivered(final.id);
+      // The server may rewrite the body, so fingerprint BOTH what we sent and
+      // what it echoed back.
+      confirmSent(payload.message, payload.type);
+      if (sent && sent.text) confirmSent(sent.text, sent.type || payload.type);
+
+      if (crossNumber) {
+        // The reply lives in a different thread now — clear the optimistic
+        // bubble here, refresh, and follow the user to the new conversation
+        // so the message isn't "lost" from their point of view.
+        setMsgs((p) => p.filter((m) => m.id !== tmpId));
+        setDraft(''); setAttach(null);
+        markStep('first_send');
+        const newId = final['messagesession-id'];
+        try {
+          const rows = await api.sessions(isAgent ? null : inboxNum);
+          setSessions(Array.isArray(rows) ? rows : []);
+        } catch { /* the socket sync will catch up */ }
+        if (newId) setActiveId(newId);
+        toastSuccess(`Sent from ${fmtPhone(chosen)} — opened as a new conversation.`);
+        return;
+      }
+
       setMsgs((p) => sortOldestFirst([...p.filter((m) => m.id !== tmpId), final]));
       setSessions((p) => p.map((s) => s['messagesession-id'] === activeId ? { ...s, 'messagesession-last-message': payload.message, 'messagesession-last-datetime': new Date().toISOString(), 'messagesession-last-status': 'read' } : s));
       setDraft(''); setAttach(null);
+      markStep('first_send');     // "Send your first reply" — no-op once done
+      clearQueueAfterReply(String(activeId));
     } catch (e) {
       setMsgs((p) => p.map((m) => (m.id === tmpId ? { ...m, status: 'failed', _payload: payload, _error: (e?.response?.data?.message || e.message) } : m)));
       toastError('Send failed: ' + (e?.response?.data?.message || e.message));
@@ -775,8 +1173,48 @@ export default function Messages() {
       <Onboarding />
       <div className="flex-1 flex min-h-0">
       {/* ---------- Side panel: folders + conversation list ---------- */}
-      <div className={`${activeId ? 'hidden md:flex' : 'flex'} w-full md:w-64 lg:w-80 bg-white border-r flex-col shrink-0`}>
+      <div className={`${activeId ? 'hidden md:flex' : 'flex'} w-full md:w-72 lg:w-96 bg-white border-r flex-col shrink-0`}>
         <div className="p-3 border-b space-y-2">
+          {/* Inbox-number picker. The sidebar nav has one too, but the sidebar
+              is hidden on mobile and has no room for a <select> when collapsed,
+              so this is the copy that is reachable in every layout. */}
+          {!isAgent && inboxOptions.length > 0 && (
+            <label className="flex items-center gap-1.5 min-w-0 md:hidden">
+              <span className="text-[11px] font-medium text-slate-500 shrink-0" aria-hidden="true">📱</span>
+              <select
+                aria-label="Inbox SMS number"
+                value={inboxNum}
+                onChange={(e) => {
+                  const next = new URLSearchParams(searchParams);
+                  const v = e.target.value;
+                  if (!v || v === mainNum) next.delete('number'); else next.set('number', v);
+                  setSearchParams(next, { replace: true });
+                }}
+                className="flex-1 min-w-0 border rounded-lg px-2 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-brand-500"
+              >
+                {inboxOptions.map((n) => (
+                  <option key={n.digits} value={n.digits}>
+                    {fmtPhone(n.number)}{n.dest ? ` — ext ${n.dest}` : ''}{n.digits === mainNum ? ' (main)' : ''}
+                  </option>
+                ))}
+                {inboxNum && !inboxOptions.some((n) => n.digits === inboxNum) && (
+                  <option value={inboxNum}>{fmtPhone(inboxNum)}</option>
+                )}
+              </select>
+            </label>
+          )}
+          {/* Desktop: the nav owns the picker, so just show which inbox is open. */}
+          {!isAgent && inboxNum && (
+            <div className="hidden md:flex items-center gap-1.5 text-[11px] text-slate-500 min-w-0">
+              <span aria-hidden="true">📱</span>
+              <span className="font-medium text-slate-700 truncate">{fmtPhone(inboxNum)}</span>
+              {inboxNum === mainNum && <span className="text-slate-400 shrink-0">(main)</span>}
+              {(() => {
+                const m = inboxOptions.find((n) => n.digits === inboxNum);
+                return m?.dest ? <span className="text-slate-400 shrink-0">ext {m.dest}</span> : null;
+              })()}
+            </div>
+          )}
           <div className="flex items-center gap-2">
             <button onClick={() => setShowNew(true)}
               className="flex-1 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-lg py-2">+ New Message</button>
@@ -791,14 +1229,15 @@ export default function Messages() {
           </div>
           {/* All / Unread / Archived / Spam — queue, unassigned and agent
               folders still live in the sidebar. */}
-          <div className="flex items-center gap-1 pt-0.5">
+          <div className="flex items-center gap-1 pt-0.5 min-w-0 overflow-x-auto">
             {[['all', 'All', 0], ['unread', 'Unread', unreadCount],
+              ['claimed', 'Claimed', claimedCount],
               ['archive', 'Archived', archivedSessions.length],
               ['spam', 'Spam', spamSessions.length]].map(([key, label, count]) => {
               const on = activeTab === key;
               return (
                 <button key={key} onClick={() => setTab(key)}
-                  className={`relative px-2.5 py-2 text-xs font-semibold rounded-t-lg ${on ? 'text-brand-700' : 'text-slate-500 hover:text-slate-700'}`}>
+                  className={`relative px-2.5 py-2 text-xs font-semibold rounded-t-lg whitespace-nowrap shrink-0 ${on ? 'text-brand-700' : 'text-slate-500 hover:text-slate-700'}`}>
                   {label}
                   {count > 0 ? <span className={`ml-1 font-medium ${on ? 'text-brand-600' : 'text-slate-400'}`}>({count})</span> : ''}
                   {on && <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-brand-600" />}
@@ -816,7 +1255,7 @@ export default function Messages() {
             const isActive = s['messagesession-id'] === activeId;
             const pinned = !!meta[sid]?.pinned;
             const important = !!meta[sid]?.important;
-            const agent = agentOf(agents, meta, sid);
+            const agent = agentOf(agents, meta, sid, selfEntry);
             return (
               <button key={s['messagesession-id']} onClick={() => (selectMode ? toggleSel(sid) : setActiveId(s['messagesession-id']))} onContextMenu={(e) => { e.preventDefault(); setCtxAssign(false); setCtx({ x: e.clientX, y: e.clientY, sid }); }}
                 className={`group w-full text-left px-3 py-2.5 border-b border-slate-100 flex items-center gap-3 bg-white border-l-2 ${isActive ? 'border-l-brand-600' : 'border-l-transparent'}`}>
@@ -863,6 +1302,20 @@ export default function Messages() {
                       className={`text-xs truncate flex-1 ${unread ? 'font-semibold text-slate-700' : 'text-slate-500'}`}>
                       {s['messagesession-last-message'] || <em className="text-slate-400">[media]</em>}
                     </span>
+                    {/* Which of your numbers this thread came in on. Only
+                        worth showing when more than one is in play. */}
+                    {showNumTag && (() => {
+                      const nd = digits(s['messagesession-sms-number']);
+                      if (!nd) return null;
+                      const lbl = numMeta[nd]?.label;
+                      return (
+                        <span
+                          title={lbl ? `${lbl} — ${fmtPhone(nd)}` : fmtPhone(nd)}
+                          className="text-[10px] font-medium text-slate-500 bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5 shrink-0 max-w-[7.5rem] truncate">
+                          {lbl || fmtPhone(nd)}
+                        </span>
+                      );
+                    })()}
                     {!c && (
                       <span onClick={(e) => { e.stopPropagation(); quickAddContact(s['messagesession-remote']); }}
                         title="Add as contact"
@@ -875,7 +1328,19 @@ export default function Messages() {
             );
           })}
           {tip && (() => {
-            const out = myNumSet.has(digits(tip.s['messagesession-last-sender']));
+            // "Is the last message ours?" — matching only against our own
+            // numbers mislabels every outbound as Incoming whenever the
+            // sending number isn't in our list (shared lines) or the provider
+            // omits last-sender. Fall back to "not the remote party".
+            const tipSender = digits(tip.s['messagesession-last-sender']);
+            const tipRemotes = (Array.isArray(tip.s['messagesession-remote'])
+              ? tip.s['messagesession-remote']
+              : String(tip.s['messagesession-remote'] ?? '').split(','))
+              .map(digits).filter(Boolean);
+            const out = !!tipSender
+              && (myNumSet.has(tipSender)
+                || digits(tip.s['messagesession-sms-number']) === tipSender
+                || (tipRemotes.length > 0 && !tipRemotes.includes(tipSender)));
             const read = tip.s['messagesession-last-status'] === 'read';
             return (
               <div className="fixed z-50 w-[300px] max-w-[80vw] bg-slate-900 text-white rounded-lg shadow-xl p-3 pointer-events-none" style={{ left: tip.x, top: tip.y }}>
@@ -917,7 +1382,7 @@ export default function Messages() {
                     <div className={`absolute top-0 w-52 bg-white border rounded-xl shadow-xl py-1 max-h-56 overflow-y-auto ${mx > window.innerWidth - 480 ? 'right-full mr-1' : 'left-full ml-1'}`}>
                       <button className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, null); }}>👤 Unassigned</button>
                       {isAgent ? (
-                        String(meta[String(ctx.sid)]?.agent_id || '') !== String(user?.id || '') && (
+                        String((isPortal ? meta[String(ctx.sid)]?.identity_id : meta[String(ctx.sid)]?.agent_id) || '') !== String(user?.id || '') && (
                           <button className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, user.id); }}>✅ Claim for me</button>
                         )
                       ) : (<>
@@ -932,6 +1397,19 @@ export default function Messages() {
                   )}
                 </div>
                 <div className="border-t my-1" />
+                {/* Hand a thread back to the shared pool: unassign + queue in
+                    one step, so it can't sit claimed-but-abandoned. */}
+                {meta[String(ctx.sid)]?.status !== 'queued' ? (
+                  <button className={item}
+                    onClick={() => { const sid = ctx.sid; setCtx(null); sendToQueue(sid); }}>
+                    <span>⏳</span> Send to Queue
+                  </button>
+                ) : (
+                  <button className={item}
+                    onClick={() => { const sid = ctx.sid; setCtx(null); removeFromQueue(sid); }}>
+                    <span>✓</span> Remove from Queue
+                  </button>
+                )}
                 <button className={item} onClick={() => { setCtx(null); downloadThread(ctx.sid); }}><span>⬇️</span> Download</button>
               </div>
             </>, document.body);
@@ -940,20 +1418,71 @@ export default function Messages() {
             <ConfirmModal
               title="Sending outside quiet hours"
               icon="🌙"
-              onClose={() => setQuietWarn(null)}
+              onClose={() => { setQuietSnooze(false); setQuietWarn(null); }}
               actions={[
-                { label: 'Cancel', onClick: () => setQuietWarn(null) },
-                { label: 'Send anyway', onClick: () => { const go = quietWarn.go; setQuietWarn(null); go(); } },
+                { label: 'Cancel', onClick: () => { setQuietSnooze(false); setQuietWarn(null); } },
+                { label: 'Send anyway', onClick: () => {
+                  const go = quietWarn.go;
+                  // Only honour the tick when they actually proceed.
+                  if (quietSnooze) snoozeQuietToday();
+                  setQuietSnooze(false);
+                  setQuietWarn(null);
+                  go();
+                } },
               ]}>
               It's currently inside your quiet hours (<strong>{quietLabel(quiet)}</strong>).
               Under TCPA, marketing texts should land between 8:00 AM and 9:00 PM in the recipient's local time.
               <div className="mt-1.5">Sending to <strong>{quietWarn.to}</strong> now may breach that window. You can still continue, or wait until {quietLabel(quiet).split('–')[1]?.trim()}.</div>
+              <label className="mt-2.5 flex items-start gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox" checked={quietSnooze}
+                  onChange={(e) => setQuietSnooze(e.target.checked)}
+                  className="w-4 h-4 accent-brand-600 mt-px shrink-0"
+                />
+                <span>
+                  Don&apos;t remind me again today
+                  <span className="block text-[11px] opacity-70">
+                    Hides this warning on this device until midnight. Quiet hours still apply.
+                  </span>
+                </span>
+              </label>
             </ConfirmModal>
           )}
+          {/* Enlarged MMS image. Rendered in a portal so it escapes the
+              conversation's scroll container and overlays the whole app. */}
+          {lightbox && createPortal(
+            <div
+              className="fixed inset-0 z-[200] bg-black/80 flex flex-col items-center justify-center p-4"
+              onClick={() => setLightbox(null)}
+              role="dialog" aria-modal="true" aria-label="Attachment preview"
+            >
+              <img
+                src={lightbox.url} alt="MMS attachment"
+                onClick={(e) => e.stopPropagation()}
+                className="max-w-full max-h-[80vh] object-contain rounded-lg shadow-2xl"
+              />
+              <div className="flex items-center gap-2 mt-4" onClick={(e) => e.stopPropagation()}>
+                <a
+                  href={lightbox.url} download target="_blank" rel="noreferrer"
+                  className="text-sm font-semibold bg-white text-slate-800 rounded-lg px-4 py-2 hover:bg-slate-100"
+                >
+                  ⬇ Download image
+                </a>
+                <button
+                  onClick={() => setLightbox(null)}
+                  className="text-sm font-semibold border border-white/40 text-white rounded-lg px-4 py-2 hover:bg-white/10"
+                >
+                  Close
+                </button>
+              </div>
+            </div>, document.body)}
           {delAsk && <DeletePwModal sid={delAsk} onClose={() => setDelAsk(null)} onDone={async () => { const sid = delAsk; setDelAsk(null); await setStatus(sid, 'deleted'); toastSuccess('Conversation deleted'); }} />}
+          {/* Auto-loads when scrolled near; the button is the manual fallback
+              for anyone without IntersectionObserver. */}
           {filtered.length > shownSessions.length && (
-            <button onClick={() => setSessLimit((l) => l + 150)} className="w-full text-center text-xs text-brand-600 hover:underline py-2">
-              ↓ Show more ({filtered.length - shownSessions.length} hidden)
+            <button ref={moreRef} onClick={() => setSessLimit((l) => l + PAGE)}
+              className="w-full text-center text-xs text-brand-600 hover:underline py-2">
+              ↓ Loading more… ({filtered.length - shownSessions.length} left)
             </button>
           )}
           {!sessionsLoaded ? (
@@ -970,7 +1499,8 @@ export default function Messages() {
             </div>
           ) : filtered.length === 0 ? (
             <div className="p-6 text-sm text-slate-400 text-center">
-              {showUnreadOnly ? 'No unread messages. 🎉'
+              {showClaimedOnly ? 'Nothing assigned to you yet.'
+                : showUnreadOnly ? 'No unread messages. 🎉'
                 : folder === 'archive' ? 'Nothing archived.'
                 : folder === 'spam' ? 'No spam. 🎉'
                 : folder === 'queue' ? 'Queue is empty.'
@@ -1069,10 +1599,34 @@ export default function Messages() {
                     {activeAgent && String(activeAgent.id) !== String(user?.id) && <option value={activeAgent.id} disabled>Agent: {agentName(activeAgent)} (assigned)</option>}
                   </>) : assignable.map((a) => <option key={a.id} value={a.id}>Agent: {agentName(a)}</option>)}
                 </select>
-                <select value={fromNumber} onChange={(e) => setFromNumber(e.target.value)} title="Sending number"
-                  className="hidden md:block border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 text-slate-600 min-w-[170px] max-w-[250px]">
-                  {(isAgent ? agentAllowedOpts : numbers).map((n) => <option key={n.number} value={String(n.number)}>From: {fmtPhone(n.number)}{digits(n.number) === mainNum ? ' (Default)' : ''}</option>)}{isAgent && agentAllowedOpts.length === 0 && <option value="">No number assigned</option>}
+                {/* Strict select: only real, permitted numbers — never a free
+                    or blank value. The thread's own number is marked so the
+                    smart default is obvious. */}
+                <select value={fromNumber} onChange={(e) => chooseFrom(e.target.value)} title="Sending number"
+                  disabled={(isAgent ? agentAllowedOpts : numbers).length === 0}
+                  className="hidden md:block border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 text-slate-600 min-w-[170px] max-w-[250px] disabled:bg-slate-50 disabled:cursor-not-allowed">
+                  {(isAgent ? agentAllowedOpts : numbers).length === 0
+                    ? <option value="">No number assigned</option>
+                    : (isAgent ? agentAllowedOpts : numbers).map((n) => (
+                        <option key={n.number} value={String(n.number)}>
+                          From: {fmtPhone(n.number)}
+                          {digits(n.number) === digits(active?.['messagesession-sms-number']) ? ' • this thread' : ''}
+                        </option>
+                      ))}
                 </select>
+                {activeStatus !== 'queued' ? (
+                  <button onClick={() => sendToQueue(String(activeId))}
+                    title="Unassign and move to the pending queue"
+                    className="h-8 px-2.5 rounded-lg border text-xs font-medium hover:bg-slate-50 text-slate-600 shrink-0">
+                    ⏳ <span className="hidden lg:inline">Send to Queue</span>
+                  </button>
+                ) : (
+                  <button onClick={() => removeFromQueue(String(activeId))}
+                    title="Clear from the queue without replying"
+                    className="h-8 px-2.5 rounded-lg border border-amber-300 bg-amber-50 text-amber-800 text-xs font-medium hover:bg-amber-100 shrink-0">
+                    ⏳ <span className="hidden lg:inline">In queue — clear</span>
+                  </button>
+                )}
                 <button onClick={() => setChatSearchOpen((v) => !v)}
                   title={chatSearchOpen ? 'Close search' : 'Search conversation'}
                   className={`w-8 h-8 rounded-lg border flex items-center justify-center hover:bg-slate-50 ${chatSearchOpen ? 'bg-brand-50 border-brand-200 text-brand-700' : 'text-slate-600'}`}>
@@ -1106,9 +1660,17 @@ export default function Messages() {
                   {activeAgent && String(activeAgent.id) !== String(user?.id) && <option value={activeAgent.id} disabled>👤 {agentName(activeAgent)} (assigned)</option>}
                 </>) : assignable.map((a) => <option key={a.id} value={a.id}>{agentName(a)}</option>)}
                       </select>
-                      <select value={fromNumber} onChange={(e) => setFromNumber(e.target.value)} aria-label="Sending number"
-                        className="w-full border rounded-lg px-2 py-2 text-xs text-slate-600">
-                        {(isAgent ? agentAllowedOpts : numbers).map((n) => <option key={n.number} value={String(n.number)}>From: {fmtPhone(n.number)}{digits(n.number) === mainNum ? ' (Default)' : ''}</option>)}{isAgent && agentAllowedOpts.length === 0 && <option value="">No number assigned</option>}
+                      <select value={fromNumber} onChange={(e) => chooseFrom(e.target.value)} aria-label="Sending number"
+                        disabled={(isAgent ? agentAllowedOpts : numbers).length === 0}
+                        className="w-full border rounded-lg px-2 py-2 text-xs text-slate-600 disabled:bg-slate-50 disabled:cursor-not-allowed">
+                        {(isAgent ? agentAllowedOpts : numbers).length === 0
+                          ? <option value="">No number assigned</option>
+                          : (isAgent ? agentAllowedOpts : numbers).map((n) => (
+                              <option key={n.number} value={String(n.number)}>
+                                From: {fmtPhone(n.number)}
+                                {digits(n.number) === digits(active?.['messagesession-sms-number']) ? ' • this thread' : ''}
+                              </option>
+                            ))}
                       </select>
                       <div className="flex gap-1.5">
                         <button onClick={() => toggleImportant(String(activeId))} title="Importance" className="flex-1 border rounded-lg py-2 text-sm">❗</button>
@@ -1181,7 +1743,22 @@ export default function Messages() {
                   )}
                   <div className={`flex ${inbound ? 'justify-start' : 'justify-end'}`}>
                     <div className={`max-w-[70%] rounded-2xl px-3.5 py-2 text-sm shadow-sm whitespace-pre-wrap break-words ${inbound ? 'bg-white text-slate-800 rounded-tl-sm' : 'bg-brand-600 text-white rounded-tr-sm'}`}>
-                      {m['file-access-url'] && <a href={m['file-access-url']} target="_blank" rel="noreferrer" className="underline text-xs block mb-1">📎 View attachment</a>}
+                      {m['file-access-url'] && (
+                        isImageUrl(m['file-access-url'], m['mime-type']) && !badImg[m['file-access-url']]
+                          ? (
+                            <button type="button" onClick={() => setLightbox({ url: m['file-access-url'] })}
+                              title="Click to enlarge"
+                              className="block mb-1 rounded-lg overflow-hidden border border-black/10 hover:opacity-90 transition">
+                              <img
+                                src={m['file-access-url']} alt="MMS attachment"
+                                loading="eager" decoding="async"
+                                className="max-w-[15rem] max-h-64 object-cover block"
+                                onError={() => setBadImg((p) => ({ ...p, [m['file-access-url']]: true }))}
+                              />
+                            </button>
+                          )
+                          : <a href={m['file-access-url']} target="_blank" rel="noreferrer" className="underline text-xs block mb-1">📎 View attachment</a>
+                      )}
                       {m.text || <em className="opacity-60">[media message]</em>}
                       <div className={`text-[10px] mt-1 ${inbound ? 'text-slate-400' : 'text-brand-100'}`}>
                         {fmtTime(m.timestamp)}{inbound ? ' • Received' : ''}{m.direction === 'term' && m.status ? <> • <StatusTag status={m.status} ts={m.timestamp} /></> : ''}{m.direction === 'term' && /fail|error/i.test(String(m.status || '')) && m._payload ? <> • <button onClick={() => doSend(m._payload, m.id)} disabled={sending} title={m._error || 'Send failed'} className="underline font-bold hover:opacity-80 disabled:opacity-50">Retry</button></> : ''}
@@ -1314,7 +1891,7 @@ export default function Messages() {
         <NewMessageModal contacts={contacts} numbers={numbers} defaultFrom={fromNumber}
           templates={templates} contactByPhone={contactByPhone} companyName={companyName}
           senderName={senderName} user={user} myName={myName} onClose={() => setShowNew(false)}
-          onSent={() => { setShowNew(false); api.sessions().then(setSessions); }} />
+          onSent={() => { setShowNew(false); api.sessions(isAgent ? null : inboxNum).then(setSessions).catch(() => {}); }} />
       )}
       </div>
     </div>

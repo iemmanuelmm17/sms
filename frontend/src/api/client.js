@@ -80,6 +80,179 @@ const digits = (v) => String(v ?? '').replace(/\D/g, '');
 const cid = (c) => c?.['unique-id'] || c?.uid || c?.id || '';
 
 const hrsAgo = (h) => new Date(Date.now() - h * 3600e3).toISOString().slice(0, 19).replace('T', ' ');
+
+/**
+ * Demo-mode Reporting data. Deterministic (seeded off the date string) so the
+ * charts, tables and totals all agree with each other and stay stable across
+ * re-renders. Respects the requested range and category filter.
+ */
+// ---- Demo-mode Rev.io integration (persisted, so tabs behave like the real API) ----
+const REVIO_SPIEL_META = {
+  welcome:        { label: 'Welcome',                 placeholders: ['{company}'] },
+  ask_code:       { label: 'Ask for billing code',    placeholders: ['{attempts_left}'] },
+  code_invalid:   { label: 'Invalid code',            placeholders: ['{attempts_left}'] },
+  code_locked:    { label: 'Locked out',              placeholders: ['{minutes}'] },
+  ticket_created: { label: 'Ticket created',          placeholders: ['{ticket_id}'] },
+  ticket_status:  { label: 'Ticket status',           placeholders: ['{ticket_id}', '{status}'] },
+  agent_handoff:  { label: 'Agent handoff',           placeholders: [] },
+  closed:         { label: 'Outside business hours',  placeholders: ['{hours}'] },
+  footer:         { label: 'Standard footer',         placeholders: [] },
+};
+const REVIO_SPIEL_DEFAULTS = {
+  welcome: 'Hi! You have reached {company} support by text.',
+  ask_code: 'Please reply with your billing code. Attempts left: {attempts_left}.',
+  code_invalid: "That code didn't match. Attempts left: {attempts_left}.",
+  code_locked: 'Too many attempts. Please try again in {minutes} minutes.',
+  ticket_created: 'Thanks! Ticket #{ticket_id} has been created.',
+  ticket_status: 'Ticket #{ticket_id} is currently: {status}.',
+  agent_handoff: 'Connecting you with an agent now.',
+  closed: 'We are currently closed. Our hours are {hours}. Your request is queued.',
+  footer: 'Reply STOP to opt out.',
+};
+function demoRevio() {
+  if (!demo.revio) {
+    demo.revio = {
+      provider: 'revio', label: 'Rev.io', configured: false, username: '', client_code: '',
+      status: 'unconfigured', last_checked_at: null, last_error: null,
+      numbers: [], spiels: { ...REVIO_SPIEL_DEFAULTS }, spiels_customized: [],
+      settings: {
+        code_max_attempts: 3, code_lockout_minutes: 15,
+        ticket_group_id: 124, ticket_type_id: 223, ticket_step_id: 139,
+        revio_note: 'Customer requested update through SMS app.', revio_user_id: null,
+        hours: {},
+      },
+    };
+    saveDemo(demo);
+  }
+  return { ...demo.revio, spiel_meta: REVIO_SPIEL_META, spiel_defaults: REVIO_SPIEL_DEFAULTS };
+}
+function demoRevioPatch(patch) {
+  demoRevio();
+  demo.revio = { ...demo.revio, ...patch };
+  saveDemo(demo);
+  return demoRevio();
+}
+
+/** Digits flagged shared in demo mode (mirrors companySettings()'s defaults). */
+/** Demo line descriptions so the Active-line picker shows realistic subtitles. */
+const DEMO_NUMBER_META = {
+  '12123527376': { label: 'Main Support Desk', tags: [] },
+  '16465885860': { label: 'NYC Sales Team', tags: [] },
+  '12065550147': { label: 'Regional Escalations', tags: [] },
+  '19175550110': { label: 'Marketing Hotline', tags: [] },
+  '13475550192': { label: 'Billing Enquiries', tags: [] },
+};
+
+/** Demo portal agents so the People page is exercisable without a backend. */
+function demoSeedIdentities() {
+  return [
+    // 7336 has a portal profile; 7014 does NOT (shows the "no name yet"
+    // warning and signs as its extension until resynced).
+    { id: 1, ext: '7336', display_name: 'Peter Thompson ACD', tag_color: '#6366f1', status: 'active',
+      first_name: 'Peter', last_name: 'Thompson ACD', email: 'peter@dynalink.com',
+      department: 'Dynalink Repair', site: 'PH Remote',
+      profile_synced_at: new Date(Date.now() - 86400e3 * 2).toISOString(),
+      last_seen_at: new Date(Date.now() - 3600e3).toISOString(),
+      first_login_at: new Date(Date.now() - 86400e3 * 9).toISOString(), granted: ['16465885860'] },
+    { id: 2, ext: '7014', display_name: '7014', tag_color: '#10b981', status: 'active', locked_secs: 240,
+      first_name: null, last_name: null, email: null, department: null, site: null,
+      profile_synced_at: null,
+      last_seen_at: new Date(Date.now() - 86400e3).toISOString(),
+      first_login_at: new Date(Date.now() - 86400e3 * 3).toISOString(), granted: [] },
+    { id: 3, ext: '7221', display_name: 'Alexa Rivera', tag_color: '#f59e0b', status: 'disabled',
+      first_name: 'Alexa', last_name: 'Rivera', email: 'alexa@dynalink.com',
+      department: 'Support', site: 'NYC',
+      profile_synced_at: new Date(Date.now() - 86400e3 * 14).toISOString(),
+      last_seen_at: new Date(Date.now() - 86400e3 * 30).toISOString(),
+      first_login_at: new Date(Date.now() - 86400e3 * 60).toISOString(), granted: ['12123527376'] },
+    { id: null, ext: '7412', display_name: '7412', tag_color: '#94a3b8', status: 'pending',
+      first_name: null, last_name: null, email: null, department: null, site: null,
+      profile_synced_at: null,
+      last_seen_at: null, first_login_at: null, granted: ['12123527376'] },
+  ];
+}
+function demoIdentities() {
+  if (!demo.agentIdentities) { demo.agentIdentities = demoSeedIdentities(); saveDemo(demo); }
+  const shared = demoShared();
+  const owners = {};
+  for (const n of mockSmsNumbers) owners[String(n.number).replace(/\D/g, '')] = String(n.dest ?? '');
+  return {
+    shared,
+    agents: demo.agentIdentities.map((a) => ({
+      ...a,
+      own_numbers: Object.entries(owners).filter(([, d]) => d === a.ext).map(([n]) => n).sort(),
+      granted_inactive: (a.granted || []).filter((d) => !shared.includes(d)),
+    })),
+  };
+}
+
+function demoShared() {
+  const m = { '12123527376': true, '16465885860': true, ...(demo.numberShared || {}) };
+  return Object.keys(m).filter((k) => m[k]);
+}
+
+const REPORT_CATS = ['new_sms', 'regular_reply', 'mass_sms', 'auto_reply', 'email_sms'];
+function demoReport(params = {}) {
+  const from = params.from || new Date(Date.now() - 6 * 86400e3).toISOString().slice(0, 10);
+  const to = params.to || new Date().toISOString().slice(0, 10);
+  const wanted = params.categories ? String(params.categories).split(',') : REPORT_CATS;
+  const d0 = new Date(from + 'T00:00:00');
+  const d1 = new Date(to + 'T00:00:00');
+  const days = Math.max(1, Math.min(31, Math.round((d1 - d0) / 86400e3) + 1));
+  // Small deterministic PRNG so every call for the same range matches.
+  const seed = (str) => { let h = 2166136261; for (const ch of str) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return h >>> 0; };
+  const rnd = (n) => { let x = n; return () => { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; x >>>= 0; return x / 4294967296; }; };
+  const r = rnd(seed(from + to) || 12345);
+  const points = [];
+  const byCat = Object.fromEntries(REPORT_CATS.map((c) => [c, 0]));
+  for (let i = 0; i < days; i++) {
+    const day = new Date(d0.getTime() + i * 86400e3).toISOString().slice(0, 10);
+    const weekend = [0, 6].includes(new Date(day + 'T00:00:00').getDay());
+    const scale = weekend ? 0.25 : 1;
+    const p = { bucket: day, total: 0 };
+    for (const c of REPORT_CATS) {
+      const base = { new_sms: 6, regular_reply: 9, mass_sms: 3, auto_reply: 7, email_sms: 2 }[c];
+      const v = wanted.includes(c) ? Math.round(base * scale * (0.3 + r() * 1.5)) : 0;
+      p[c] = v; p.total += v; byCat[c] += v;
+    }
+    points.push(p);
+  }
+  const total = points.reduce((a, p) => a + p.total, 0);
+  const prev = Math.round(total * (0.72 + r() * 0.5));
+  const agentRows = (demo.agents || []).map((a, i) => {
+    const share = [0.42, 0.33, 0.25][i % 3];
+    const t = Math.round(byCat.new_sms * share) + Math.round(byCat.regular_reply * share);
+    return {
+      agent_id: a.id, agent_name: `${a.first_name} ${a.last_name}`.trim(),
+      total: t,
+      new_sms: Math.round(byCat.new_sms * share),
+      regular_reply: Math.round(byCat.regular_reply * share),
+      mass_triggered: i === 0 ? Math.round(byCat.mass_sms * 0.6) : 0,
+    };
+  });
+  const attributed = agentRows.reduce((a, x) => a + x.total, 0);
+  agentRows.push({ agent_id: null, agent_name: 'Admin', total: Math.max(0, total - attributed),
+    new_sms: 0, regular_reply: 0, mass_triggered: byCat.mass_sms });
+  const nums = mockSmsNumbers.map((n) => String(n.number));
+  const numberRows = nums.map((num, i) => {
+    const share = i === 0 ? 0.62 : 0.38;
+    return {
+      from_number: num,
+      total: Math.round(total * share),
+      new_sms: Math.round(byCat.new_sms * share),
+      regular_reply: Math.round(byCat.regular_reply * share),
+      mass_sms: Math.round(byCat.mass_sms * share),
+      auto_reply: Math.round(byCat.auto_reply * share),
+    };
+  });
+  return {
+    summary: { from, to, total, by_category: byCat, prev_total: prev,
+      delta_pct: prev ? Math.round(((total - prev) / prev) * 100) : null, tracking_since: null },
+    trend: { bucket: 'day', points },
+    agents: agentRows,
+    numbers: numberRows,
+  };
+}
 const demoAudit = [
   { id: 114, domain: 'demo.local', actor_type: 'agent', actor_id: 2, actor_name: 'Maria Santos', action: 'agent.login.success', detail: null, ip_address: '192.168.1.42', created_at: hrsAgo(0.2) },
   { id: 113, domain: 'demo.local', actor_type: 'admin', actor_id: null, actor_name: '6001@demo.local', action: 'agent.updated', detail: { agent_id: 2, keys: ['status'] }, ip_address: '192.168.1.10', created_at: hrsAgo(1) },
@@ -421,6 +594,31 @@ export const api = {
     if (DEMO_MODE) { await delay(100); return mockSmsNumbers; }
     return (await http.get('/api/sms-numbers')).data;
   },
+  /**
+   * Every SMS number on the admin's domain (NS-API /domains/{domain}/smsnumbers).
+   * Shaped server-side to { number, digits, dest, mms_capable, group_mms_capable, shared }.
+   */
+  async domainSmsNumbers() {
+    if (DEMO_MODE) {
+      await delay(150);
+      const shared = demoShared();
+      return {
+        domain: '1180.DynaCloud',
+        numbers: mockSmsNumbers.map((n) => ({
+          number: String(n.number),
+          digits: String(n.number).replace(/\D/g, ''),
+          dest: n.dest ?? null,
+          mms_capable: !!n['mms-capable'],
+          group_mms_capable: !!n['group-mms-capable'],
+          application: n.application ?? null,
+          carrier: n.carrier ?? null,
+          domain: n.domain ?? null,
+          shared: shared.includes(String(n.number).replace(/\D/g, '')),
+        })).sort((a, b) => a.digits.localeCompare(b.digits)),
+      };
+    }
+    return (await http.get('/api/domain-sms-numbers')).data;
+  },
   async subscriptions() {
     if (DEMO_MODE) {
       await delay(100);
@@ -442,23 +640,45 @@ export const api = {
   },
   // ---- Reporting (base: '/api/reports' or '/api/superadmin/reports') ----
   async reportSummary(base, params = {}) {
-    if (DEMO_MODE) { await delay(100); return { from: '', to: '', total: 0, by_category: { new_sms: 0, regular_reply: 0, mass_sms: 0, auto_reply: 0, email_sms: 0 }, prev_total: 0, delta_pct: null, tracking_since: null }; }
+    if (DEMO_MODE) { await delay(100); return demoReport(params).summary; }
     return (await http.get(`${base}/summary`, { params })).data;
   },
   async reportTrend(base, params = {}) {
-    if (DEMO_MODE) { await delay(100); return { bucket: 'day', points: [] }; }
+    if (DEMO_MODE) { await delay(100); return demoReport(params).trend; }
     return (await http.get(`${base}/trend`, { params })).data;
   },
   async reportByAgent(base, params = {}) {
-    if (DEMO_MODE) { await delay(100); return { rows: [] }; }
+    if (DEMO_MODE) { await delay(100); return { rows: demoReport(params).agents }; }
     return (await http.get(`${base}/by-agent`, { params })).data;
   },
   async reportByNumber(base, params = {}) {
-    if (DEMO_MODE) { await delay(100); return { rows: [] }; }
+    if (DEMO_MODE) { await delay(100); return { rows: demoReport(params).numbers }; }
     return (await http.get(`${base}/by-number`, { params })).data;
   },
   async reportDetail(base, params = {}) {
-    if (DEMO_MODE) { await delay(100); return { data: [], meta: { total: 0, page: 1, per_page: 50 } }; }
+    if (DEMO_MODE) {
+      await delay(100);
+      const rep = demoReport(params);
+      const cats = params.categories ? String(params.categories).split(',') : REPORT_CATS;
+      const nums = mockSmsNumbers.map((n) => String(n.number));
+      const who = (demo.agents || []).find((a) => String(a.id) === String(params.agent_id));
+      const n = Math.min(50, Math.max(6, Math.round(rep.summary.total / 3)));
+      const rows = Array.from({ length: n }, (_, i) => ({
+        id: `d-${i}`,
+        tenant_id: null,
+        sent_at: new Date(Date.now() - i * 2.3 * 3600e3).toISOString().slice(0, 19),
+        category: cats[i % cats.length],
+        agent_id: params.agent_id ?? null,
+        actor_name: who ? `${who.first_name} ${who.last_name}`.trim() : 'Admin',
+        from_number: nums[i % nums.length],
+        to_number: `1917555${String(1000 + i).slice(-4)}`,
+        type: i % 7 === 0 ? 'mms' : 'sms',
+        scheduled_message_id: i % 9 === 0 ? 400 + i : null,
+        auto_reply_id: i % 5 === 0 ? 'ar-1' : null,
+        session_id: i % 5 === 0 ? null : `s-${i}`,
+      }));
+      return { data: rows, meta: { total: rows.length, page: 1, per_page: 50 } };
+    }
     return (await http.get(`${base}/detail`, { params })).data;
   },
   async superReportTenants(params = {}) {
@@ -467,52 +687,92 @@ export const api = {
   },
   // ---- Integrations ----
   async integrations() {
-    if (DEMO_MODE) { await delay(100); return { providers: [{ provider: 'revio', label: 'Rev.io', configured: false, username: '', client_code: '', status: 'unconfigured' }] }; }
+    if (DEMO_MODE) { await delay(100); return { providers: [demoRevio()] }; }
     return (await http.get('/api/integrations')).data;
   },
   async saveRevio(payload) {
-    if (DEMO_MODE) { await delay(300); return { provider: 'revio', label: 'Rev.io', configured: true, username: payload.username, client_code: payload.client_code, status: 'connected', last_checked_at: new Date().toISOString().slice(0, 19).replace('T', ' '), last_error: null }; }
+    if (DEMO_MODE) {
+      await delay(300);
+      return demoRevioPatch({ configured: true, username: payload.username, client_code: payload.client_code,
+        status: 'connected', last_checked_at: new Date().toISOString().slice(0, 19).replace('T', ' '), last_error: null });
+    }
     return (await http.put('/api/integrations/revio', payload)).data;
   },
   async testRevio() {
-    if (DEMO_MODE) { await delay(300); return { provider: 'revio', label: 'Rev.io', configured: true, username: 'demo', client_code: 'demo', status: 'connected', last_checked_at: new Date().toISOString().slice(0, 19).replace('T', ' '), last_error: null }; }
+    if (DEMO_MODE) {
+      await delay(300);
+      return demoRevioPatch({ status: 'connected', last_error: null,
+        last_checked_at: new Date().toISOString().slice(0, 19).replace('T', ' ') });
+    }
     return (await http.post('/api/integrations/revio/test')).data;
   },
   async disconnectRevio() {
-    if (DEMO_MODE) { await delay(150); return { ok: true }; }
+    if (DEMO_MODE) { await delay(150); demo.revio = null; saveDemo(demo); return { ok: true }; }
     return (await http.delete('/api/integrations/revio')).data;
   },
   async saveRevioNumbers(numbers) {
-    if (DEMO_MODE) { await delay(200); return { provider: 'revio', label: 'Rev.io', configured: true, username: 'demo', client_code: 'demo', status: 'connected', numbers, spiels: {}, spiels_customized: [], spiel_meta: {} }; }
+    if (DEMO_MODE) { await delay(200); return demoRevioPatch({ numbers }); }
     return (await http.put('/api/integrations/revio/numbers', { numbers })).data;
   },
   async saveRevioSpiels(spiels) {
-    if (DEMO_MODE) { await delay(200); return { provider: 'revio', label: 'Rev.io', configured: true, username: 'demo', client_code: 'demo', status: 'connected', numbers: [], spiels, spiels_customized: Object.keys(spiels), spiel_meta: {} }; }
+    if (DEMO_MODE) {
+      await delay(200);
+      const cur = demoRevio();
+      const customized = Object.keys(spiels).filter((k) => String(spiels[k] ?? '') !== String(cur.spiel_defaults?.[k] ?? ''));
+      return demoRevioPatch({ spiels: { ...cur.spiels, ...spiels }, spiels_customized: customized });
+    }
     return (await http.put('/api/integrations/revio/spiels', { spiels })).data;
   },
   async saveRevioSettings(settings) {
-    if (DEMO_MODE) { await delay(200); return { provider: 'revio', label: 'Rev.io', configured: true, username: 'demo', client_code: 'demo', status: 'connected', numbers: [], spiels: {}, spiels_customized: [], spiel_meta: {}, settings: { revio_note: settings.revio_note || 'Customer requested update through SMS app.', revio_user_id: settings.revio_user_id ?? null } }; }
+    if (DEMO_MODE) {
+      await delay(200);
+      const cur = demoRevio();
+      return demoRevioPatch({ settings: { ...cur.settings, ...settings } });
+    }
     return (await http.put('/api/integrations/revio/settings', settings)).data;
   },
-  async sessions() {
-    if (DEMO_MODE) { await delay(); return [...demo.sessions]; }
-    return (await http.get('/api/sessions')).data;
+  /**
+   * Message sessions. `number` (digits) scopes the inbox to one SMS number —
+   * admins always pass one so the first paint never fans out across every
+   * extension on the domain.
+   */
+  async sessions(number = null, limit = null, scope = null) {
+    const d = number ? String(number).replace(/\D/g, '') : '';
+    if (DEMO_MODE) {
+      await delay();
+      const all = [...demo.sessions];
+      // The queue spans every number, so it ignores the inbox filter.
+      if (scope === 'queued') {
+        const meta = demo.convoMeta || {};
+        return all.filter((s) => meta[String(s['messagesession-id'])]?.status === 'queued');
+      }
+      return d ? all.filter((s) => String(s['messagesession-sms-number'] || '').replace(/\D/g, '') === d) : all;
+    }
+    const params = {};
+    if (scope) params.scope = scope;
+    else if (d) params.number = d;
+    if (limit) params.limit = limit;
+    return (await http.get('/api/sessions', { params })).data;
   },
   async verifyPassword(password) {
     if (DEMO_MODE) { await delay(150); return { ok: true }; }
     return (await http.post('/api/auth/verify-password', { password })).data;
   },
-  async sessionMessages(id) {
+  /** `number` is an optional hint so the server can resolve the owning extension cheaply. */
+  async sessionMessages(id, number = null) {
     if (DEMO_MODE) { await delay(150); return [...(demo.messages[id] || [])]; }
-    return (await http.get(`/api/sessions/${id}/messages`)).data;
+    const d = number ? String(number).replace(/\D/g, '') : '';
+    return (await http.get(`/api/sessions/${id}/messages`, { params: d ? { number: d } : {} })).data;
   },
-  async markSessionRead(id) {
+  async markSessionRead(id, number = null) {
     if (DEMO_MODE) { await delay(50); return { ok: true }; }
-    return (await http.post(`/api/sessions/${id}/read`)).data;
+    const d = number ? String(number).replace(/\D/g, '') : '';
+    return (await http.post(`/api/sessions/${id}/read`, d ? { number: d } : {})).data;
   },
-  async markSessionUnread(id) {
+  async markSessionUnread(id, number = null) {
     if (DEMO_MODE) { await delay(50); return { ok: true }; }
-    return (await http.post(`/api/sessions/${id}/unread`)).data;
+    const d = number ? String(number).replace(/\D/g, '') : '';
+    return (await http.post(`/api/sessions/${id}/unread`, d ? { number: d } : {})).data;
   },
   async sendInSession(id, payload) {
     if (DEMO_MODE) {
@@ -662,8 +922,86 @@ export const api = {
     if (DEMO_MODE) { await delay(); return [...(demo.agents || [])]; }
     return (await http.get('/api/agents')).data;
   },
+
+  // ---- Portal-authenticated agents (identities + shared-number grants) ----
+  async agentIdentities() {
+    if (DEMO_MODE) { await delay(150); return demoIdentities(); }
+    return (await http.get('/api/agent-identities')).data;
+  },
+  async setAgentStatus(ext, status) {
+    if (DEMO_MODE) {
+      await delay(150);
+      demo.agentIdentities = (demo.agentIdentities || demoSeedIdentities())
+        .map((a) => (a.ext === ext ? { ...a, status } : a));
+      saveDemo(demo);
+      return { ok: true, status };
+    }
+    return (await http.put(`/api/agent-identities/${encodeURIComponent(ext)}/status`, { status })).data;
+  },
+  /** Refresh one user's profile from the Dynalink portal. */
+  async resyncAgent(ext) {
+    if (DEMO_MODE) {
+      await delay(700);   // portal round trip is genuinely slow
+      const NAMES = { 7336: ['Peter', 'Thompson ACD'], 7014: ['Sarah', 'Chen'],
+                      7221: ['Alexa', 'Rivera'], 7412: ['Marcus', 'Webb'] };
+      const [f, l] = NAMES[ext] || ['User', ext];
+      demo.agentIdentities = (demo.agentIdentities || demoSeedIdentities()).map((a) => (a.ext === ext
+        ? { ...a, first_name: f, last_name: l, display_name: `${f} ${l}`,
+            email: `${f.toLowerCase()}@dynalink.com`, department: 'Dynalink Repair', site: 'PH Remote',
+            profile_synced_at: new Date().toISOString() }
+        : a));
+      saveDemo(demo);
+      const agent = demo.agentIdentities.find((a) => a.ext === ext);
+      return { ok: true, changed: true, agent };
+    }
+    return (await http.post(`/api/agent-identities/${encodeURIComponent(ext)}/resync`)).data;
+  },
+  /** Clear a failed-login lockout for one user. */
+  async unlockAgent(ext) {
+    if (DEMO_MODE) {
+      await delay(250);
+      demo.agentIdentities = (demo.agentIdentities || demoSeedIdentities())
+        .map((a) => (a.ext === ext ? { ...a, locked_secs: 0 } : a));
+      saveDemo(demo);
+      return { ok: true, locked_secs: 0 };
+    }
+    return (await http.post(`/api/agent-identities/${encodeURIComponent(ext)}/unlock`)).data;
+  },
+  /** TCPA bulk-send footer (5+ recipients). */
+  async saveTcpaFooter(text) {
+    if (DEMO_MODE) { await delay(120); demo.tcpaFooter = text; saveDemo(demo); return { tcpa_footer: text }; }
+    return (await http.put('/api/company-settings', { tcpa_footer: text })).data;
+  },
+  async setAgentGrants(ext, numbers) {
+    if (DEMO_MODE) {
+      await delay(200);
+      const shared = demoShared();
+      const bad = (numbers || []).map((n) => String(n).replace(/\D/g, '')).find((d) => !shared.includes(d));
+      if (bad) throw { response: { data: { message: 'Only shared numbers can be granted. Mark the number shared first.' } } };
+      demo.agentIdentities = (demo.agentIdentities || demoSeedIdentities())
+        .map((a) => (a.ext === ext ? { ...a, granted: [...new Set((numbers || []).map((n) => String(n).replace(/\D/g, '')))] } : a));
+      saveDemo(demo);
+      return { ok: true, numbers };
+    }
+    return (await http.put(`/api/agent-identities/${encodeURIComponent(ext)}/grants`, { numbers })).data;
+  },
   async agentDirectory() {
-    if (DEMO_MODE) { await delay(); return (demo.agents || []).map((a) => ({ id: a.id, name: a.name, first_name: a.first_name, last_name: a.last_name, tag_color: a.tag_color || a.color })); }
+    if (DEMO_MODE) {
+      await delay();
+      const legacy = (demo.agents || []).map((a) => ({ id: a.id, kind: 'agent', name: a.name,
+        first_name: a.first_name, last_name: a.last_name, tag_color: a.tag_color || a.color }));
+      // Portal identities must be here too, or an admin sees every thread a
+      // portal user claimed as "Unassigned".
+      const ids = (demo.agentIdentities || demoSeedIdentities())
+        .filter((i) => i.status === 'active')
+        .map((i) => {
+          const parts = String(i.display_name || i.ext).trim().split(/\s+/);
+          return { id: i.id, kind: 'identity', ext: i.ext,
+            first_name: parts[0] || i.ext, last_name: parts.slice(1).join(' '),
+            tag_color: i.tag_color };
+        });
+      return [...legacy, ...ids];
+    }
     return (await http.get('/api/agents/directory')).data;
   },
   async createAgent(payload) {
@@ -861,7 +1199,7 @@ export const api = {
 
   // ---- Opt-outs (TCPA do-not-contact) ----
   async companySettings() {
-    if (DEMO_MODE) { await delay(50); return { company_name: demo.companyName || '', auto_reply_cooldown_minutes: demo.cooldown ?? 5, number_email: demo.numberEmail || {}, number_shared: { '12123527376': true, '16465885860': true, ...(demo.numberShared || {}) } }; }
+    if (DEMO_MODE) { await delay(50); return { company_name: demo.companyName || '', auto_reply_cooldown_minutes: demo.cooldown ?? 5, number_email: demo.numberEmail || {}, number_shared: { '12123527376': true, '16465885860': true, ...(demo.numberShared || {}) }, number_meta: { ...DEMO_NUMBER_META, ...(demo.numberMeta || {}) }, tcpa_footer: demo.tcpaFooter ?? '' }; }
     return (await http.get('/api/company-settings')).data;
   },
   async saveCompanySettings(company_name, auto_reply_cooldown_minutes) {
@@ -875,6 +1213,16 @@ export const api = {
   async saveNumberEmail(digits, notify, enabled) {
     if (DEMO_MODE) { await delay(50); demo.numberEmail = { ...(demo.numberEmail || {}), [digits]: { notify, enabled: enabled ?? demo.numberEmail?.[digits]?.enabled ?? true } }; saveDemo(demo); return { number_email: { [digits]: { notify } } }; }
     return (await http.put('/api/company-settings', { number_email: { [digits]: { notify, ...(enabled !== undefined ? { enabled } : {}) } } })).data;
+  },
+  async saveNumberMeta(digits, label, tags, signature = undefined) {
+    const cfg = { label, tags, ...(signature === undefined ? {} : { signature: !!signature }) };
+    if (DEMO_MODE) {
+      await delay(50);
+      demo.numberMeta = { ...(demo.numberMeta || {}), [digits]: { ...(demo.numberMeta?.[digits] || {}), ...cfg } };
+      saveDemo(demo);
+      return { number_meta: { [digits]: demo.numberMeta[digits] } };
+    }
+    return (await http.put('/api/company-settings', { number_meta: { [digits]: cfg } })).data;
   },
   async saveNumberShared(digits, shared) {
     if (DEMO_MODE) { await delay(50); demo.numberShared = { ...(demo.numberShared || {}), [digits]: shared }; saveDemo(demo); return { number_shared: { [digits]: shared } }; }

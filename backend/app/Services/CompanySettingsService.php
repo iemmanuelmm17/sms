@@ -78,12 +78,30 @@ class CompanySettingsService
             if (strlen($d) < 7 || strlen($d) > 15) continue;
             if ($v) $ns[$d] = true;
         }
+        // Per-number label + tags (admin-editable, purely descriptive).
+        $nm = [];
+        foreach ((array) ($data['number_meta'] ?? []) as $k => $v) {
+            $d = preg_replace('/\D/', '', (string) $k);
+            if (strlen($d) < 7 || strlen($d) > 15) continue;
+            $tags = [];
+            foreach ((array) (is_array($v) ? ($v['tags'] ?? []) : []) as $t) {
+                $t = trim((string) $t);
+                if ($t !== '' && !in_array($t, $tags, true)) $tags[] = mb_substr($t, 0, 24);
+                if (count($tags) >= 8) break;
+            }
+            $label = trim((string) (is_array($v) ? ($v['label'] ?? '') : ''));
+            $sig = is_array($v) ? (bool) ($v['signature'] ?? false) : false;
+            if ($label === '' && $tags === [] && !$sig) continue;
+            $nm[$d] = ['label' => mb_substr($label, 0, 60), 'tags' => $tags, 'signature' => $sig];
+        }
         $q = is_array($data['quiet_hours'] ?? null) ? $data['quiet_hours'] : [];
         return [
+            'tcpa_footer' => trim((string) ($data['tcpa_footer'] ?? '')),
             'company_name' => (string) ($data['company_name'] ?? ''),
             'auto_reply_cooldown_minutes' => (int) ($data['auto_reply_cooldown_minutes'] ?? self::COOLDOWN_DEFAULT),
             'number_email' => $ne,
             'number_shared' => $ns,
+            'number_meta' => $nm,
             'quiet_hours' => [
                 'enabled' => array_key_exists('enabled', $q) ? (bool) $q['enabled'] : true,
                 'start'   => self::normalizeHhMm($q['start'] ?? '', self::QUIET_START_DEFAULT),
@@ -162,6 +180,62 @@ class CompanySettingsService
             else unset($ns[$digits]);
             return array_merge($raw, ['number_shared' => $ns, 'updated_at' => now()->toISOString()]);
         });
+        static::bust($domain);
+        return $data;
+    }
+
+    /**
+     * Per-number descriptive label, tags and agent-signature flag.
+     * Empty label, no tags and signature off removes the entry.
+     */
+    public function setNumberMeta(string $domain, string $digits, string $label, array $tags, ?bool $signature = null): array
+    {
+        $data = JsonFileStore::mutate($this->path($domain), function ($raw) use ($digits, $label, $tags, $signature) {
+            $nm = (array) ($raw['number_meta'] ?? []);
+            $label = mb_substr(trim($label), 0, 60);
+            $clean = [];
+            foreach ($tags as $t) {
+                $t = mb_substr(trim((string) $t), 0, 24);
+                if ($t !== '' && !in_array($t, $clean, true)) $clean[] = $t;
+                if (count($clean) >= 8) break;
+            }
+            // null keeps whatever is already stored.
+            $sig = $signature === null ? (bool) ($nm[$digits]['signature'] ?? false) : $signature;
+            if ($label === '' && $clean === [] && !$sig) unset($nm[$digits]);
+            else $nm[$digits] = ['label' => $label, 'tags' => $clean, 'signature' => $sig];
+            return array_merge($raw, ['number_meta' => $nm, 'updated_at' => now()->toISOString()]);
+        });
+        static::bust($domain);
+        return $data;
+    }
+
+    /**
+     * Footer appended to bulk (5+ recipient) sends for TCPA compliance.
+     *
+     * Falls back to the opt-out auto-reply default, then to a safe literal, so
+     * an unset value never means "no footer" on a bulk send.
+     */
+    public function tcpaFooter(string $domain, ?string $user = null): string
+    {
+        $v = trim((string) ($this->get($domain)['tcpa_footer'] ?? ''));
+        if ($v !== '') return $v;
+        try {
+            $q = \App\Models\AutoReply::where('domain', $domain)->where('default_key', 'opt_out');
+            // Scope by user when we have one, but never let a mismatch (e.g. a
+            // portal agent's extension) silently drop the footer.
+            $row = (clone $q)->when($user, fn($w) => $w->where('user', $user))->value('message')
+                ?: $q->value('message');
+            if ($row) return (string) $row;
+        } catch (\Throwable $e) {}
+        return 'Reply STOP to unsubscribe.';
+    }
+
+    public function setTcpaFooter(string $domain, string $text): array
+    {
+        $data = JsonFileStore::mutate($this->path($domain), fn($raw) => array_merge($raw, [
+            'tcpa_footer' => mb_substr(trim($text), 0, 320),
+            'updated_at' => now()->toISOString(),
+        ]));
         static::bust($domain);
         return $data;
     }

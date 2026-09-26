@@ -94,9 +94,10 @@ class SendScheduledMessage implements ShouldQueue
         // Bulk TCPA wrap — off when the composer's "Add TCPA Script Footer" is unchecked.
         if (count($m->recipients ?? []) >= 5 && $m->tcpa_script !== false) {
             $company = $companySvc->name($m->domain);
-            $footer = \App\Models\AutoReply::where('domain', $m->domain)->where('user', $m->user)
-                ->where('default_key', 'opt_out')->value('message')
-                ?: 'Reply STOP to unsubscribe.';
+            // One resolver: TCPA page setting → opt-out default → literal.
+            // The old (domain,user) lookup missed for portal agents, whose
+            // `user` is an extension rather than the tenant's dynalink_user.
+            $footer = $companySvc->tcpaFooter($m->domain, $m->user);
             $text = ($company !== '' ? $company . ': ' : '') . $text . "\n" . $footer;
         }
 
@@ -128,7 +129,7 @@ class SendScheduledMessage implements ShouldQueue
                     'category' => SentMessageLog::MASS_SMS,
                     'scheduled_message_id' => $m->id,
                     'session_id' => is_array($body) ? ($body['messagesession-id'] ?? $body['messagesession_id'] ?? null) : null,
-                    'from_number' => (string) $m->from_number,
+                    'from_number' => preg_replace('/\D/', '', (string) $m->from_number),
                     'to_number' => $toDigits !== '' ? $toDigits : null,
                     'type' => $m->type ?? 'sms',
                 ]);

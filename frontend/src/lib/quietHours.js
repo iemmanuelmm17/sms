@@ -90,3 +90,36 @@ export function toWallInput(date, tz) {
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
 }
+
+/* ------------------------------------------------------------------
+ | "Don't remind me again today"
+ |
+ | Device-scoped and date-stamped: the key stores the local calendar day
+ | it was set on, so the suppression lapses by itself at midnight with no
+ | timer. Stored per device (localStorage) rather than server-side, which
+ | matches how the warning itself is a local, advisory nudge.
+ |
+ | This only silences the WARNING. Quiet hours themselves are unchanged,
+ | and sending is never blocked either way.
+ * ------------------------------------------------------------------ */
+const QUIET_SNOOZE_KEY = 'sms-quiet-snooze';
+
+/** Local calendar day as YYYY-MM-DD (not UTC — midnight must be the user's). */
+function localDayKey(d = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+export function isQuietSnoozed(now = new Date()) {
+  try {
+    return localStorage.getItem(QUIET_SNOOZE_KEY) === localDayKey(now);
+  } catch { return false; }
+}
+
+export function snoozeQuietToday(now = new Date()) {
+  try { localStorage.setItem(QUIET_SNOOZE_KEY, localDayKey(now)); } catch {}
+}
+
+export function clearQuietSnooze() {
+  try { localStorage.removeItem(QUIET_SNOOZE_KEY); } catch {}
+}

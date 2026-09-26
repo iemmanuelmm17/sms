@@ -81,7 +81,7 @@ class SuperAdminController extends Controller
             return response()->json(['message' => $e->getMessage()], 422);
         }
         if ($numbers === []) {
-            return response()->json(['message' => 'This Dynalink account has no assigned SMS numbers. A tenant cannot be created without one.'], 422);
+            return response()->json(['message' => 'No SMS numbers were found on this Dynalink domain. A tenant cannot be created without one.'], 422);
         }
         return response()->json(['numbers' => $numbers]);
     }
@@ -103,9 +103,19 @@ class SuperAdminController extends Controller
     }
 
     /**
-     * Live Dynalink login + assigned-SMS-numbers fetch for a (possibly
-     * not-yet-saved) credential. Returns [{number, digits}]. Throws
+     * Live Dynalink login + DOMAIN-WIDE SMS-number fetch for a (possibly
+     * not-yet-saved) credential. Returns [{number, digits, dest}]. Throws
      * RuntimeException with a user-safe message on any failure.
+     *
+     *   GET {authBase}/domains/{domain}/smsnumbers
+     *
+     * The registered Dynalink account is a super-user domain login with access
+     * to every SMS number on the domain, regardless of which extension a
+     * number is assigned to. So "does this tenant have SMS?" is a question
+     * about the DOMAIN's inventory, not about the login's own extension —
+     * checking the latter would wrongly reject most valid accounts.
+     *
+     * Named fetchAssignedNumbers for historical reasons; it is domain-wide.
      */
     protected function fetchAssignedNumbers(string $user, string $domain, string $pass): array
     {
@@ -113,7 +123,7 @@ class SuperAdminController extends Controller
             $tokens = app(DynalinkService::class)->login($user . '@' . $domain, $pass);
             $token = (string) ($tokens['access_token'] ?? '');
             if ($token === '') throw new \RuntimeException('Dynalink login failed — check username, domain, and password.');
-            $raw = app(DynalinkService::class)->smsNumbers($token, $domain, $user);
+            $raw = app(DynalinkService::class)->domainSmsNumbers($token, $domain);
         } catch (\RuntimeException $e) {
             throw $e;
         } catch (\Throwable $e) {
@@ -127,7 +137,15 @@ class SuperAdminController extends Controller
         foreach ((array) $raw as $n) {
             $num = (string) (is_array($n) ? ($n['number'] ?? '') : $n);
             $d = preg_replace('/\D/', '', $num);
-            if (strlen($d) >= 7 && strlen($d) <= 15) $out[] = ['number' => $num, 'digits' => $d];
+            if (strlen($d) >= 7 && strlen($d) <= 15) {
+                $out[] = [
+                    'number' => $num,
+                    'digits' => $d,
+                    // Owning extension: this is the NS-API $user for that
+                    // number's message sessions.
+                    'dest'   => is_array($n) && isset($n['dest']) ? (string) $n['dest'] : null,
+                ];
+            }
         }
         // De-dupe by digits, keep provider order.
         $seen = [];
@@ -170,11 +188,11 @@ class SuperAdminController extends Controller
             return response()->json(['message' => $e->getMessage()], 422);
         }
         if ($numbers === []) {
-            return response()->json(['message' => 'This Dynalink account has no assigned SMS numbers. A tenant cannot be created without one.'], 422);
+            return response()->json(['message' => 'No SMS numbers were found on this Dynalink domain. A tenant cannot be created without one.'], 422);
         }
         $main = preg_replace('/\D/', '', (string) $data['main_number']);
         if (!in_array($main, array_column($numbers, 'digits'), true)) {
-            return response()->json(["message" => "Main number must be one of this account's assigned SMS numbers."], 422);
+            return response()->json(["message" => "Main number must be one of the SMS numbers on this domain."], 422);
         }
         $tenant = DB::transaction(function () use ($data, $adminData, $main, $request) {
             $t = Tenant::create([
@@ -240,7 +258,7 @@ class SuperAdminController extends Controller
                 }
                 unset($data['main_number']);
             } else {
-                // One-time legacy set: must be live-assigned to the account.
+                // One-time legacy set: must exist in the domain's live inventory.
                 try {
                     $numbers = $this->fetchAssignedNumbers(
                         $tenant->dynalink_user, $tenant->domain, $tenant->dynalink_pass);
@@ -248,7 +266,7 @@ class SuperAdminController extends Controller
                     return response()->json(['message' => $e->getMessage()], 422);
                 }
                 if (!in_array($want, array_column($numbers, 'digits'), true)) {
-                    return response()->json(["message" => "Main number must be one of this account's assigned SMS numbers."], 422);
+                    return response()->json(["message" => "Main number must be one of the SMS numbers on this domain."], 422);
                 }
                 $data['main_number'] = $want;
             }
@@ -406,6 +424,13 @@ class SuperAdminController extends Controller
                 'source' => $whInDb ? 'database' : ($whEnv !== '' ? 'env' : 'auto'),
                 'auto_value' => $whAuto,
             ],
+            'api_servers' => [
+                'value' => (string) (Settings::get(\App\Services\ApiServerPool::SETTING, '') ?? ''),
+                'pool' => \App\Services\ApiServerPool::status(),
+                'default_host' => config('services.dynalink.auth_base'),
+                'pool_auth' => filter_var(config('services.dynalink.pool_auth', false), FILTER_VALIDATE_BOOL),
+                'rate_per_sec' => \App\Services\ApiServerPool::ratePerSec(),
+            ],
             'legacy_login' => $this->legacyState(),
             'require_correlation_id' => [
                 'enabled' => Settings::get('webhook.require_correlation_id', '0') === '1',
@@ -470,6 +495,9 @@ class SuperAdminController extends Controller
             'legacy_login_minutes' => 'sometimes|nullable|integer|min:15|max:10080',
             'webhook_url' => 'sometimes|nullable|string|max:500',
             'require_correlation_id' => 'sometimes|boolean',
+            'api_servers' => 'sometimes|nullable|string|max:4000',
+            'api_rate_per_sec' => 'sometimes|nullable|integer|min:0|max:1000',
+            'clear_api_penalties' => 'sometimes|boolean',
             'mail_smtp_host' => 'sometimes|nullable|string|max:190',
             'mail_smtp_port' => 'sometimes|nullable|integer|min:1|max:65535',
             'mail_smtp_encryption' => 'sometimes|nullable|in:ssl,tls,none',
@@ -486,6 +514,34 @@ class SuperAdminController extends Controller
             'mail_cap_sender_daily' => 'sometimes|nullable|integer|min:0|max:1000000',
             'mail_cap_dest_hourly' => 'sometimes|nullable|integer|min:0|max:1000000',
         ]);
+        if (array_key_exists('api_servers', $data)) {
+            $raw = (string) ($data['api_servers'] ?? '');
+            $clean = [];
+            foreach (preg_split('/[\r\n,]+/', $raw) as $line) {
+                if (trim($line) === '') continue;
+                $u = \App\Services\ApiServerPool::normalize($line);
+                if ($u === '') {
+                    return response()->json([
+                        'message' => "\"" . trim($line) . "\" is not a valid server — use http:// or https://.",
+                    ], 422);
+                }
+                if (!in_array($u, $clean, true)) $clean[] = $u;
+            }
+            Settings::set(\App\Services\ApiServerPool::SETTING, implode("\n", $clean));
+            \App\Services\ApiServerPool::clearPenalties();   // give every host a fresh start
+            AuditLog::record(null, 'superadmin', null, $this->sa($request)->username,
+                'settings.api-servers-changed', ['count' => count($clean), 'servers' => $clean],
+                $request->ip());
+        }
+        if (array_key_exists('api_rate_per_sec', $data)) {
+            $r = max(0, (int) ($data['api_rate_per_sec'] ?? 0));
+            Settings::set(\App\Services\ApiServerPool::RATE_SETTING, (string) $r);
+            AuditLog::record(null, 'superadmin', null, $this->sa($request)->username,
+                'settings.api-rate-changed', ['per_sec' => $r], $request->ip());
+        }
+        if (!empty($data['clear_api_penalties'])) {
+            \App\Services\ApiServerPool::clearPenalties();
+        }
         if (array_key_exists('webhook_url', $data)) {
             $w = rtrim(trim((string) ($data['webhook_url'] ?? '')), '/');
             if ($w !== '' && !preg_match('/^https?:\/\/.+/i', $w)) {
@@ -857,7 +913,8 @@ class SuperAdminController extends Controller
             'scheduled' => ScheduledMessage::where('domain', $d)->where('user', $u),
             'auto_replies' => AutoReply::where('domain', $d)->where('user', $u),
             'auto_reply_logs' => AutoReplyLog::where('domain', $d)->where('user', $u),
-            'conversation_meta' => ConversationMeta::where('domain', $d)->where('user', $u),
+            // Tenant-wide now — not viewer-scoped.
+            'conversation_meta' => ConversationMeta::where('domain', $d),
             'webhook_events' => WebhookEvent::where('domain', $d)->where('user', $u),
             'integrations' => Integration::where('domain', $d)->where('user', $u),
             'integration_assignments' => IntegrationNumber::where('domain', $d)->where('user', $u),

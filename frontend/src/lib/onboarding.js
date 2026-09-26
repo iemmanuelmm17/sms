@@ -10,7 +10,9 @@ export const ONBOARDING_STEPS = {
   admin: [
     { id: 'installed', title: 'Install the app', desc: 'One tap from your home screen — no browser needed.', kind: 'install' },
     { id: 'push', title: 'Turn on push alerts', desc: 'Know the moment a customer replies.', link: '/app/settings', cta: 'Open Settings' },
-    { id: 'agent_created', title: 'Invite your first agent', desc: 'Agents get their own login and claim threads from the queue.', link: '/app/agents', cta: 'Open Agents' },
+    // Users sign in with their Dynalink portal login — there is nothing to
+    // "invite". The step is about granting them shared-number access.
+    { id: 'agent_created', title: 'Review your users', desc: 'Users appear after their first portal sign-in. Grant them shared numbers.', link: '/app/users', cta: 'Open Users' },
     { id: 'numbers_reviewed', title: 'Review your numbers', desc: 'Assign agents and notification emails per number.', link: '/app/numbers', cta: 'Open Numbers' },
   ],
 };

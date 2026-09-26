@@ -75,18 +75,18 @@ export default function Companies() {
     } catch (e) { toastError(e?.response?.data?.message || e.message); }
   };
 
-  const tabCls = (t) => `px-4 py-2.5 text-sm font-semibold border-b-2 -mb-px ${tab === t ? 'border-brand-600 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-600'}`;
+  const tabCls = (t) => `px-4 py-2.5 text-sm font-semibold border-b-2 -mb-px whitespace-nowrap shrink-0 ${tab === t ? 'border-brand-600 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-600'}`;
 
   return (
     <div className="h-full flex flex-col min-h-0">
-      <div className="bg-white border-b px-3 flex gap-1 shrink-0">
+      <div className="bg-white border-b px-3 flex gap-1 shrink-0 overflow-x-auto">
         <button onClick={() => goTab('companies')} className={tabCls('companies')}>🏢 Companies ({companies.length})</button>
         <button onClick={() => goTab('groups')} className={tabCls('groups')}>📁 Groups ({groups.length})</button>
       </div>
 
       {tab === 'companies' ? (
         <div className="flex-1 flex flex-col md:flex-row min-h-0">
-          <div className="w-full md:w-80 bg-white border-b md:border-b-0 md:border-r flex flex-col shrink-0 max-h-[45%] md:max-h-none">
+          <div className="w-full md:w-64 lg:w-80 bg-white border-b md:border-b-0 md:border-r flex flex-col shrink-0 max-h-[45%] md:max-h-none">
             <div className="p-3 border-b">
               <button onClick={() => setEditingCompany({ name: '', address: '', note: '', numbers: [] })}
                 className="w-full bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-lg py-2">+ New Company</button>
@@ -164,7 +164,7 @@ export default function Companies() {
         </div>
       ) : (
         <div className="flex-1 flex flex-col md:flex-row min-h-0">
-          <div className="w-full md:w-80 bg-white border-b md:border-b-0 md:border-r flex flex-col shrink-0 max-h-[45%] md:max-h-none">
+          <div className="w-full md:w-64 lg:w-80 bg-white border-b md:border-b-0 md:border-r flex flex-col shrink-0 max-h-[45%] md:max-h-none">
             <div className="p-3 border-b">
               <button onClick={() => setEditingGroup({ name: '', description: '', company_id: '', memberIds: [], manualNumbers: [] })}
                 className="w-full bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-lg py-2">+ New Group</button>

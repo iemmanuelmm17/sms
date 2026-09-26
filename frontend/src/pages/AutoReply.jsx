@@ -97,7 +97,13 @@ export default function AutoReply() {
   const isOwnRule = (r) => r && String(r.created_by) === 'agent:' + String(user?.id);
   const canReorder = !isAgent;
   const [mainNum, setMainNum] = useState('');
-  const agentRuleNums = (user?.assigned_numbers || []).map((v) => digits(v)).filter((d) => d && d !== mainNum);
+  // Numbers an agent may create rules for — everything they can send from,
+  // including the main line if it is theirs.
+  const agentRuleNums = (user?.assigned_numbers || []).map((v) => digits(v)).filter(Boolean);
+  // Shared lines they can see but not send from: listed, but read-only.
+  const agentViewNums = (user?.readable_numbers || []).map((v) => digits(v))
+    .filter((d) => d && !agentRuleNums.includes(d));
+  const isViewOnlyNum = (d) => isAgent && agentViewNums.includes(digits(d));
   const isTenantAdmin = !isAgent && !!user?.tenant;
   const canDeleteSub = !isAgent && !isTenantAdmin;
   const [rules, setRules] = useState([]);
@@ -123,7 +129,11 @@ export default function AutoReply() {
   };
   useEffect(() => {
     reload();
-    api.smsNumbers().then(setNumbers).catch(() => {});
+    // Admins manage rules for every line on the domain; api.smsNumbers() is
+    // scoped to the signed-in extension, which left the list empty for them.
+    (isAgent ? api.smsNumbers() : api.domainSmsNumbers())
+      .then((r) => setNumbers(Array.isArray(r) ? r : (r?.numbers || [])))
+      .catch(() => {});
     api.companySettings().then((d) => setMainNum(digits(d?.main_number || user?.main_number || ''))).catch(() => {});
     api.templates().then(setTemplates).catch(() => {});
     api.subscriptions().then(setSubs).catch(() => setSubs({}));
@@ -173,9 +183,20 @@ export default function AutoReply() {
   };
 
   // ---- numbers (left pane) ----
-  const visibleNumbers = isAgent
-    ? numbers.filter((x) => agentRuleNums.includes(digits(String(x.number))))
-    : numbers;
+  // api.smsNumbers() only returns the agent's OWN extension's numbers, so a
+  // shared line owned by someone else has no row to filter in — synthesize one.
+  const visibleNumbers = (() => {
+    if (!isAgent) return numbers;
+    const mine = numbers.filter((x) => {
+      const d = digits(String(x.number));
+      return agentRuleNums.includes(d) || agentViewNums.includes(d);
+    });
+    const have = new Set(mine.map((x) => digits(String(x.number))));
+    const extra = [...agentRuleNums, ...agentViewNums]
+      .filter((d) => d && !have.has(d))
+      .map((d) => ({ number: d }));
+    return [...mine, ...extra];
+  })();
   const shownNumbers = visibleNumbers.filter((n) => {
     if (!numQ.trim()) return true;
     const d = digits(n.number);
@@ -257,7 +278,7 @@ export default function AutoReply() {
   return (
     <div className="h-full flex flex-col md:flex-row min-h-0">
       {/* Numbers */}
-      <div className="w-full md:w-80 bg-white border-b md:border-b-0 md:border-r flex flex-col shrink-0 max-h-[45%] md:max-h-none">
+      <div className="w-full md:w-64 lg:w-80 bg-white border-b md:border-b-0 md:border-r flex flex-col shrink-0 max-h-[45%] md:max-h-none">
         <div className="p-3 border-b space-y-2">
           <input value={numQ} onChange={(e) => setNumQ(e.target.value)} placeholder="🔍 Search numbers…"
             className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
@@ -294,7 +315,7 @@ export default function AutoReply() {
         {managing === null ? (
           <div className="max-w-2xl space-y-4">
             <div className="bg-white rounded-xl border p-5">
-              <h2 className="text-lg font-bold text-slate-900 mb-1">Auto-respond</h2>
+              <h2 className="text-fluid-lg font-bold text-slate-900 mb-1">Auto-respond</h2>
               <p className="text-sm text-slate-500">
                 Rules live on the SMS number they answer. Pick a number on the left to add, reorder, or edit its rules —
                 including catch-all rules that answer <strong>any</strong> message.
@@ -515,7 +536,7 @@ function TestCard({ testText, setTestText, testRes, runTest }) {
       <h3 className="font-semibold text-sm mb-2">🧪 Test matching (dry run — sends nothing)</h3>
       <div className="flex gap-2">
         <input value={testText} onChange={(e) => setTestText(e.target.value)} placeholder="Type a sample incoming message…"
-          className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
+          className="flex-1 min-w-0 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
         <button onClick={runTest} className="border text-sm rounded-lg px-4 py-2 hover:bg-slate-50">Test</button>
       </div>
       {testRes && (

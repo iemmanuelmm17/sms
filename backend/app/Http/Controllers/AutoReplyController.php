@@ -50,7 +50,33 @@ class AutoReplyController extends Controller
     protected function agentRuleContext(Request $request, string $domain, string $user): ?array
     {
         $actor = $this->actor($request);
-        if (($actor['role'] ?? '') !== 'agent' || empty($actor['agent_id'])) return null;
+        if (($actor['role'] ?? '') !== 'agent') return null;
+
+        // Portal agents have no legacy Agent row. Scope them by their visible
+        // numbers instead — falling through to null here would have given them
+        // the ADMIN view of every auto-reply rule on the domain.
+        if (!empty($actor['portal_auth'])) {
+            $me = \App\Models\AgentIdentity::find($actor['identity_id'] ?? null);
+            if (!$me) abort(403);
+            // Same positional shape as the legacy branch, plus the number set:
+            // [model, creators, main, allowed]. AgentIdentity has no
+            // assignedNumbers(), so the allowed list must travel with the
+            // context instead of being re-derived from the model.
+            $creators = ['agent:' . $me->id];
+            $main = '';
+            try {
+                $main = preg_replace('/\D/', '', (string) (\App\Models\Tenant::where('domain', $domain)
+                    ->value('main_number') ?? ''));
+            } catch (\Throwable $e) {}
+            $allowed = [];
+            try {
+                $allowed = app(\App\Services\AgentAccess::class)->sendableNumbers(
+                    $domain, $me->ext, $this->dtoken($request));
+            } catch (\Throwable $e) { $allowed = []; }   // fail closed
+            return [$me, $creators, $main, $allowed];
+        }
+
+        if (empty($actor['agent_id'])) return null;
         $me = \App\Models\Agent::find($actor['agent_id']);
         if (!$me) abort(403);
         $mine = $me->assignedNumbers();
@@ -66,7 +92,20 @@ class AutoReplyController extends Controller
         }
         $main = '';
         try { $main = preg_replace('/\D/', '', (string) (\App\Models\Tenant::where('domain', $domain)->where('dynalink_user', $user)->value('main_number') ?? '')); } catch (\Throwable $e) {}
-        return [$me, $creators, $main];
+        return [$me, $creators, $main, $me->assignedNumbers()];
+    }
+
+    /**
+     * Display label for either agent model.
+     *
+     * AgentIdentity has no name until the portal profile syncs, so the plain
+     * first+last concatenation produced an empty string; displayName() falls
+     * back to the extension.
+     */
+    protected static function actorLabel($model): string
+    {
+        if ($model instanceof \App\Models\AgentIdentity) return $model->displayName();
+        return trim(($model->first_name ?? '') . ' ' . ($model->last_name ?? ''));
     }
 
     protected function ruleVisibleToAgent(AutoReply $rule, array $creators): bool
@@ -148,9 +187,11 @@ class AutoReplyController extends Controller
             $this->assertNotReserved($data['keywords']); // TCPA words belong to the defaults
         }
         if ($ctx) {
-            [$agent, , $main] = $ctx;
+            [, , $main, $ctxNums] = $ctx;
             $fromDigits = preg_replace('/\D/', '', (string) ($data['from_number'] ?? ''));
-            $ok = $fromDigits === '' || ($fromDigits !== $main && in_array($fromDigits, $agent->assignedNumbers(), true));
+            // Portal agents may legitimately own the main line, so only the
+            // legacy path keeps the "not the main line" restriction.
+            $ok = $fromDigits === '' || in_array($fromDigits, (array) $ctxNums, true);
             if (!$ok) return response()->json(['message' => 'Agent rules may only send from your assigned numbers (not the main line).'], 422);
             $data['from_number'] = $fromDigits !== '' ? $fromDigits : null;
         }
@@ -160,7 +201,7 @@ class AutoReplyController extends Controller
             if (is_array($scoped)) $data['numbers'] = $scoped;
         }
         [$cb, $cbName] = $ctx
-            ? ['agent:' . $ctx[0]->id, trim($ctx[0]->first_name . ' ' . $ctx[0]->last_name)]
+            ? ['agent:' . $ctx[0]->id, self::actorLabel($ctx[0])]
             : [$user, $request->session()->get('dynalink.display_name')];
         $rule = AutoReply::create($data + [
             'domain' => $domain, 'user' => $user, 'match_mode' => $data['match_mode'] ?? 'any',
@@ -232,9 +273,11 @@ class AutoReplyController extends Controller
             }
         }
         if ($ctx && array_key_exists('from_number', $data)) {
-            [$agent, , $main] = $ctx;
+            [, , $main, $ctxNums] = $ctx;
             $fromDigits = preg_replace('/\D/', '', (string) ($data['from_number'] ?? ''));
-            $ok = $fromDigits === '' || ($fromDigits !== $main && in_array($fromDigits, $agent->assignedNumbers(), true));
+            // Portal agents may legitimately own the main line, so only the
+            // legacy path keeps the "not the main line" restriction.
+            $ok = $fromDigits === '' || in_array($fromDigits, (array) $ctxNums, true);
             if (!$ok) return response()->json(['message' => 'Agent rules may only send from your assigned numbers (not the main line).'], 422);
             $data['from_number'] = $fromDigits !== '' ? $fromDigits : null;
         }
@@ -250,7 +293,7 @@ class AutoReplyController extends Controller
         }
         if ($ctx) {
             $data['updated_by'] = 'agent:' . $ctx[0]->id;
-            $data['updated_by_name'] = trim($ctx[0]->first_name . ' ' . $ctx[0]->last_name);
+            $data['updated_by_name'] = self::actorLabel($ctx[0]);
         } else {
             $data['updated_by'] = $user;
             $data['updated_by_name'] = $request->session()->get('dynalink.display_name');
@@ -547,10 +590,10 @@ class AutoReplyController extends Controller
     protected function applyAgentScope(?array $numbers, array $ctx): array|string|null
     {
         if ($numbers === null) return null;
-        [$agent, , $main] = $ctx;
+        [, , $main, $ctxNums] = $ctx;
         $allowed = array_values(array_filter(array_map(
-            fn($n) => preg_replace('/\D/', '', (string) $n), (array) $agent->assignedNumbers()
-        ), fn($n) => $n !== '' && $n !== $main));
+            fn($n) => preg_replace('/\D/', '', (string) $n), (array) $ctxNums
+        ), fn($n) => $n !== ''));
 
         if (in_array(AutoReply::ALL_NUMBERS, $numbers, true)) {
             return $allowed === [] ? 'You have no assigned numbers yet.' : $allowed;

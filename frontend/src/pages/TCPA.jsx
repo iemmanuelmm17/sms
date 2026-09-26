@@ -18,6 +18,24 @@ export default function TCPA() {
   const [contacts, setContacts] = useState([]);
   const [phone, setPhone] = useState('');
   const [q, setQ] = useState('');
+  const [footer, setFooter] = useState('');
+  const [footerSaved, setFooterSaved] = useState('');
+  const [savingFooter, setSavingFooter] = useState(false);
+  useEffect(() => {
+    api.companySettings()
+      .then((d) => { const v = d?.tcpa_footer || ''; setFooter(v); setFooterSaved(v); })
+      .catch(() => {});
+  }, []);
+  const saveFooter = async () => {
+    setSavingFooter(true);
+    try {
+      await api.saveTcpaFooter(footer);
+      setFooterSaved(footer);
+      toastSuccess('Bulk send footer saved.');
+    } catch (e) {
+      toastError(e?.response?.data?.message || 'Could not save the footer.');
+    } finally { setSavingFooter(false); }
+  };
 
   const reload = () => {
     api.optEvents('opt_in').then((d) => setOptIns(Array.isArray(d) ? d : [])).catch(() => {});
@@ -85,7 +103,7 @@ export default function TCPA() {
   return (
     <div className="h-full overflow-y-auto bg-slate-50 p-4 md:p-6">
       <div className="max-w-2xl mx-auto">
-        <h2 className="text-lg font-bold text-slate-800" title="Telephone Consumer Protection Act">🚫 TCPA</h2>
+        <h2 className="text-fluid-lg font-bold text-slate-800" title="Telephone Consumer Protection Act">🚫 TCPA</h2>
         <div className="flex gap-1 mt-2 mb-4 bg-slate-200/60 dark:bg-slate-800 rounded-lg p-1 w-fit">
           {tabs.map(([id, label]) => (
             <button key={id} onClick={() => setTab(id)}
@@ -95,6 +113,35 @@ export default function TCPA() {
           ))}
         </div>
 
+        {tab === 'tcpa' && (
+          <div className="bg-white rounded-xl border p-5 mb-4">
+            <h3 className="text-base font-bold text-slate-800">Bulk send footer</h3>
+            <p className="text-xs text-slate-500 mt-1">
+              Appended to scheduled sends going to <strong>5 or more recipients</strong>, after
+              the company name prefix. Smaller sends are treated as conversational and are not
+              wrapped.
+            </p>
+            <textarea
+              value={footer} onChange={(e) => setFooter(e.target.value)} rows={2} maxLength={320}
+              placeholder="Reply STOP to unsubscribe."
+              className="w-full border rounded-lg px-3 py-2 text-sm mt-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
+            />
+            <div className="flex items-center gap-2 mt-2 flex-wrap">
+              <button
+                onClick={saveFooter} disabled={savingFooter || footer === footerSaved}
+                className="text-sm bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-lg px-4 py-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {savingFooter ? 'Saving…' : footer === footerSaved ? 'Saved' : 'Save footer'}
+              </button>
+              <span className="text-[11px] text-slate-400">{footer.length}/320</span>
+              {footer.trim() === '' && (
+                <span className="text-[11px] text-amber-700">
+                  Empty — bulk sends fall back to “Reply STOP to unsubscribe.”
+                </span>
+              )}
+            </div>
+          </div>
+        )}
         {tab === 'tcpa' && (
           <div className="bg-white rounded-xl border p-5 space-y-3 text-sm text-slate-600">
             <h3 className="text-base font-bold text-slate-800">A Definition of Telephone Consumer Protection Act</h3>

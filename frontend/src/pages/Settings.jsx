@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, fmtPhone, TIMEZONES } from '../api/client';
 import { toastError, toastSuccess, toastInfo } from '../lib/toast';
+import { useOnboarding } from '../components/onboarding/useOnboarding';
 import { InstallSection } from '../components/PwaInstall';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
@@ -82,15 +83,24 @@ export default function Settings() {
     } catch (e) { setPushMsg(e.message); setPushState('off'); toastError(e.message); }
   };
 
+  const { markStep } = useOnboarding();
   const [agentColor, setAgentColor] = useState(user?.color || AGENT_COLORS[0]);
   useEffect(() => { if (user?.color) setAgentColor(user.color); }, [user?.color]);
   const saveAgentColor = async (c) => {
-    setAgentColor(c);
+    const prev = agentColor;
+    setAgentColor(c);                       // optimistic
     try {
       const u = await api.updateAgentProfile({ tag_color: c });
-      setUser({ ...user, color: c });
+      // Trust the server's value: both Agent and AgentIdentity return tag_color.
+      const saved = u?.tag_color || c;
+      setAgentColor(saved);
+      setUser({ ...user, color: saved });
+      markStep('tag');            // ticks the checklist; no-op once done
       toastSuccess('Color updated');
-    } catch (e) { toastError(e?.response?.data?.message || e.message); }
+    } catch (e) {
+      setAgentColor(prev);                  // don't leave a colour that never saved
+      toastError(e?.response?.data?.message || 'Could not update your colour.');
+    }
   };
   const replayTour = async () => {
     try {
@@ -153,8 +163,8 @@ export default function Settings() {
 
   return (
     <div className="h-full overflow-y-auto bg-slate-50 p-4 md:p-6">
-      <h2 className="text-lg font-bold text-slate-800 mb-4">Settings</h2>
-      <div className="grid gap-4 max-w-2xl">
+      <h2 className="text-fluid-lg font-bold text-slate-800 mb-4">Settings</h2>
+      <div className="grid gap-4 max-w-2xl [&>*]:min-w-0">
         <section className="bg-white rounded-xl border p-5">
           <h3 className="font-semibold text-sm mb-2">Appearance</h3>
           <div className="flex items-center gap-2">
@@ -247,7 +257,7 @@ export default function Settings() {
           <p className="text-[11px] text-slate-400 mb-2">Used by <code>/company</code> and <code>$CompanyName</code> in messages, templates, and auto-replies. Saved per domain.</p>
           <div className="flex gap-2">
             <input value={companyName} onChange={(e) => setCompanyName(e.target.value)} placeholder="Acme Inc."
-              className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
+              className="flex-1 min-w-0 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
             <button onClick={saveCompanyName} className="text-sm bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-lg px-4">Save</button>
           </div>
           <div className="mt-3">
@@ -265,7 +275,7 @@ export default function Settings() {
               </span>
             </label>
             {quiet.enabled && (
-              <div className="flex items-end gap-2 mt-2">
+              <div className="flex items-end gap-2 mt-2 flex-wrap">
                 <div>
                   <label className="text-[11px] text-slate-500">Quiet from</label>
                   <select value={quiet.start} onChange={(e) => setQuiet((q) => ({ ...q, start: e.target.value }))}
@@ -344,7 +354,7 @@ export default function Settings() {
             </div>
           </section>
         )}
-        {(isAgent || user?.password_expires_at) && (
+        {!user?.portal_auth && (isAgent || user?.password_expires_at) && (
         <section className="bg-white rounded-xl border p-5">
           <h3 className="font-semibold text-sm mb-1">Change password</h3>
           <p className="text-xs text-slate-400 mb-3">

@@ -9,7 +9,7 @@ class ConversationMeta extends Model
 {
     protected $table = 'conversation_meta';
 
-    protected $fillable = ['domain', 'user', 'session_id', 'agent_id', 'pinned', 'status', 'important'];
+    protected $fillable = ['domain', 'user', 'session_id', 'agent_id', 'identity_id', 'pinned', 'status', 'important'];
 
     protected $casts = ['pinned' => 'boolean', 'important' => 'boolean'];
 

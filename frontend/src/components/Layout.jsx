@@ -11,21 +11,20 @@ import { useBrand } from '../context/BrandContext';
 import { useSocket } from '../context/SocketContext';
 import { useTheme } from '../context/ThemeContext';
 import { api, agentName, fmtPhone, initials, setPasswordExpiredHandler } from '../api/client';
+
+const digits = (v) => String(v ?? '').replace(/\D/g, '');
+import { AGENTS_ENABLED } from '../lib/features';
 import ChangePasswordModal from './ChangePasswordModal';
 import ForcedPasswordChange from './ForcedPasswordChange';
 import PasswordExpiryWarning from './PasswordExpiryWarning';
 
 const NAV = [
-  { title: 'Main panel', items: [
-    { id: 'compose', label: 'New SMS Message', icon: MessageSquarePlus, action: 'compose' },
-  ] },
   { title: 'Messages & Queues', items: [
     { id: 'inbox', path: '/app/messages', label: 'Inbox', icon: Inbox, badge: 'unread', noParams: ['folder', 'agent'] },
     { id: 'queue', path: '/app/messages', params: { folder: 'queue' }, label: 'Pending Queue', short: 'Pending', icon: Hourglass, badge: 'queue' },
     { id: 'unassigned', path: '/app/messages', params: { folder: 'unassigned' }, label: 'Unassigned', icon: UserX, badge: 'unassigned' },
   ] },
-  { title: 'Agent Inboxes', dynamic: 'agents', items: [], adminOnly: true },
-  { title: 'Mine', dynamic: 'mine', items: [], agentOnly: true },
+  ...(AGENTS_ENABLED ? [{ title: 'Agent Inboxes', dynamic: 'agents', items: [], adminOnly: true }] : []),
   { title: 'Shared Inboxes', dynamic: 'shared', items: [], agentOnly: true },
   { title: 'Contacts', items: [
     { id: 'people', path: '/app/contacts', label: 'People', icon: Users },
@@ -42,7 +41,9 @@ const NAV = [
     { id: 'audit', path: '/app/audit', label: 'Audit Logs', icon: ScrollText, hideForAgent: true },
   ] },
   { title: 'System', items: [
-    { id: 'agents', path: '/app/agents', label: 'Manage agents', icon: Headset, hideForAgent: true },
+    // Legacy roster stays behind the flag; People is the portal-agent roster.
+    ...(AGENTS_ENABLED ? [{ id: 'agents', path: '/app/agents', label: 'Manage agents', icon: Headset, hideForAgent: true }] : []),
+    { id: 'users', path: '/app/users', label: 'Users', icon: Headset, hideForAgent: true },
     { id: 'integration', path: '/app/integration', label: 'Integrations', icon: Plug, hideForAgent: true },
     { id: 'tcpa', path: '/app/tcpa', label: 'TCPA Compliance', tip: 'Telephone Consumer Protection Act', icon: ShieldOff },
     { id: 'numbers', path: '/app/numbers', label: 'Numbers', icon: Hash },
@@ -138,24 +139,103 @@ export default function Layout({ children }) {
   // Agent roster for the Agent Inboxes section (all roles see it).
   const [agents, setAgents] = useState([]);
   useEffect(() => {
+    if (!AGENTS_ENABLED) return;
     api.agentDirectory().then((a) => setAgents(Array.isArray(a) ? a : [])).catch(() => {});
   }, []);
   useEffect(() => {
+    if (!AGENTS_ENABLED) return;
     if (lastSync?.resource === 'agents') {
       api.agentDirectory().then((a) => setAgents(Array.isArray(a) ? a : [])).catch(() => {});
     }
   }, [lastSync]);
 
+  // Domain SMS numbers for the Inbox nav picker (admins only). Cheap: the
+  // number inventory is cached server-side and holds no message data.
+  const [inboxNums, setInboxNums] = useState([]);
+  const [numMetaMap, setNumMetaMap] = useState({});   // digits -> { label }
+  const [inboxTreeOpen, setInboxTreeOpen] = useState(() => {
+    try { return localStorage.getItem('sms-inbox-tree') === '1'; } catch { return false; }
+  });
+  const toggleInboxTree = () => setInboxTreeOpen((v) => {
+    const n = !v;
+    try { localStorage.setItem('sms-inbox-tree', n ? '1' : '0'); } catch {}
+    return n;
+  });
+  const [lineOpen, setLineOpen] = useState(false);
+  const [lineQuery, setLineQuery] = useState('');
+  const lineRef = useRef(null);
+  useEffect(() => {
+    if (!user || user.role === 'agent') { setInboxNums([]); return; }
+    api.domainSmsNumbers()
+      .then((d) => setInboxNums(Array.isArray(d?.numbers) ? d.numbers : []))
+      .catch(() => {});
+  }, [user?.role]);
+
+  useEffect(() => {
+    if (!lineOpen) return;
+    const onDown = (e) => { if (lineRef.current && !lineRef.current.contains(e.target)) { setLineOpen(false); setLineQuery(''); } };
+    const onKey = (e) => { if (e.key === 'Escape') { setLineOpen(false); setLineQuery(''); } };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [lineOpen]);
+
   // Shared numbers for the agent Shared Inboxes section (+ main line for Mine filtering).
   const [sharedList, setSharedList] = useState([]);
   const [mainNum, setMainNum] = useState('');
   useEffect(() => {
-    if (user?.role !== 'agent') { setSharedList([]); setMainNum(''); return; }
-    api.companySettings().then((d) => {
-      setSharedList(Object.keys(d?.number_shared || {}));
+    if (!user) { setSharedList([]); setMainNum(''); return; }
+    let dead = false;
+    const pull = () => api.companySettings().then((d) => {
+      if (dead) return;
+      const m = d?.number_shared || {};
+      setSharedList(Object.keys(m).filter((k) => m[k]));
       setMainNum(String(d?.main_number || user?.main_number || '').replace(/\D/g, ''));
+      setNumMetaMap(d?.number_meta || {});
     }).catch(() => {});
+    pull();
+    // Sharing a number on the Numbers page must show up here at once, with no
+    // page reload. Covers this tab (custom event) and other tabs/users (socket).
+    window.addEventListener('shared-numbers-changed', pull);
+    return () => { dead = true; window.removeEventListener('shared-numbers-changed', pull); };
   }, [user?.role]);
+
+  // Cross-tab / cross-user: the server broadcasts a settings change.
+  useEffect(() => {
+    if (!user) return;
+    if (lastSync?.resource === 'company-settings' || lastSync?.resource === 'numbers') {
+      api.companySettings().then((d) => {
+        const m = d?.number_shared || {};
+        setSharedList(Object.keys(m).filter((k) => m[k]));
+        setNumMetaMap(d?.number_meta || {});
+      }).catch(() => {});
+    }
+  }, [lastSync]);
+
+  const myNumbers = (() => {
+    const self = agents.find((a) => String(a.id) === String(user?.id));
+    const src = (self?.numbers?.length ? self.numbers : (user?.assigned_numbers || []));
+    const all = [...new Set(src.map((x) => String(x).replace(/\D/g, '')))].filter(Boolean);
+    // Portal agents: assigned_numbers is the full visible set from the server,
+    // and the tenant main number can legitimately be one of theirs.
+    if (user?.portal_auth) return all;
+    return all.filter((d) => d !== mainNum);
+  })();
+
+  // Shared Inboxes excludes anything already shown under "Mine" — otherwise
+  // a number that is both owned and shared appears twice in the sidebar.
+  const sharedOnlyList = sharedList.filter((d) => !myNumbers.includes(d));
+
+  /**
+   * Shared lines an agent can READ but is not granted to SEND from.
+   * Sharing alone makes an inbox viewable; a grant is what allows replying,
+   * so these are listed under Inbox purely for viewing.
+   */
+  const viewOnlyShared = (user?.role === 'agent')
+    ? (user?.readable_numbers || [])
+        .map((x) => digits(x))
+        .filter((d) => d && !myNumbers.includes(d))
+    : [];
 
   const fmt99 = (c) => (c > 99 ? '99+' : c);
   const fmt9 = (c) => (c > 9 ? '9+' : c);
@@ -238,7 +318,10 @@ export default function Layout({ children }) {
   const [warnOpen, setWarnOpen] = useState(false);   // pre-expiry advisory
 
   // No local password row on a legacy break-glass Dynalink session.
-  const canChangePassword = user?.role === 'agent' || !!user?.password_expires_at;
+  // Portal users have no local password — the backend rejects the change with
+  // a 400, so offering the form is a dead end.
+  const canChangePassword = !user?.portal_auth
+    && (user?.role === 'agent' || !!user?.password_expires_at);
 
   // /me reports the state on load; ResolvesActor's 409 reports sessions that
   // roll past expiry while the user is already signed in.
@@ -282,12 +365,13 @@ export default function Layout({ children }) {
   const searchHits = q ? [
     ...NAV.flatMap((g) => visible(g.items).map((n) => ({ ...n, group: g.title })))
       .filter((n) => n.label.toLowerCase().includes(q)),
+    // Shared inboxes are searchable for every role; "Mine" stays agent-only.
+    ...sharedOnlyList.map((d) => ({ id: `shared-${d}`, path: '/app/messages',
+      params: { number: d }, label: fmtPhone(d), group: 'Shared Inboxes', number: d })),
     ...(user?.role === 'agent'
-      ? [...myNumbers.map((d) => ({ id: `mine-${d}`, path: '/app/messages',
-          params: { number: d }, label: fmtPhone(d), group: 'Mine', number: d })),
-        ...sharedList.map((d) => ({ id: `shared-${d}`, path: '/app/messages',
-          params: { number: d }, label: fmtPhone(d), group: 'Shared Inboxes', number: d }))]
-      : agents.flatMap((a) => [agentLink(a), ...subsFor(a).map((num) => numberLink(a, num))]))
+      ? myNumbers.map((d) => ({ id: `mine-${d}`, path: '/app/messages',
+          params: { number: d }, label: fmtPhone(d), group: 'Inbox', number: d }))
+      : (AGENTS_ENABLED ? agents.flatMap((a) => [agentLink(a), ...subsFor(a).map((num) => numberLink(a, num))]) : []))
       .filter((n) => n.label.toLowerCase().includes(q)),
   ] : null;
 
@@ -312,13 +396,213 @@ export default function Layout({ children }) {
     );
   };
 
+  /**
+   * SMS-number picker shown under the Inbox nav row (admins only).
+   *
+   * Drives ?number= on /app/messages, which is what scopes the session fetch
+   * to a single owning extension. Defaults to the tenant main number; picking
+   * main clears the param so the URL stays clean.
+   */
+  /**
+   * "Active line" picker — a strict dropdown (no free text): the search box
+   * filters the list but cannot select anything that is not a real line.
+   *
+   * Lives at the top of the nav, under New Message. Drives ?number= on
+   * /app/messages, which is what scopes the session fetch to one extension.
+   */
+  const inboxPicker = () => {
+    if (!user || user.role === 'agent' || inboxNums.length === 0) return null;
+    const cur = new URLSearchParams(loc.search);
+    const sel = digits(cur.get('number') || '') || mainNum || '';
+    const opts = [...inboxNums]
+      .map((n) => ({
+        digits: digits(n.number ?? n.digits),
+        number: n.number ?? n.digits,
+        dest: n.dest ?? null,
+        label: n.label || numMetaMap[digits(n.number ?? n.digits)]?.label || '',
+      }))
+      .filter((n) => n.digits)
+      .sort((a, b) => (a.digits === mainNum ? -1 : b.digits === mainNum ? 1 : a.digits.localeCompare(b.digits)));
+    const active = opts.find((n) => n.digits === sel) || { digits: sel, number: sel, dest: null, label: '' };
+
+    const q = lineQuery.trim().toLowerCase();
+    const nq = q.replace(/\D/g, '');
+    const shown = !q ? opts : opts.filter((n) =>
+      (nq && n.digits.includes(nq)) ||
+      fmtPhone(n.number).toLowerCase().includes(q) ||
+      String(n.dest || '').toLowerCase().includes(q) ||
+      n.label.toLowerCase().includes(q));
+
+    const sub = (n) => [n.label, n.dest ? `Ext ${n.dest}` : null].filter(Boolean).join(' • ');
+    const choose = (d) => {
+      const next = new URLSearchParams();
+      if (d && d !== mainNum) next.set('number', d);
+      const qs = next.toString();
+      setLineOpen(false);
+      setLineQuery('');
+      nav(`/app/messages${qs ? `?${qs}` : ''}`);
+    };
+
+    return (
+      <div key="inbox-picker" className="px-3 pb-2" ref={lineRef}>
+        <div className="text-[12px] font-semibold uppercase tracking-wide text-slate-500 px-1 pb-1">Active line</div>
+
+        <button
+          type="button"
+          onClick={() => setLineOpen((v) => !v)}
+          aria-haspopup="listbox"
+          aria-expanded={lineOpen}
+          className="w-full flex items-center gap-2 rounded-xl bg-slate-800 border border-slate-700 hover:border-slate-600 px-2.5 py-2 text-left"
+        >
+          <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" aria-hidden="true" />
+          <span className="flex-1 min-w-0 text-[12px]">
+            <span className="block text-[12px] font-semibold text-white truncate">{fmtPhone(active.number)}</span>
+            {sub(active) && <span className="block text-[12px] text-slate-400 truncate">{sub(active)}</span>}
+          </span>
+          {numberUnread(active.digits) > 0 && (
+            <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-slate-600 text-white text-[12px] font-bold flex items-center justify-center shrink-0">
+              {fmt9(numberUnread(active.digits))}
+            </span>
+          )}
+          <ChevronsRight className={`w-3 h-3 shrink-0 text-slate-400 transition-transform ${lineOpen ? '-rotate-90' : 'rotate-90'}`} />
+        </button>
+
+        {lineOpen && (
+          <div className="mt-1.5 rounded-xl bg-slate-900 border border-slate-700 overflow-hidden">
+            <div className="p-2">
+              <input
+                autoFocus
+                value={lineQuery}
+                onChange={(e) => setLineQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') { setLineOpen(false); setLineQuery(''); }
+                  if (e.key === 'Enter' && shown.length === 1) choose(shown[0].digits);
+                }}
+                placeholder="Filter lines or ext…"
+                aria-label="Filter lines"
+                className="w-full text-[12px] rounded-lg bg-slate-800 border border-brand-500 text-slate-100 placeholder-slate-500 px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              />
+            </div>
+            {/* ~4.5 rows tall, then scrolls */}
+            <div role="listbox" aria-label="SMS lines" className="max-h-[15rem] overflow-y-auto pb-1">
+              {shown.map((n) => {
+                const on = n.digits === sel;
+                const un = numberUnread(n.digits);
+                return (
+                  <button
+                    key={n.digits}
+                    role="option"
+                    aria-selected={on}
+                    onClick={() => choose(n.digits)}
+                    className={`w-full flex items-center gap-2 px-2.5 py-2 text-left ${on ? 'bg-slate-800' : 'hover:bg-slate-800/60'}`}
+                  >
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${un > 0 ? 'bg-amber-500' : 'bg-emerald-500'}`} aria-hidden="true" />
+                    <span className="flex-1 min-w-0 text-[12px]">
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-[12px] font-semibold text-white truncate">{fmtPhone(n.number)}</span>
+                        {n.digits === mainNum && (
+                          <span className="text-[12px] font-bold text-brand-200 bg-brand-600/40 border border-brand-500/40 rounded px-1 shrink-0">PRIMARY</span>
+                        )}
+                      </span>
+                      {sub(n) && <span className="block text-[12px] text-slate-400 truncate">{sub(n)}</span>}
+                    </span>
+                    {un > 0 && (
+                      <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-slate-600 text-white text-[12px] font-bold flex items-center justify-center shrink-0">
+                        {fmt9(un)}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+              {shown.length === 0 && (
+                <p className="px-3 py-3 text-[12px] text-slate-500">No lines match “{lineQuery.trim()}”.</p>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  /**
+   * Own numbers, nested under Inbox and collapsed by default.
+   *
+   * "Inbox" itself stays unfiltered (all owned numbers); each child filters to
+   * one number via ?number=. Shared numbers are deliberately NOT here — they
+   * keep their own section, unchanged.
+   */
+  const inboxTree = () => {
+    if (!user || user.role !== 'agent') return [];
+    if (myNumbers.length === 0 && viewOnlyShared.length === 0) return [];
+    const cur = digits(new URLSearchParams(loc.search).get('number') || '');
+    const rows = [
+      <button
+        key="inbox-tree-toggle"
+        type="button"
+        onClick={toggleInboxTree}
+        aria-expanded={inboxTreeOpen}
+        className="w-full flex items-center gap-1.5 pl-9 pr-3 py-1 text-[12px] text-slate-400 hover:text-slate-200"
+      >
+        <ChevronRight className={`w-3 h-3 shrink-0 transition-transform ${inboxTreeOpen ? 'rotate-90' : ''}`} />
+        <span className="truncate">
+          {inboxTreeOpen ? 'Hide' : 'Show'} {myNumbers.length + viewOnlyShared.length} number
+          {myNumbers.length + viewOnlyShared.length === 1 ? '' : 's'}
+        </span>
+      </button>,
+    ];
+    if (!inboxTreeOpen) return rows;
+    for (const d of myNumbers) {
+      const label = numMetaMap[d]?.label;
+      rows.push(numberRow({
+        id: `mine-${d}`, path: '/app/messages', params: { number: d },
+        label: label || fmtPhone(d), group: 'Inbox', number: d,
+        // The row shows the description; the tooltip must still reveal the
+        // actual number, otherwise there is no way to see it from the nav.
+        tip: label ? `${fmtPhone(d)} — ${label}` : fmtPhone(d),
+      }, true));
+    }
+    // Shared lines an agent may read but not necessarily send from. Listed
+    // for viewing only; sending is gated server-side by the grant.
+    for (const d of viewOnlyShared) {
+      const label = numMetaMap[d]?.label;
+      rows.push(numberRow({
+        id: `sharedview-${d}`, path: '/app/messages', params: { number: d },
+        label: label || fmtPhone(d), group: 'Shared', number: d,
+        tip: `${fmtPhone(d)}${label ? ` — ${label}` : ''} (shared — view only)`,
+      }, true));
+    }
+    return rows;
+  };
+
+  /**
+   * The number list in its own scroll area.
+   *
+   * A user with many lines would otherwise push Contacts / Settings / etc.
+   * out of view. Capped and scrollable so the rest of the nav stays reachable.
+   */
+  const inboxTreeBox = () => {
+    const rows = inboxTree();
+    if (rows.length === 0) return null;
+    const [toggle, ...items] = rows;
+    return (
+      <div key="inbox-tree">
+        {toggle}
+        {items.length > 0 && (
+          <div className="max-h-56 overflow-y-auto overscroll-contain">
+            {items}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const rowItem = (n) => {
     if (n.action === 'compose') {
       return (
         <button key={n.id} onClick={goCompose} title={n.label}
           className="w-full rounded-xl bg-brand-600 hover:bg-brand-700 text-white flex items-center gap-3 px-3 py-2.5 transition">
-          <n.icon className="w-6 h-6 shrink-0" />
-          <span className="text-base flex-1 text-left truncate">{n.label}</span>
+          <n.icon className="w-3 h-3 shrink-0" />
+          <span className="text-[12px] flex-1 text-left truncate">{n.label}</span>
         </button>
       );
     }
@@ -331,8 +615,8 @@ export default function Layout({ children }) {
       <Link key={n.id} to={href(n)} title={n.tip ? `${n.label} — ${n.tip}` : (n.group ? `${n.group} — ${n.label}` : n.label)}
         data-tour={n.id === 'queue' ? 'queue' : n.id === 'settings' ? 'settings-nav' : undefined}
         className={rowCls(active)}>
-        <Icon className="w-6 h-6 shrink-0" />
-        <span className="text-base flex-1 text-left truncate">{n.label}</span>
+        <Icon className="w-3 h-3 shrink-0" />
+        <span className="text-[12px] flex-1 text-left truncate">{n.label}</span>
         {b && (
           <span className={`min-w-[22px] h-[22px] px-1.5 rounded-full ${b.cls} text-white text-xs font-bold flex items-center justify-center`}>
             {b.text}
@@ -346,10 +630,11 @@ export default function Layout({ children }) {
     const un = numberUnread(nn.number);
     const active = matchLink(nn);
     return (
-      <Link key={nn.id} to={href(nn)} title={nn.group ? `${nn.group} — ${nn.label}` : nn.label}
+      <Link key={nn.id} to={href(nn)}
+        title={nn.tip || (nn.group ? `${nn.group} — ${nn.label}` : nn.label)}
         className={`w-full rounded-xl flex items-center gap-3 py-2 transition ${indented ? 'pl-12 pr-3' : 'px-3'} ${
           active ? 'bg-brand-600 text-white' : 'text-slate-300 hover:bg-slate-800'}`}>
-        <span className="text-sm flex-1 text-left truncate">{nn.label}</span>
+        <span className="text-[12px] flex-1 text-left truncate">{nn.label}</span>
         {un > 0 && (
           <span className="min-w-[22px] h-[22px] px-1.5 rounded-full bg-red-500 text-white text-xs font-bold flex items-center justify-center">
             {fmt9(un)}
@@ -376,7 +661,7 @@ export default function Layout({ children }) {
           ) : <span className="w-4 shrink-0" />}
           <span className="w-6 h-6 rounded-full text-white text-[10px] font-bold flex items-center justify-center shrink-0"
             style={{ backgroundColor: a.tag_color || '#64748b' }}>{initials(agentName(a))}</span>
-          <span className="text-base flex-1 text-left truncate">{n.label}</span>
+          <span className="text-[12px] flex-1 text-left truncate">{n.label}</span>
           {un > 0 && (
             <span className="min-w-[22px] h-[22px] px-1.5 rounded-full bg-red-500 text-white text-xs font-bold flex items-center justify-center">
               {fmt9(un)}
@@ -389,13 +674,6 @@ export default function Layout({ children }) {
   };
 
   // Agent's own non-main numbers (directory first, login payload as fallback).
-  const myNumbers = (() => {
-    const self = agents.find((a) => String(a.id) === String(user?.id));
-    const src = (self?.numbers?.length ? self.numbers : (user?.assigned_numbers || []));
-    return [...new Set(src.map((x) => String(x).replace(/\D/g, '')))]
-      .filter((d) => d && d !== mainNum);
-  })();
-
   const sharedRail = (d) => {
     const nn = { id: `shared-${d}`, path: '/app/messages', params: { number: d }, label: fmtPhone(d) };
     const un = numberUnread(d);
@@ -432,19 +710,19 @@ export default function Layout({ children }) {
   };
 
   const groupTitle = (g) => {
-    const fixed = g.title === 'Messages & Queues' || g.title === 'Mine';
+    const fixed = g.title === 'Messages & Queues';
     const open = isGroupOpen(g.title);
     const inner = (
       <>
-        <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 flex-1 truncate text-left">{g.title}</p>
+        <p className="text-[12px] font-semibold uppercase tracking-wider text-slate-500 flex-1 truncate text-left">{g.title}</p>
         {g.dynamic === 'agents' && agentTotal > 0 && (
           <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-red-500 text-white text-[11px] font-bold flex items-center justify-center">
             {fmt99(agentTotal)}
           </span>
         )}
         {!fixed && (open
-          ? <ChevronDown className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-          : <ChevronRight className="w-3.5 h-3.5 text-slate-500 shrink-0" />)}
+          ? <ChevronDown className="w-3 h-3 text-slate-500 shrink-0" />
+          : <ChevronRight className="w-3 h-3 text-slate-500 shrink-0" />)}
       </>
     );
     const cls = 'px-3 pt-3 pb-1 flex items-center gap-2 w-full';
@@ -460,8 +738,10 @@ export default function Layout({ children }) {
   const [openGroups, setOpenGroups] = useState(() => {
     try { return JSON.parse(localStorage.getItem('sms-nav-groups') || '{}'); } catch { return {}; }
   });
-  const isGroupOpen = (t) => t === 'Messages & Queues' || t === 'Mine'
-    || (openGroups[t] ?? !(t === 'Agent Inboxes' || t === 'Shared Inboxes'));
+  // Shared Inboxes is a primary destination in phase 1 (portal login), so it
+  // defaults open like Messages & Queues rather than collapsed.
+  const isGroupOpen = (t) => t === 'Messages & Queues'
+    || (openGroups[t] ?? t !== 'Agent Inboxes');
   const toggleGroup = (t) => setOpenGroups((p) => {
     const n = { ...p, [t]: !isGroupOpen(t) };
     try { localStorage.setItem('sms-nav-groups', JSON.stringify(n)); } catch {}
@@ -496,7 +776,7 @@ export default function Layout({ children }) {
           <div className="relative mb-2 px-1">
             <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
             <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search menu…"
-              className="w-full bg-slate-800 text-sm rounded-lg pl-9 pr-8 py-2 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+              className="w-full bg-slate-800 text-[12px] rounded-lg pl-9 pr-8 py-2 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500" />
             {query && (
               <button onClick={() => setQuery('')} title="Clear search"
                 className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white">
@@ -512,12 +792,32 @@ export default function Layout({ children }) {
                 className="w-14 h-14 rounded-xl bg-brand-600 hover:bg-brand-700 text-white flex items-center justify-center transition shrink-0">
                 <MessageSquarePlus className="w-6 h-6" />
               </button>
+              {/* Collapsed rail has no room for a <select>; expanding reveals it. */}
+              {user && user.role !== 'agent' && inboxNums.length > 0 && (
+                <button
+                  onClick={() => { setCollapsed(false); try { localStorage.setItem('sms-nav-collapsed', '0'); } catch {} }}
+                  title={`Inbox number: ${fmtPhone(digits(new URLSearchParams(loc.search).get('number') || '') || mainNum)} — click to change`}
+                  className="w-14 h-10 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 flex items-center justify-center text-[10px] font-semibold shrink-0"
+                >
+                  {(() => {
+                    const d = digits(new URLSearchParams(loc.search).get('number') || '') || mainNum || '';
+                    return d ? d.slice(-4) : '···';
+                  })()}
+                </button>
+              )}
+              {/* Own numbers have no group of their own any more (they nest
+                  under Inbox), so surface them directly on the rail. */}
+              {user?.role === 'agent' && myNumbers.length > 0 && (
+                <div className="flex flex-col items-center gap-1">
+                  <div className="w-8 border-t border-slate-800 my-1" />
+                  {myNumbers.map(sharedRail)}
+                </div>
+              )}
               {groups.filter((g) => g.title !== 'Main panel').map((g) => (
                 <div key={g.title} className="flex flex-col items-center gap-1">
                   <div className="w-8 border-t border-slate-800 my-1" />
                   {g.dynamic === 'agents' ? agents.map(agentRail)
-                    : g.dynamic === 'mine' ? myNumbers.map(sharedRail)
-                    : g.dynamic === 'shared' ? sharedList.map(sharedRail)
+                    : g.dynamic === 'shared' ? sharedOnlyList.map(sharedRail)
                     : g.items.map(railItem)}
                 </div>
               ))}
@@ -529,20 +829,20 @@ export default function Layout({ children }) {
           ) : (
             groups.map((g) => (
               <div key={g.title}>
-                {!['Main panel', 'Mine'].includes(g.title) && groupTitle(g)}
+                {/* Active line sits at the very top of the nav. */}
+                {g.title === 'Messages & Queues' && inboxPicker()}
+                {groupTitle(g)}
                 {isGroupOpen(g.title) && (g.dynamic === 'agents'
                   ? (agents.length > 0
                       ? agents.map((a) => agentRow(a))
-                      : <p className="px-3 py-1 text-[11px] text-slate-500">No agents yet</p>)
-                  : g.dynamic === 'mine' ? (myNumbers.length > 0
-                      ? myNumbers.map((d) => numberRow({ id: `mine-${d}`, path: '/app/messages',
-                          params: { number: d }, label: fmtPhone(d), group: 'Mine', number: d }, false))
-                      : null)
-                  : g.dynamic === 'shared' ? (sharedList.length > 0
-                      ? sharedList.map((d) => numberRow({ id: `shared-${d}`, path: '/app/messages',
+                      : <p className="px-3 py-1 text-[12px] text-slate-500">No agents yet</p>)
+                  : g.dynamic === 'shared' ? (sharedOnlyList.length > 0
+                      ? sharedOnlyList.map((d) => numberRow({ id: `shared-${d}`, path: '/app/messages',
                           params: { number: d }, label: fmtPhone(d), group: 'Shared Inboxes', number: d }, false))
-                      : <p className="px-3 py-1 text-[11px] text-slate-500">No shared numbers</p>)
-                  : g.items.map(rowItem))}
+                      : <p className="px-3 py-1 text-[12px] text-slate-500">No shared numbers</p>)
+                  : g.items.flatMap((n) => (n.id === 'inbox'
+                      ? [rowItem(n), inboxTreeBox()]
+                      : [rowItem(n)])).filter(Boolean))}
               </div>
             ))
           )}
@@ -551,18 +851,18 @@ export default function Layout({ children }) {
 
       {/* Main */}
       <div className="flex-1 flex flex-col min-w-0 pb-[calc(4.25rem+env(safe-area-inset-bottom))] md:pb-0">
-        <header className="h-12 bg-white border-b flex items-center px-4 gap-3 shrink-0">
-          <span className="flex items-center gap-2">{logoUrl && <img src={logoUrl} alt="" className="w-6 h-6 rounded object-contain" />}<span className="font-semibold text-slate-800">{appName}</span></span>
+        <header className="h-12 bg-white border-b flex items-center px-4 gap-3 shrink-0 min-w-0">
+          <span className="flex items-center gap-2 min-w-0">{logoUrl && <img src={logoUrl} alt="" className="w-6 h-6 rounded object-contain shrink-0" />}<span className="font-semibold text-slate-800 truncate">{appName}</span></span>
           {api.isDemo && (
-            <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">
+            <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium min-w-0 truncate">
               DEMO MODE — set VITE_API_URL for live backend
             </span>
           )}
           <button onClick={toggle} title={dark ? 'Switch to light mode' : 'Switch to dark mode'}
-            className="ml-auto w-8 h-8 rounded-lg border hover:bg-slate-100 text-base">
+            className="ml-auto w-8 h-8 rounded-lg border hover:bg-slate-100 text-base shrink-0">
             {dark ? '☀️' : '🌙'}
           </button>
-          <div className="relative" ref={menuRef}>
+          <div className="relative shrink-0" ref={menuRef}>
             <button onClick={() => setMenuOpen((v) => !v)} title={displayName}
               className="relative w-8 h-8 rounded-full bg-brand-600 text-white text-xs font-bold flex items-center justify-center">
               {initials(displayName)}

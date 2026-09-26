@@ -17,6 +17,7 @@ export default function Tenants() {
   const [step, setStep] = useState(1);
   const [form, setForm] = useState(emptyForm);
   const [numbers, setNumbers] = useState([]);
+  const [numQ, setNumQ] = useState('');   // domain inventory can be large
   const [loadedKey, setLoadedKey] = useState('');
   const [loadingNums, setLoadingNums] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -32,7 +33,7 @@ export default function Tenants() {
   useEffect(() => { load(); }, []);
 
   const close = () => {
-    setShow(false); setStep(1); setForm(emptyForm); setNumbers([]); setLoadedKey('');
+    setShow(false); setStep(1); setForm(emptyForm); setNumbers([]); setLoadedKey(''); setNumQ('');
   };
 
   const step1Valid = () => {
@@ -55,15 +56,28 @@ export default function Tenants() {
       });
       const list = Array.isArray(r?.numbers) ? r.numbers : [];
       setNumbers(list);
-      setForm((f) => ({ ...f, main: list[0]?.digits || '' }));
+      // The verified Dynalink identity becomes the tenant admin, so seed the
+      // admin username from it. Still editable on step 3.
+      setForm((f) => ({
+        ...f,
+        main: list[0]?.digits || '',
+        a_username: f.a_username || f.dynalink_user.trim().toLowerCase(),
+      }));
       setLoadedKey(fpOf(form));
       setStep(2);
-      toastSuccess(`${list.length} SMS number${list.length === 1 ? '' : 's'} found on this account.`);
+      toastSuccess(`${list.length} SMS number${list.length === 1 ? '' : 's'} found on this domain.`);
     } catch (ex) { toastError(ex?.response?.data?.message || 'Could not load SMS numbers.'); }
     finally { setLoadingNums(false); }
   };
 
   const fresh = numbers.length > 0 && loadedKey === fpOf(form);
+  const shownNumbers = !numQ.trim() ? numbers : numbers.filter((n) => {
+    const t = numQ.trim().toLowerCase();
+    const nq = t.replace(/\D/g, '');
+    return (nq && String(n.digits).includes(nq))
+      || fmtPhone(n.number).toLowerCase().includes(t)
+      || String(n.dest || '').toLowerCase().includes(t);
+  });
 
   const create = async (e) => {
     e.preventDefault();
@@ -179,16 +193,42 @@ export default function Tenants() {
 
             {step === 2 && (
               <div>
-                <p className="text-sm text-slate-600">Assigned numbers on <strong>{form.dynalink_user.trim()}@{form.domain.trim()}</strong>:</p>
-                <div className="border rounded-xl p-2 mt-2 space-y-1 max-h-48 overflow-y-auto">
-                  {numbers.map((n) => (
-                    <label key={n.digits} className="flex items-center gap-2 text-sm text-slate-700 px-2 py-1 rounded-lg hover:bg-slate-50">
-                      <input type="radio" name="main-number" checked={form.main === n.digits} onChange={() => set('main', n.digits)} />
-                      {fmtPhone(n.number)}
+                <p className="text-sm text-slate-600">
+                  SMS numbers on domain <strong>{form.domain.trim()}</strong>:
+                </p>
+                <p className="text-[11px] text-slate-400">
+                  Every number in the domain, not just those on{' '}
+                  {form.dynalink_user.trim()}. The extension shown is the user that owns each number.
+                </p>
+                {numbers.length > 8 && (
+                  <input
+                    value={numQ} onChange={(e) => setNumQ(e.target.value)}
+                    placeholder="🔍 Search number or extension…" aria-label="Search SMS numbers"
+                    className={input}
+                  />
+                )}
+                <div className="border rounded-xl p-2 mt-2 space-y-1 max-h-64 overflow-y-auto">
+                  {shownNumbers.map((n) => (
+                    <label key={n.digits} className="flex items-center gap-2 text-sm text-slate-700 px-2 py-1 rounded-lg hover:bg-slate-50 cursor-pointer">
+                      <input type="radio" name="main-number" checked={form.main === n.digits} onChange={() => set('main', n.digits)} className="shrink-0" />
+                      <span className="min-w-0 truncate">{fmtPhone(n.number)}</span>
+                      {n.dest && (
+                        <span className="text-[11px] font-medium text-slate-500 bg-slate-100 border border-slate-200 rounded-full px-2 py-0.5 shrink-0">
+                          ext {n.dest}
+                        </span>
+                      )}
                     </label>
                   ))}
+                  {shownNumbers.length === 0 && (
+                    <p className="px-2 py-2 text-xs text-slate-400">No numbers match “{numQ.trim()}”.</p>
+                  )}
                 </div>
-                <p className="text-[11px] text-slate-400 mt-2">The main number is locked after creation and required on every agent of this tenant.</p>
+                <p className="text-[11px] text-slate-400 mt-2">
+                  {numQ.trim()
+                    ? `${shownNumbers.length} of ${numbers.length} shown. `
+                    : `${numbers.length} number${numbers.length === 1 ? '' : 's'} found. `}
+                  The main number is locked after creation and required on every agent of this tenant.
+                </p>
               </div>
             )}
 
@@ -199,6 +239,13 @@ export default function Tenants() {
                   Create first admin now
                 </label>
                 {form.withAdmin && (
+                  <>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Verified Dynalink identity{' '}
+                    <strong>{form.dynalink_user.trim()}@{form.domain.trim()}</strong>{' '}
+                    becomes this tenant&apos;s admin. The password below is the app login;
+                    the Dynalink password stays stored separately for API calls.
+                  </p>
                   <div className="grid grid-cols-2 gap-3 mt-2 border rounded-xl p-3 bg-slate-50">
                     <div><label className="text-xs font-medium text-slate-600">Admin username *</label>
                       <input value={form.a_username} onChange={(e) => set('a_username', e.target.value)} placeholder="sam" className={input} /></div>
@@ -213,6 +260,7 @@ export default function Tenants() {
                     <div className="col-span-2"><label className="text-xs font-medium text-slate-600">Secret answer *</label>
                       <input value={form.a_a} onChange={(e) => set('a_a', e.target.value)} className={input} /></div>
                   </div>
+                  </>
                 )}
               </div>
             )}
