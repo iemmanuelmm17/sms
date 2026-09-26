@@ -17,6 +17,11 @@ return Application::configure(basePath: dirname(__DIR__))
         },
     )
     ->withMiddleware(function (Middleware $middleware) {
+        // 1. Force CORS globally at the absolute top of the request stack
+        $middleware->prepend([
+            \Illuminate\Http\Middleware\HandleCors::class,
+        ]);
+
         // Exclude CSRF checks for external broadcasting & API calls if needed
         $middleware->validateCsrfTokens(except: ['api/*', 'broadcasting/*']);
         
@@ -27,6 +32,7 @@ return Application::configure(basePath: dirname(__DIR__))
 		$middleware->trustProxies(at: '*');
         $middleware->trustProxies(headers: Request::HEADER_X_FORWARDED_FOR |
             Request::HEADER_X_FORWARDED_HOST |
+            Request::HEADER_X_FORWARDED_PORT |
             Request::HEADER_X_FORWARDED_PORT |
             Request::HEADER_X_FORWARDED_PROTO |
             Request::HEADER_X_FORWARDED_AWS_ELB
@@ -39,5 +45,3 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withExceptions(function (Exceptions $exceptions) {
         //
     })->create();
-	
-	

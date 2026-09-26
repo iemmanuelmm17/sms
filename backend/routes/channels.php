@@ -17,14 +17,17 @@ Broadcast::channel('sms.{domain}.{user}', function ($user, $domain, $userParam) 
     if (! $scope) {
         return false;
     }
+    
     $safe = fn ($v) => preg_replace('/[^A-Za-z0-9-]/', '_', (string) $v);
-    $ok = $safe($scope['domain']) === $domain
-        && $safe($scope['user']) === (string) $userParam;
-    Log::info('broadcast-auth attempt', [
-        'channel_domain' => $domain,
-        'channel_user' => $userParam,
-        'via' => $scope['via'],
-        'ok' => $ok,
-    ]);
-    return $ok;
+    $domainMatches = $safe($scope['domain']) === $domain;
+
+    // 1. Explicitly check if agents are connecting via the 'shared' room token
+    if ($userParam === 'shared' && $scope['via'] === 'agent_portal') {
+        return $domainMatches; // Authorize if they match the domain
+    }
+
+    // 2. Default legacy matching rule for non-agents
+    return $domainMatches && ($safe($scope['user']) === (string) $userParam);
 });
+
+

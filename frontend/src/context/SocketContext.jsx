@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useRef, useState } from 'react';
+import axios from 'axios'; // Import standard axios directly for the auth request
 import { api } from '../api/client';
 import { useAuth } from './AuthContext';
 
@@ -29,6 +30,10 @@ export function SocketProvider({ children }) {
           import('laravel-echo'), import('pusher-js'),
         ]);
         window.Pusher = Pusher;
+
+        // Fallback to localhost:8000 if VITE_API_BASE_URL is not set in your .env
+        const backendUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+
         const echo = new Echo({
           broadcaster: 'reverb',
           key: import.meta.env.VITE_REVERB_APP_KEY,
@@ -37,23 +42,61 @@ export function SocketProvider({ children }) {
           wssPort: import.meta.env.VITE_REVERB_PORT,
           forceTLS: (import.meta.env.VITE_REVERB_SCHEME || 'http') === 'https',
           enabledTransports: ['ws', 'wss'],
-          authEndpoint: '/broadcasting/auth',
+          
+          // Absolute path to the Laravel API server to prevent Vite port routing leaks
+          authEndpoint: `${backendUrl}/broadcasting/auth`,
+          
+          // Intercept authorization using standard axios to force session inclusion
+          authorizer: (channel, options) => {
+            return {
+              authorize: (socketId, callback) => {
+                axios.post(options.authEndpoint, {
+                  socket_id: socketId,
+                  channel_name: channel.name
+                }, {
+                  withCredentials: true // Crucial to allow BroadcastScope::fromSession() to validate
+                })
+                .then(response => callback(false, response.data))
+                .catch(error => callback(true, error));
+              }
+            };
+          }
         });
+
         echoRef.current = echo;
+        
         // Same sanitization as the backend (ChannelName): Dynalink domains
         // contain dots ("1180.DynaCloud") but Laravel channel params can't
         // match dots — unsanitized names fail auth with 403.
         const safe = (v) => String(v).replace(/[^A-Za-z0-9-]/g, '_');
+        
         // Agents join their owner's channel (broadcasts are per Dynalink scope, not per agent).
-        const scopeUser = user.role === 'agent' ? (user.scope_user || user.user) : user.user;
-        const chName = `sms.${safe(user.domain)}.${safe(scopeUser)}`;
-        const ch = echo.private(chName);
+        const scopeUser = user.role === 'agent' ? 'shared' : user.user;
+		const chName = `sms.${safe(user.domain)}.${safe(scopeUser)}`;
+		const ch = echo.private(chName);
+        
         ch.listen('.sms.incoming', (e) => {
-          if (!cancelled) setLastEvent({ ...e, _at: Date.now() });
-        });
-        ch.listen('.data.changed', (e) => {
-          if (!cancelled) setLastSync({ ...(e || {}), _at: Date.now() });
-        });
+		  // 1. Force a clean, brand-new object reference with a distinct timestamp
+		  if (!cancelled) {
+			setLastEvent({
+			  ...e, 
+			  _at: Date.now(), 
+			  _id: Math.random().toString(36).substring(7) // Ensures distinct state mutation recognition
+			});
+		  }
+		});
+
+		ch.listen('.data.changed', (e) => {
+		  if (!cancelled) {
+			setLastSync({
+			  ...(e || {}), 
+			  _at: Date.now(),
+			  _id: Math.random().toString(36).substring(7) // Forces a distinct structural signature
+			});
+		  }
+		});
+
+        
         // Diagnostics: confirm the socket target + channel subscription in the
         // browser console (proves fresh code, correct host, and auth success).
         try {
@@ -63,6 +106,7 @@ export function SocketProvider({ children }) {
           raw?.bind('pusher:subscription_succeeded', () => console.info('[realtime] channel subscribed ✓'));
           raw?.bind('pusher:subscription_error', (err) => console.warn('[realtime] channel auth FAILED — are you logged in? Check routes/channels.php allows this session:', err));
         } catch {}
+        
         setConnected(true);
       } catch (e) {
         console.warn('Reverb unavailable, realtime disabled:', e);
@@ -75,7 +119,13 @@ export function SocketProvider({ children }) {
     } else {
       connectLive();
     }
-    return () => { cancelled = true; try { echoRef.current?.disconnect(); } catch {} };
+    
+    return () => { 
+      cancelled = true; 
+      try { 
+        echoRef.current?.disconnect(); 
+      } catch {} 
+    };
   }, [user]);
 
   // Demo helper: inject a fake inbound SMS so reviewers see the instant push.

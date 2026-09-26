@@ -10,21 +10,17 @@ use Illuminate\Support\Facades\Auth;
 
 class ResolveBroadcastUser
 {
-    /**
-     * Expose the portal session login as the request's "user".
-     *
-     * Laravel's PusherBroadcaster::auth() throws a 403 for private/presence
-     * channels when it cannot retrieve a user — before routes/channels.php
-     * callbacks ever run. This app keeps login state in the session
-     * (dynalink / tenant / agent keys, not Auth guards), so without this
-     * middleware every POST /broadcasting/auth fails with zero callback logs.
-     *
-     * Both resolution paths are covered: $request->user() callers via the
-     * user resolver, and Auth-guard callers via guard setUser() (guards are
-     * set per-request from the session — no user provider needed).
-     */
     public function handle(Request $request, Closure $next)
     {
+        // 1. Instantly handle browser CORS preflight (OPTIONS) requests
+        if ($request->isMethod('OPTIONS')) {
+            return response('', 204)
+                ->header('Access-Control-Allow-Origin', 'http://localhost:5173')
+                ->header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+                ->header('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With, Authorization, X-CSRF-TOKEN')
+                ->header('Access-Control-Allow-Credentials', 'true');
+        }
+
         $scope = BroadcastScope::fromSession($request->session());
 
         if ($scope) {
@@ -39,6 +35,14 @@ class ResolveBroadcastUser
             Auth::guard('web')->setUser($user);
         }
 
-        return $next($request);
+        $response = $next($request);
+
+        // 2. Attach cross-origin headers to the final successful auth response
+        if ($request->is('broadcasting/auth') && method_exists($response, 'header')) {
+            $response->header('Access-Control-Allow-Origin', 'http://localhost:5173');
+            $response->header('Access-Control-Allow-Credentials', 'true');
+        }
+
+        return $response;
     }
 }
