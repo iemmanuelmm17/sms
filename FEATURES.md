@@ -97,8 +97,8 @@ A multi-tenant team SMS workspace on top of a Dynalink voice/SMS account. Each t
 - Secrets: tenant Dynalink passwords + refresh tokens encrypted at rest (APP_KEY); message text never logged; sender numbers hashed in logs; daily log rotation.
 
 ### 8. Realtime layer
-- One private channel per Dynalink account (`sms.{domain}.{user}`); two event types: `sms.incoming` (new SMS payload) and `data.changed` (resource-level live sync for rules, logs, sessions, agents, contacts, settings, subscriptions…).
-- Tenant, agent, and legacy sessions all resolve to the same scope; channel auth failures are logged with the session type.
+- One private channel per Dynalink account scope (`sms.{domain}.{scope-user}`); two event types: `sms.incoming` (new SMS payload) and `data.changed` (resource-level live sync for rules, logs, sessions, agents, contacts, settings, subscriptions…).
+- Tenant-managed domains are ONE shared room: `BroadcastScope::scopeFor()` collapses the tenant admin, every portal agent (own extension user) and legacy break-glass sessions onto the tenant's Dynalink user, and every broadcaster (mutations, inbound webhooks) targets that same channel. `scope_user` in the auth payloads is the channel the SPA joins. Non-tenant domains keep per-user channels. Channel auth failures are logged with the session type.
 
 ### 9. Superadmin & tenancy
 - Tenants with encrypted Dynalink credential (mints the token for every tenant session, cached ~50 min) + per-tenant admins; 2-step tenant delete with purge preview (agents, templates, scheduled, auto-replies/logs, meta, webhook events; audit kept; Dynalink subs best-effort removed); per-admin delete with last-admin warning.

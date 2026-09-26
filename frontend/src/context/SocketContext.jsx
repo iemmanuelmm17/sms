@@ -70,8 +70,13 @@ export function SocketProvider({ children }) {
         // match dots — unsanitized names fail auth with 403.
         const safe = (v) => String(v).replace(/[^A-Za-z0-9-]/g, '_');
         
-        // Agents join their owner's channel (broadcasts are per Dynalink scope, not per agent).
-        const scopeUser = user.role === 'agent' ? 'shared' : user.user;
+        // Everyone in a tenant-managed domain joins the ONE shared scope
+        // channel the backend resolves it to (payload `scope_user` — the
+        // tenant's Dynalink anchor user). Broadcasts (mutations AND inbound
+        // SMS) are sent to that same channel, so agents hear each other and
+        // the admin in realtime. Legacy fallbacks: old agent builds used the
+        // 'shared' room token; pre-scope_user payloads carry the user.
+        const scopeUser = user.scope_user || (user.role === 'agent' ? 'shared' : user.user);
 		const chName = `sms.${safe(user.domain)}.${safe(scopeUser)}`;
 		const ch = echo.private(chName);
         

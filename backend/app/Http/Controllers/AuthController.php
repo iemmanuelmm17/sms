@@ -10,6 +10,7 @@ use App\Models\Agent;
 use App\Models\Tenant;
 use App\Models\TenantAdmin;
 use App\Services\Settings;
+use App\Services\BroadcastScope;
 use App\Models\AuditLog;
 use App\Services\LockoutService;
 use App\Models\PasswordHistory;
@@ -185,6 +186,7 @@ class AuthController extends Controller
             'username' => $admin->username . '@' . ($admin->tenant->name ?? ''),
             'user' => $admin->tenant->dynalink_user ?? null,
             'domain' => $admin->tenant->domain ?? null,
+            'scope_user' => $admin->tenant->dynalink_user ?? null, // shared realtime channel scope
             'display_name' => $admin->displayName(),
             'first_name' => $admin->first_name, 'last_name' => $admin->last_name,
             'tenant_id' => $admin->tenant_id,
@@ -405,7 +407,11 @@ class AuthController extends Controller
             'username' => $i->ext . '@' . $i->domain,
             'user' => $i->ext, 'domain' => $i->domain,
             'ext' => $i->ext,
-            'scope_user' => $i->ext,
+            // Realtime channel scope: the tenant's SHARED anchor user, not
+            // this extension. Every participant in the domain (admin + all
+            // agents) listens on sms.{domain}.{scope_user}; broadcasting to
+            // the extension user is how other agents went deaf.
+            'scope_user' => $tenant?->dynalink_user ?? $i->ext,
             'display_name' => $i->displayName(),
             'first_name' => $i->first_name,
             'last_name' => $i->last_name,
@@ -427,7 +433,9 @@ class AuthController extends Controller
             'role' => 'agent', 'id' => $agent->id,
             'username' => $agent->username . '@' . $agent->domain,
             'user' => $agent->username, 'domain' => $agent->domain,
-            'scope_user' => $agent->user, // owner's Dynalink user: the realtime channel scope
+            // The realtime channel scope: owner's Dynalink user, or the
+            // tenant's shared anchor on tenant-managed domains.
+            'scope_user' => BroadcastScope::scopeFor($agent->domain, $agent->user)[1],
             'display_name' => trim($agent->first_name . ' ' . $agent->last_name),
             'first_name' => $agent->first_name, 'last_name' => $agent->last_name,
             'color' => $agent->tag_color, 'status' => $agent->status,
@@ -628,6 +636,8 @@ class AuthController extends Controller
             'username'     => ($s['user'] ?? '') . '@' . ($s['domain'] ?? ''),
             'user'         => $s['user'] ?? null,
             'domain'       => $s['domain'] ?? null,
+            // Shared realtime channel scope (tenant anchor on tenant domains).
+            'scope_user'   => BroadcastScope::scopeFor((string) ($s['domain'] ?? ''), (string) ($s['user'] ?? ''))[1],
             'display_name' => $s['display_name'] ?? null,
             'email'        => $s['email'] ?? null,
             'scope'        => $s['scope'] ?? null,

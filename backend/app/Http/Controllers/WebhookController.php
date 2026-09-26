@@ -6,6 +6,7 @@ use App\Events\IncomingSmsReceived;
 use App\Http\Middleware\EnsureSuperAdminIp;
 use App\Models\AuditLog;
 use App\Models\WebhookAllowedIp;
+use App\Services\BroadcastScope;
 use App\Services\Settings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -126,9 +127,16 @@ class WebhookController extends Controller
                 $seen = 'bcast-sent:' . md5(($ev['messagesession-id'] ?? '') . '|' . ($ev['from-number'] ?? '') . '|' . ($ev['text'] ?? ''));
                 if (Cache::add($seen, 1, now()->addSeconds(30))) {
                     if ($channelUser && $domain) {
+                        // Echo channel = the domain's SHARED scope, not the
+                        // terminating extension: on tenant domains every
+                        // participant (admin + agents) sits on one channel,
+                        // so a message landing on any number in the domain
+                        // must be pushed there. (Outbound webhooks and push
+                        // below keep the raw terminating user.)
+                        [$rtDomain, $rtUser] = BroadcastScope::scopeFor((string) $domain, (string) $channelUser);
                         broadcast(new IncomingSmsReceived(
-                            (string) $domain,
-                            (string) $channelUser,
+                            $rtDomain,
+                            $rtUser,
                             $ev
                         ))->toOthers();
                     } else {
