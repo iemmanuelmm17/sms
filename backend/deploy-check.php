@@ -16,7 +16,7 @@ $root = __DIR__;
 $pass = 0; $fail = 0; $warn = 0;
 
 /** Bumped whenever the bundle changes, so a stale copy is self-evident. */
-const BUILD_STAMP = '2026-09-25a';
+const BUILD_STAMP = '2026-09-25b';
 
 function line(string $s = ''): void { echo $s, PHP_EOL; }
 function ok(string $label): void { global $pass; $pass++; line("  [ OK ]  {$label}"); }
@@ -148,6 +148,8 @@ if (!is_dir($fe)) {
         ['API servers UI (superadmin)', 'pages/super/SuperSettings.jsx', 'API servers'],
         ['Claim keeps a thread queued', 'pages/Messages.jsx', 'deliberately leaves the thread IN the'],
         ['Remove from Queue action', 'pages/Messages.jsx', 'removeFromQueue'],
+        ['Send status settles (server rewrites body)', 'pages/Messages.jsx', 'const sameMessage'],
+        ['2xx pins Delivered by fingerprint', 'pages/Messages.jsx', 'sentPrintsRef'],
     ];
     foreach ($feChecks as [$label, $rel, $needle]) {
         $p = $fe . '/' . $rel;
