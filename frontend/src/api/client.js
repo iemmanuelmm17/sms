@@ -309,6 +309,10 @@ export const api = {
     if (DEMO_MODE) return { app_name: 'SMS Messaging', logo_url: null };
     return (await http.get('/api/branding')).data;
   },
+  async realtime() {
+    if (DEMO_MODE) return { host: null, port: null, scheme: null, app_key: null };
+    return (await http.get('/api/realtime')).data;
+  },
 
   // ---- Superadmin portal ----
   async superLogin(username, password) {

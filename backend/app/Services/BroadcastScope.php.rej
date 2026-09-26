@@ -1,0 +1,31 @@
+diff a/backend/app/Services/BroadcastScope.php b/backend/app/Services/BroadcastScope.php	(rejected hunks)
+@@ -16,6 +16,29 @@
+  */
+ class BroadcastScope
+ {
++    /**
++     * The one shared realtime room per Dynalink domain.
++     *
++     * Channel name: private-sms.{sanitized domain}.{ROOM}
++     *
++     * The Dynalink user/extension is deliberately NOT part of the channel:
++     * a domain's admin and every agent (each on a different user extension)
++     * must all sit in the same room, or they could never hear each other.
++     */
++    public const ROOM = 'shared';
++
++    /**
++     * The realtime channel target for a domain: the shared domain room.
++     * Every broadcaster (DataChanged mutations, inbound webhook events)
++     * must use this so all participants of the domain hear everything.
++     *
++     * @return array{0: string, 1: string} [domain, room]
++     */
++    public static function scopeFor(string $domain): array
++    {
++        return [$domain, self::ROOM];
++    }
++
+     public static function fromSession($session): ?array
+     {
+         if ($s = $session->get('dynalink')) {

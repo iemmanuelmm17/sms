@@ -1,0 +1,18 @@
+diff a/frontend/src/context/SocketContext.jsx b/frontend/src/context/SocketContext.jsx	(rejected hunks)
+@@ -70,8 +82,14 @@ export function SocketProvider({ children }) {
+         // match dots — unsanitized names fail auth with 403.
+         const safe = (v) => String(v).replace(/[^A-Za-z0-9-]/g, '_');
+         
+-        // Agents join their owner's channel (broadcasts are per Dynalink scope, not per agent).
+-        const scopeUser = user.role === 'agent' ? 'shared' : user.user;
++        // ONE shared room per Dynalink domain: private-sms.{domain}.shared.
++        // The user/extension is deliberately NOT in the channel name — the
++        // domain's admin and every agent (each on a different user
++        // extension) all join the same room, and the backend sends every
++        // broadcast (mutations AND inbound SMS) to that same room. The
++        // payload's scope_user carries the token (kept for future room
++        // scheme changes); 'shared' is the historical agent-room token.
++        const scopeUser = user.scope_user || 'shared';
+ 		const chName = `sms.${safe(user.domain)}.${safe(scopeUser)}`;
+ 		const ch = echo.private(chName);
+         

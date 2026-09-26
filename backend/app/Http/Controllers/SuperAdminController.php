@@ -409,6 +409,8 @@ class SuperAdminController extends Controller
         $whAuto = rtrim(config('app.url'), '/') . '/api/webhooks/dynalink';
         $whDb = $whInDb ? (string) (Settings::get('dynalink.webhook_url', '') ?? '') : '';
         $whEffective = $whDb !== '' ? $whDb : ($whEnv !== '' ? $whEnv : $whAuto);
+        // config('broadcasting.*') already includes any DB overrides applied
+        // in AppServiceProvider::boot(), so this reports the effective values.
         return response()->json([
             'dynalink_client_id' => [
                 'value' => $id,
@@ -423,6 +425,19 @@ class SuperAdminController extends Controller
                 'override' => $whDb,
                 'source' => $whInDb ? 'database' : ($whEnv !== '' ? 'env' : 'auto'),
                 'auto_value' => $whAuto,
+            ],
+            // Realtime broadcast (Reverb) — where browsers connect for live
+            // updates. DB override → .env, same pattern as the fields above.
+            'broadcast' => [
+                'host' => $this->envOverride('reverb.host', config('broadcasting.connections.reverb.host')),
+                'port' => $this->envOverride('reverb.port', config('broadcasting.connections.reverb.port')),
+                'scheme' => $this->envOverride('reverb.scheme', config('broadcasting.connections.reverb.scheme')),
+                'app_key' => $this->envOverride('reverb.app_key', config('broadcasting.connections.reverb.key')),
+            ],
+            // Shared Dynalink login used for agent sends.
+            'dynalink_service' => [
+                'user' => $this->envOverride('dynalink.service_user', config('services.dynalink.service_user')),
+                'pass' => $this->envOverrideSecret('dynalink.service_pass', config('services.dynalink.service_pass')),
             ],
             'api_servers' => [
                 'value' => (string) (Settings::get(\App\Services\ApiServerPool::SETTING, '') ?? ''),
@@ -474,6 +489,34 @@ class SuperAdminController extends Controller
         ];
     }
 
+    /**
+     * Shape for an env-overridable setting: the effective value, the raw DB
+     * override (empty when none), and which layer it comes from.
+     */
+    protected function envOverride(string $settingKey, mixed $envValue): array
+    {
+        $inDb = AppSetting::where('key', $settingKey)->exists();
+        $db = $inDb ? (string) (Settings::get($settingKey, '') ?? '') : '';
+        $effective = $db !== '' ? $db : (string) ($envValue ?? '');
+        return [
+            'value' => $effective,
+            'override' => $db,
+            'source' => $db !== '' ? 'database' : ($effective !== '' ? 'env' : 'none'),
+        ];
+    }
+
+    /** Same as envOverride() for secrets — only reports set/source. */
+    protected function envOverrideSecret(string $settingKey, mixed $envValue): array
+    {
+        $inDb = AppSetting::where('key', $settingKey)->exists();
+        $dbSet = $inDb && (string) (Settings::get($settingKey, '') ?? '') !== '';
+        $envSet = (string) ($envValue ?? '') !== '';
+        return [
+            'set' => $dbSet || $envSet,
+            'source' => $dbSet ? 'database' : ($envSet ? 'env' : 'none'),
+        ];
+    }
+
     protected function legacyState(): array
     {
         $enabled = Settings::legacyLoginEnabled();
@@ -513,6 +556,13 @@ class SuperAdminController extends Controller
             'mail_inbound_domain' => 'sometimes|nullable|string|max:190',
             'mail_cap_sender_daily' => 'sometimes|nullable|integer|min:0|max:1000000',
             'mail_cap_dest_hourly' => 'sometimes|nullable|integer|min:0|max:1000000',
+            // Realtime broadcast (Reverb) + Dynalink service account.
+            'reverb_host' => 'sometimes|nullable|string|max:190',
+            'reverb_port' => 'sometimes|nullable|integer|min:1|max:65535',
+            'reverb_scheme' => 'sometimes|nullable|in:http,https,ws,wss',
+            'reverb_app_key' => 'sometimes|nullable|string|max:120',
+            'dynalink_service_user' => 'sometimes|nullable|string|max:190',
+            'dynalink_service_pass' => 'sometimes|nullable|string|max:200',
         ]);
         if (array_key_exists('api_servers', $data)) {
             $raw = (string) ($data['api_servers'] ?? '');
@@ -556,11 +606,43 @@ class SuperAdminController extends Controller
             }
             $data['mail_inbound_domain'] = $d;
         }
+        // Broadcast host: accept a pasted ws://host:port too — strip the
+        // protocol, split out a port that was included in the same field.
+        if (array_key_exists('reverb_host', $data)) {
+            $h = strtolower(trim((string) ($data['reverb_host'] ?? '')));
+            $h = preg_replace('#^(wss?|https?)://#i', '', $h);
+            $h = preg_replace('#/.*$#', '', $h);
+            if ($h !== '') {
+                if (str_contains($h, ' ')) {
+                    return response()->json(['message' => 'Broadcast address must be a bare IP or hostname — no spaces.'], 422);
+                }
+                if (str_contains($h, ':')) {
+                    [$h, $portPart] = explode(':', $h, 2);
+                    if (ctype_digit($portPart) && (int) $portPart > 0
+                        && (!array_key_exists('reverb_port', $data) || $data['reverb_port'] === null)) {
+                        $data['reverb_port'] = (int) $portPart;
+                    }
+                }
+            }
+            $data['reverb_host'] = $h;
+        }
+        // Store the scheme as http/https (the SPA maps it to ws/wss).
+        if (array_key_exists('reverb_scheme', $data)
+            && in_array($data['reverb_scheme'], ['ws', 'wss'], true)) {
+            $data['reverb_scheme'] = $data['reverb_scheme'] === 'wss' ? 'https' : 'http';
+        }
         $whKeySaved = array_key_exists('webhook_url', $data);
         $oldWh = $whKeySaved ? $this->webhookEffective() : null;
         $map = ['dynalink_client_id' => 'dynalink.client_id',
             'dynalink_client_secret' => 'dynalink.client_secret',
-            'webhook_url' => 'dynalink.webhook_url'];
+            'webhook_url' => 'dynalink.webhook_url',
+            // Realtime broadcast + Dynalink service account: same
+            // DB-override contract (empty clears back to .env).
+            'reverb_host' => 'reverb.host',
+            'reverb_port' => 'reverb.port',
+            'reverb_scheme' => 'reverb.scheme',
+            'reverb_app_key' => 'reverb.app_key',
+            'dynalink_service_user' => 'dynalink.service_user'];
         foreach ($map as $in => $key) {
             if (!array_key_exists($in, $data)) continue;
             $v = trim((string) ($data[$in] ?? ''));
@@ -570,6 +652,16 @@ class SuperAdminController extends Controller
                 Cache::forget('app_settings:all');
             } else {
                 Settings::set($key, $v);
+            }
+        }
+        // Service password: not trimmed (a password may contain edge spaces).
+        if (array_key_exists('dynalink_service_pass', $data)) {
+            $v = (string) ($data['dynalink_service_pass'] ?? '');
+            if ($v === '') {
+                AppSetting::where('key', 'dynalink.service_pass')->delete();
+                Cache::forget('app_settings:all');
+            } else {
+                Settings::set('dynalink.service_pass', $v);
             }
         }
         // Email gateway: same DB-override pattern (empty clears to .env).

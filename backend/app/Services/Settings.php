@@ -37,6 +37,21 @@ class Settings
     }
 
     /**
+     * Dynalink service account credential (field: "user" or "pass").
+     * DB override (Super → Global settings) → .env fallback. Null when
+     * neither is set.
+     */
+    public static function dynalinkServiceCredential(string $field): ?string
+    {
+        $v = self::get('dynalink.service_' . $field, null);
+        if ($v === null || trim((string) $v) === '') {
+            $v = config('services.dynalink.service_' . $field);
+        }
+        $v = trim((string) ($v ?? ''));
+        return $v !== '' ? $v : null;
+    }
+
+    /**
      * Break-glass login state: flag on AND (no expiry OR not yet expired).
      * An expired window auto-closes itself on read.
      */

@@ -215,10 +215,10 @@ trait ResolvesActor
                 Log::warning('agent tenant token failed; using service credential', ['tenant' => $tenant->name]);
             }
         }
-        $user = config('services.dynalink.service_user');
-        $pass = config('services.dynalink.service_pass');
+        $user = \App\Services\Settings::dynalinkServiceCredential('user');
+        $pass = \App\Services\Settings::dynalinkServiceCredential('pass');
         abort_unless($user && $pass, 503,
-            'Agent access is not configured — set DYNALINK_SERVICE_USER/PASS in .env.');
+            'Agent access is not configured — set the Dynalink service account in Super → Settings (or DYNALINK_SERVICE_USER/PASS in .env).');
         return Cache::remember(
             "dynalink:service_token:{$a['domain']}:{$a['user']}", 3000,
             fn() => app(DynalinkService::class)->login($user, $pass)['access_token']

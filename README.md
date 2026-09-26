@@ -13,7 +13,7 @@ sms-app/
 │   ├── app/Http/Controllers/              # Auth, MessageSession, Message, Contact,
 │   │                                      # SmsNumber, Subscription, Group, Template,
 │   │                                      # ScheduledMessage, Webhook
-│   ├── app/Events/IncomingSmsReceived.php # ShouldBroadcastNow → private-sms.{domain}.{user}
+│   ├── app/Events/IncomingSmsReceived.php # ShouldBroadcastNow → private-sms.{domain}.shared
 │   ├── app/Jobs/SendScheduledMessage.php  # ONE job per recipient (1-by-1 sends)
 │   ├── app/Models/ + database/migrations/ # templates, scheduled_messages
 │   ├── routes/api.php + routes/channels.php
@@ -27,7 +27,11 @@ sms-app/
 1. Login creates Dynalink `message` + `messagesession` event subscriptions pointing at
    `POST /api/webhooks/dynalink` (renewed on every token refresh).
 2. Incoming SMS → Dynalink POSTs webhook → Laravel broadcasts `sms.incoming`
-   on `private-sms.{domain}.{user}` via Reverb.
+   on the shared per-domain room `private-sms.{domain}.shared` via Reverb.
+   Every participant of a domain (admin + all agents, each on their own
+   user extension) joins that one room, so updates are visible to everyone
+   in the domain in realtime — not just to the user whose extension owns
+   the conversation or number.
 3. React (Laravel Echo) receives it and instantly updates the sidebar row + open chat.
 
 ## Backend setup (requires PHP 8.2 + Composer)

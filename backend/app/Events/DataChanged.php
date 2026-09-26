@@ -15,7 +15,9 @@ use Illuminate\Support\Facades\Log;
  * Cross-instance sync: every local mutation broadcasts here so other
  * browsers/computers refresh instantly (no polling, no manual refresh).
  *
- * Channel: private-sms.{sanitized domain}.{user} (see ChannelName)
+ * Channel: the shared domain room private-sms.{sanitized domain}.shared
+ * (BroadcastScope::scopeFor — the Dynalink user/extension is never part of
+ * the channel, so agents on different extensions all hear every mutation).
  * Event name: data.changed
  * Payload: { resource, action, id, payload }
  */

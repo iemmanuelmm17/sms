@@ -5,7 +5,9 @@ import { useAuth } from './AuthContext';
 
 /**
  * Realtime layer.
- *  - LIVE mode: Laravel Echo + Reverb on private-sms.{domain}.{user}.
+ *  - LIVE mode: Laravel Echo + Reverb on the SHARED domain room
+ *    private-sms.{domain}.shared (one per domain, all roles — agents on
+ *    different user extensions included).
  *    - `sms.incoming` → lastEvent (inbound SMS)
  *    - `data.changed` → lastSync (any mutation from any instance)
  *  - DEMO mode: simulated inbound message every so often + a manual "Simulate inbound" trigger.
@@ -34,13 +36,23 @@ export function SocketProvider({ children }) {
         // Fallback to localhost:8000 if VITE_API_BASE_URL is not set in your .env
         const backendUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
+        // Realtime connection target: Super → Settings (saved server-side,
+        // served by /api/realtime) wins; the build-time .env values are the
+        // per-field fallback. Fails soft — offline/demo keeps the .env values.
+        let rt = {};
+        try { rt = (await api.realtime()) || {}; } catch { /* stay on .env */ }
+        const rtHost = rt.host || import.meta.env.VITE_REVERB_HOST;
+        const rtPort = rt.port || import.meta.env.VITE_REVERB_PORT;
+        const rtScheme = rt.scheme || import.meta.env.VITE_REVERB_SCHEME || 'http';
+        const rtKey = rt.app_key || import.meta.env.VITE_REVERB_APP_KEY;
+
         const echo = new Echo({
           broadcaster: 'reverb',
-          key: import.meta.env.VITE_REVERB_APP_KEY,
-          wsHost: import.meta.env.VITE_REVERB_HOST,
-          wsPort: import.meta.env.VITE_REVERB_PORT,
-          wssPort: import.meta.env.VITE_REVERB_PORT,
-          forceTLS: (import.meta.env.VITE_REVERB_SCHEME || 'http') === 'https',
+          key: rtKey,
+          wsHost: rtHost,
+          wsPort: rtPort,
+          wssPort: rtPort,
+          forceTLS: rtScheme === 'https',
           enabledTransports: ['ws', 'wss'],
           
           // Absolute path to the Laravel API server to prevent Vite port routing leaks
@@ -105,8 +117,8 @@ export function SocketProvider({ children }) {
         // Diagnostics: confirm the socket target + channel subscription in the
         // browser console (proves fresh code, correct host, and auth success).
         try {
-          const scheme = (import.meta.env.VITE_REVERB_SCHEME || 'http') === 'https' ? 'wss' : 'ws';
-          console.info(`[realtime] socket target: ${scheme}://${import.meta.env.VITE_REVERB_HOST}:${import.meta.env.VITE_REVERB_PORT} | channel: private-${chName}`);
+          const scheme = rtScheme === 'https' ? 'wss' : 'ws';
+          console.info(`[realtime] socket target: ${scheme}://${rtHost}:${rtPort} | channel: private-${chName}${rt.host ? ' (server settings)' : ' (.env)'}`);
           const raw = echo.connector?.pusher?.channel(`private-${chName}`);
           raw?.bind('pusher:subscription_succeeded', () => console.info('[realtime] channel subscribed ✓'));
           raw?.bind('pusher:subscription_error', (err) => console.warn('[realtime] channel auth FAILED — are you logged in? Check routes/channels.php allows this session:', err));

@@ -13,7 +13,9 @@ use Illuminate\Queue\SerializesModels;
  * Broadcast instantly (ShouldBroadcastNow — no queue delay) so the
  * React UI updates the moment Dynalink POSTs the webhook.
  *
- * Channel: private-sms.{sanitized domain}.{user} (see ChannelName)
+ * Channel: the shared domain room private-sms.{sanitized domain}.shared
+ * (the webhook resolves the room via BroadcastScope::scopeFor; the
+ * terminating extension is never part of the channel).
  * Event name: sms.incoming
  */
 class IncomingSmsReceived implements ShouldBroadcastNow

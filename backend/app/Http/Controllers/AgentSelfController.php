@@ -60,12 +60,10 @@ class AgentSelfController extends Controller
         \App\Services\OnboardingService::mark($me, 'tag');
 
         if ($me instanceof AgentIdentity) {
-            // Broadcast on the TENANT scope: that is what portal agents and
-            // admins both listen on (see BroadcastScope).
-            $tenant = \App\Models\Tenant::where('domain', $me->domain)->first();
-            if ($tenant) {
-                DataChanged::send($tenant->domain, $tenant->dynalink_user, 'agents', 'saved', $me->id);
-            }
+            // Broadcast to the shared room for the domain: that is what all
+            // portal agents (any extension) and admins listen on.
+            // DataChanged::send resolves the room from the domain.
+            DataChanged::send($me->domain, $me->ext, 'agents', 'saved', $me->id);
             return response()->json([
                 'id' => $me->id, 'ext' => $me->ext, 'domain' => $me->domain,
                 'display_name' => $me->displayName(),

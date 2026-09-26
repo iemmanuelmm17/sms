@@ -229,8 +229,8 @@ class SendScheduledMessage implements ShouldQueue
         $cacheKey = "dynalink:service_token:{$m->domain}:{$m->user}";
         return \Illuminate\Support\Facades\Cache::remember($cacheKey, 3000, function () use ($dynalink) {
             $tokens = $dynalink->login(
-                config('services.dynalink.service_user'),
-                config('services.dynalink.service_pass')
+                \App\Services\Settings::dynalinkServiceCredential('user'),
+                \App\Services\Settings::dynalinkServiceCredential('pass')
             );
             return $tokens['access_token'];
         });

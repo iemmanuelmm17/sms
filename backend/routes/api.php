@@ -49,6 +49,7 @@ Route::post('/tenant/login', [AuthController::class, 'tenantLogin']);
 Route::post('/webhooks/dynalink', [WebhookController::class, 'dynalink']); // server-to-server
 Route::get('/branding', [BrandingController::class, 'show']);
 Route::get('/branding/logo', [BrandingController::class, 'logo']);
+Route::get('/realtime', [BrandingController::class, 'realtime']);
 
 // Authenticated (dynalink session must exist)
 Route::post('/logout', [AuthController::class, 'logout']);

@@ -1,0 +1,28 @@
+diff a/backend/app/Http/Controllers/WebhookController.php b/backend/app/Http/Controllers/WebhookController.php	(rejected hunks)
+@@ -6,6 +6,7 @@
+ use App\Http\Middleware\EnsureSuperAdminIp;
+ use App\Models\AuditLog;
+ use App\Models\WebhookAllowedIp;
++use App\Services\BroadcastScope;
+ use App\Services\Settings;
+ use Illuminate\Http\Request;
+ use Illuminate\Support\Facades\Cache;
+@@ -126,9 +127,16 @@ public function dynalink(Request $request)
+                 $seen = 'bcast-sent:' . md5(($ev['messagesession-id'] ?? '') . '|' . ($ev['from-number'] ?? '') . '|' . ($ev['text'] ?? ''));
+                 if (Cache::add($seen, 1, now()->addSeconds(30))) {
+                     if ($channelUser && $domain) {
++                        // Echo room = the domain's SHARED room, not the
++                        // terminating extension: every participant of the
++                        // domain (admin + agents on any extension) sits in
++                        // one room, so a message landing on any number in
++                        // the domain is pushed there. (Outbound webhooks and
++                        // push below keep the raw terminating user.)
++                        [$rtDomain, $rtRoom] = BroadcastScope::scopeFor((string) $domain);
+                         broadcast(new IncomingSmsReceived(
+-                            (string) $domain,
+-                            (string) $channelUser,
++                            $rtDomain,
++                            $rtRoom,
+                             $ev
+                         ))->toOthers();
+                     } else {

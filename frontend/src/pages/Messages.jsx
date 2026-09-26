@@ -15,7 +15,7 @@ const fmtAge = (ts) => {
 };
 import { segLabel, smsSegments, MMS_MAX_BYTES, MMS_MAX_LABEL } from '../lib/segments';
 import { toastError, toastSuccess } from '../lib/toast';
-import { Search, Archive, Ban, MoreVertical, X } from 'lucide-react';
+import { Search, Archive, Ban, MoreVertical, X, Hourglass } from 'lucide-react';
 import ConfirmModal from '../components/ConfirmModal';
 import { quietFromSettings, QUIET_DEFAULTS, isQuiet as inQuietHours, quietLabel,
   isQuietSnoozed, snoozeQuietToday } from '../lib/quietHours';
@@ -1376,26 +1376,30 @@ export default function Messages() {
                 {unread && <button className={item} onClick={() => { setCtx(null); markRead(ctx.sid); }}><span>✓✓</span> Mark as Read</button>}
                 {!unread && !lastByUs && <button className={item} onClick={() => { setCtx(null); markUnread(ctx.sid); }}><span>✉️</span> Mark as Unread</button>}
                 <button className={item} onClick={() => { setCtx(null); togglePin(ctx.sid); }}><span>📌</span> {pinned ? 'Unpin' : 'Pin'}</button>
+                {/* Agents: one direct action — no "assign to someone" list;
+                    they can only claim a thread for themselves or unassign.
+                    Admins keep the full "Assign to agent ▸" picker. */}
+                {isAgent ? (() => {
+                  const mine = String((isPortal ? meta[String(ctx.sid)]?.identity_id : meta[String(ctx.sid)]?.agent_id) || '') === String(user?.id || '');
+                  return mine
+                    ? <button className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, null); }}><span>👤</span> Unassign</button>
+                    : <button className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, user.id); }}><span>✅</span> Claim for me</button>;
+                })() : (
                 <div className="relative">
                   <button className={item} onClick={() => setCtxAssign((v) => !v)}><span>👤</span> Assign to agent <span className="ml-auto">▸</span></button>
                   {ctxAssign && (
                     <div className={`absolute top-0 w-52 bg-white border rounded-xl shadow-xl py-1 max-h-56 overflow-y-auto ${mx > window.innerWidth - 480 ? 'right-full mr-1' : 'left-full ml-1'}`}>
                       <button className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, null); }}>👤 Unassigned</button>
-                      {isAgent ? (
-                        String((isPortal ? meta[String(ctx.sid)]?.identity_id : meta[String(ctx.sid)]?.agent_id) || '') !== String(user?.id || '') && (
-                          <button className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, user.id); }}>✅ Claim for me</button>
-                        )
-                      ) : (<>
-                        {assignable.map((a) => (
-                          <button key={a.id} className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, a.id); }}>
-                            <span className="w-3 h-3 rounded-full inline-block shrink-0" style={{ backgroundColor: a.tag_color }} /> {agentName(a)}
-                          </button>
-                        ))}
-                        {assignable.length === 0 && <div className="px-3 py-2 text-xs text-slate-400">No agents</div>}
-                      </>)}
+                      {assignable.map((a) => (
+                        <button key={a.id} className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, a.id); }}>
+                          <span className="w-3 h-3 rounded-full inline-block shrink-0" style={{ backgroundColor: a.tag_color }} /> {agentName(a)}
+                        </button>
+                      ))}
+                      {assignable.length === 0 && <div className="px-3 py-2 text-xs text-slate-400">No agents</div>}
                     </div>
                   )}
                 </div>
+                )}
                 <div className="border-t my-1" />
                 {/* Hand a thread back to the shared pool: unassign + queue in
                     one step, so it can't sit claimed-but-abandoned. */}
@@ -1614,17 +1618,18 @@ export default function Messages() {
                         </option>
                       ))}
                 </select>
+                {/* Icon-only, like the other header actions (tooltip on hover). */}
                 {activeStatus !== 'queued' ? (
                   <button onClick={() => sendToQueue(String(activeId))}
-                    title="Unassign and move to the pending queue"
-                    className="h-8 px-2.5 rounded-lg border text-xs font-medium hover:bg-slate-50 text-slate-600 shrink-0">
-                    ⏳ <span className="hidden lg:inline">Send to Queue</span>
+                    title="Send to Queue — unassign and move to the pending queue"
+                    className="w-8 h-8 rounded-lg border flex items-center justify-center hover:bg-slate-50 text-slate-600 shrink-0">
+                    <Hourglass size={15} />
                   </button>
                 ) : (
                   <button onClick={() => removeFromQueue(String(activeId))}
-                    title="Clear from the queue without replying"
-                    className="h-8 px-2.5 rounded-lg border border-amber-300 bg-amber-50 text-amber-800 text-xs font-medium hover:bg-amber-100 shrink-0">
-                    ⏳ <span className="hidden lg:inline">In queue — clear</span>
+                    title="In queue — click to clear from the queue without replying"
+                    className="w-8 h-8 rounded-lg border border-amber-300 bg-amber-50 text-amber-700 flex items-center justify-center hover:bg-amber-100 shrink-0">
+                    <Hourglass size={15} />
                   </button>
                 )}
                 <button onClick={() => setChatSearchOpen((v) => !v)}

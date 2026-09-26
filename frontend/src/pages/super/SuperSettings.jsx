@@ -1,9 +1,26 @@
 import { useEffect, useState } from 'react';
+import { Info } from 'lucide-react';
 import { api } from '../../api/client';
 import { useBrand } from '../../context/BrandContext';
 import { toastError, toastSuccess } from '../../lib/toast';
 
 const isLocalUrl = (u) => /^(https?:\/\/)(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(u || '');
+
+/**
+ * Info tooltip next to a settings label — hover (or keyboard focus) to read
+ * what the field does and why it exists. Plain CSS, no JS state.
+ */
+function Tip({ text }) {
+  return (
+    <span className="relative inline-flex group/tip align-middle">
+      <Info size={12} className="text-slate-400 cursor-help ml-1" tabIndex={0} aria-label="More info" />
+      <span role="tooltip"
+        className="pointer-events-none absolute left-0 bottom-full mb-1.5 w-72 max-w-[75vw] bg-slate-900 text-white text-[11px] leading-snug rounded-lg px-3 py-2 opacity-0 group-hover/tip:opacity-100 group-focus-within/tip:opacity-100 transition-opacity duration-100 z-30 shadow-xl">
+        {text}
+      </span>
+    </span>
+  );
+}
 
 const badge = (source) => {
   const map = {
@@ -31,7 +48,28 @@ export default function SuperSettings() {
   const [servers, setServers] = useState('');
   const [savingServers, setSavingServers] = useState(false);
   const [rateLimit, setRateLimit] = useState(0);
+  // Realtime broadcast (Reverb) — DB override → .env.
+  const [bcHost, setBcHost] = useState('');
+  const [bcPort, setBcPort] = useState('');
+  const [bcScheme, setBcScheme] = useState('http');
+  const [bcKey, setBcKey] = useState('');
+  const [savingBc, setSavingBc] = useState(false);
+  // Dynalink service account — DB override → .env.
+  const [svcUser, setSvcUser] = useState('');
+  const [svcPass, setSvcPass] = useState('');
+  const [savingSvc, setSavingSvc] = useState(false);
   const { refresh: refreshBrand } = useBrand();
+
+  const applyBroadcast = (s) => {
+    setBcHost(s?.broadcast?.host?.override ?? '');
+    setBcPort(String(s?.broadcast?.port?.override ?? ''));
+    setBcScheme(s?.broadcast?.scheme?.value || 'http');
+    setBcKey(s?.broadcast?.app_key?.override ?? '');
+  };
+  const applyService = (s) => {
+    setSvcUser(s?.dynalink_service?.user?.override ?? '');
+    setSvcPass('');
+  };
 
   const load = async () => {
     setLoading(true);
@@ -46,6 +84,8 @@ export default function SuperSettings() {
       setRateLimit(Number(s?.api_servers?.rate_per_sec ?? 0));
       setAppName(s?.branding?.app_name || '');
       setLogoFile(null); setLogoURL('');
+      applyBroadcast(s);
+      applyService(s);
     } catch (e) { toastError(e?.response?.data?.message || 'Failed to load settings.'); }
     finally { setLoading(false); }
   };
@@ -78,6 +118,49 @@ export default function SuperSettings() {
       toastSuccess('Secret override cleared.');
     } catch (ex) { toastError(ex?.response?.data?.message || 'Failed.'); }
     finally { setSaving(false); }
+  };
+
+  const saveBroadcast = async () => {
+    setSavingBc(true);
+    try {
+      // Blank host/port/key clears that DB override (falls back to .env).
+      const payload = {
+        reverb_host: bcHost.trim(),
+        reverb_port: bcPort.trim() === '' ? null : Number(bcPort),
+        reverb_scheme: bcScheme,
+        reverb_app_key: bcKey.trim(),
+      };
+      const s = await api.superSettingsUpdate(payload);
+      setSettings(s);
+      applyBroadcast(s);
+      toastSuccess('Realtime broadcast settings saved — live for new connections.');
+    } catch (ex) { toastError(ex?.response?.data?.message || 'Save failed.'); }
+    finally { setSavingBc(false); }
+  };
+
+  const saveService = async () => {
+    setSavingSvc(true);
+    try {
+      // Blank username clears the override; blank password KEEPS the stored one.
+      const payload = { dynalink_service_user: svcUser.trim() };
+      if (svcPass) payload.dynalink_service_pass = svcPass;
+      const s = await api.superSettingsUpdate(payload);
+      setSettings(s);
+      applyService(s);
+      toastSuccess('Service account saved.');
+    } catch (ex) { toastError(ex?.response?.data?.message || 'Save failed.'); }
+    finally { setSavingSvc(false); }
+  };
+
+  const revertServicePass = async () => {
+    if (!window.confirm('Clear the stored service password and fall back to .env?')) return;
+    setSavingSvc(true);
+    try {
+      const s = await api.superSettingsUpdate({ dynalink_service_pass: '' });
+      setSettings(s);
+      toastSuccess('Password override cleared.');
+    } catch (ex) { toastError(ex?.response?.data?.message || 'Failed.'); }
+    finally { setSavingSvc(false); }
   };
 
   const setLegacy = async (on, mins) => {
@@ -202,6 +285,124 @@ export default function SuperSettings() {
           </button>
         </div>
       </form>
+
+      <div className="bg-white border rounded-xl p-5 max-w-xl mt-4">
+        <h2 className="text-sm font-bold text-slate-800">Realtime broadcast</h2>
+        <p className="text-xs text-slate-400 mb-4">
+          Where every browser connects (WebSocket) for live updates — new SMS, agent
+          assignments, queue moves. Precedence: value saved here → server .env file.
+          Applies immediately to new connections; nothing to redeploy.
+        </p>
+        <div className="space-y-4">
+          <div>
+            <label className="text-xs font-medium text-slate-600 flex items-center">
+              Broadcast server address
+              {badge(settings?.broadcast?.host?.source)}
+              <Tip text="IP address or hostname of the realtime server (Laravel Reverb). This is where all browsers open their WebSocket to receive live updates. Change it when the realtime server moves to another machine — e.g. to a public IP when agents connect from outside your network. Leave blank to use the value from the server's .env file." />
+            </label>
+            <input value={bcHost} onChange={(e) => setBcHost(e.target.value)} placeholder="e.g. 203.0.113.10 or realtime.example.com"
+              className={input + ' mt-1'} />
+            {bcHost.trim() && /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(bcHost) && (
+              <p className="text-[11px] text-amber-600 mt-1">
+                ⚠ Heads-up: this looks like a local address — agents on other machines won't be able to reach it.
+              </p>
+            )}
+            <p className="text-[11px] text-slate-400 mt-1">
+              Effective: <code>{settings?.broadcast?.host?.value || '—'}</code>
+            </p>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 flex items-center">
+              Broadcast port
+              {badge(settings?.broadcast?.port?.source)}
+              <Tip text="The TCP port the realtime server listens on. The default is 8080 (what 'php artisan reverb:start' uses out of the box). If the server runs behind a reverse proxy on 443, put 443 here and enable the secure connection below. Leave blank to use the value from the server's .env file." />
+            </label>
+            <input value={bcPort} onChange={(e) => setBcPort(e.target.value.replace(/\D/g, ''))} placeholder="e.g. 8080"
+              inputMode="numeric" maxLength={5} className={input + ' mt-1'} />
+            <p className="text-[11px] text-slate-400 mt-1">
+              Effective: <code>{settings?.broadcast?.port?.value || '—'}</code>
+            </p>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 flex items-center">
+              Secure connection (WSS)
+              <Tip text="Turn ON when the app is served over HTTPS — modern browsers only allow secure WebSockets (wss://) from secure pages. When OFF the connection uses plain ws://, which is fine for local testing over http. It must match how the realtime server is actually running." />
+            </label>
+            <div className="flex gap-1.5 mt-1.5">
+              <button type="button" onClick={() => setBcScheme('https')}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-lg border ${bcScheme === 'https' ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'}`}>
+                🔒 WSS (secure)
+              </button>
+              <button type="button" onClick={() => setBcScheme('http')}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-lg border ${bcScheme === 'http' ? 'bg-slate-700 border-slate-700 text-white' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'}`}>
+                WS (plain)
+              </button>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1">Effective: <code>{bcScheme === 'https' ? 'wss://' : 'ws://'}</code></p>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 flex items-center">
+              Realtime app key
+              {badge(settings?.broadcast?.app_key?.source)}
+              <Tip text="The shared key that lets browsers and the backend join the realtime server. It's a public client key (it's meant to ship to browsers). It must match the key the Reverb server was started with (REVERB_APP_KEY in the server's .env) — the running Reverb process reads its own .env, so changing the key there requires restarting 'php artisan reverb:start'. Leave blank to use the value from the server's .env file." />
+            </label>
+            <input value={bcKey} onChange={(e) => setBcKey(e.target.value)} placeholder="leave blank to use .env"
+              className={input + ' mt-1'} />
+            <p className="text-[11px] text-slate-400 mt-1">
+              Effective: <code>{settings?.broadcast?.app_key?.value ? (settings.broadcast.app_key.value.slice(0, 6) + '…') : '—'}</code>
+            </p>
+          </div>
+        </div>
+        <div className="flex justify-end mt-5">
+          <button disabled={savingBc}
+            className="text-sm bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg px-4 py-2 font-semibold">
+            {savingBc ? 'Saving…' : 'Save broadcast settings'}
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-white border rounded-xl p-5 max-w-xl mt-4">
+        <h2 className="text-sm font-bold text-slate-800">Dynalink service account</h2>
+        <p className="text-xs text-slate-400 mb-4">
+          Shared fallback login the backend uses to send and read messages for agents.
+          Precedence: value saved here → server .env file.
+        </p>
+        <div className="space-y-4">
+          <div>
+            <label className="text-xs font-medium text-slate-600 flex items-center">
+              Service username
+              {badge(settings?.dynalink_service?.user?.source)}
+              <Tip text="The Dynalink login the backend sends and reads messages under when an agent signs in with the portal password (agents don't have Dynalink passwords of their own). Every agent's outbound SMS goes out through this account. Leave blank to use the DYNALINK_SERVICE_USER value from the server's .env file." />
+            </label>
+            <input value={svcUser} onChange={(e) => setSvcUser(e.target.value)} placeholder="leave blank to use .env"
+              className={input + ' mt-1'} />
+            <p className="text-[11px] text-slate-400 mt-1">
+              Effective: <code>{settings?.dynalink_service?.user?.value || '—'}</code>
+            </p>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 flex items-center">
+              Service password
+              {badge(settings?.dynalink_service?.pass?.source)}
+              <Tip text="Password for the service username above. It is stored on the server and never shown again — that's why this box is always blank on load. Leaving it blank keeps the currently stored password. Use 'Clear override' to fall back to the DYNALINK_SERVICE_PASS value in the server's .env file." />
+            </label>
+            <input type="password" value={svcPass} onChange={(e) => setSvcPass(e.target.value)}
+              placeholder={settings?.dynalink_service?.pass?.set ? '••••••••  (stored — leave blank to keep)' : 'not set'}
+              className={input + ' mt-1'} />
+            {settings?.dynalink_service?.pass?.source === 'database' && (
+              <button type="button" onClick={revertServicePass}
+                className="text-[11px] text-red-600 hover:underline mt-1.5">Clear DB override (fall back to .env)</button>
+            )}
+          </div>
+        </div>
+        <div className="flex justify-end mt-5">
+          <button disabled={savingSvc}
+            className="text-sm bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg px-4 py-2 font-semibold">
+            {savingSvc ? 'Saving…' : 'Save service account'}
+          </button>
+        </div>
+      </div>
+
       <div className="bg-white border rounded-xl p-5 max-w-xl mt-4">
         <h2 className="text-sm font-bold text-slate-800">Branding</h2>
         <p className="text-xs text-slate-400 mb-4">App name and logo on the login screens, app header, and browser tab. Empty name falls back to the default.</p>
