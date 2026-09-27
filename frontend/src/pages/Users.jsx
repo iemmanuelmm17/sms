@@ -99,6 +99,8 @@ export default function Users() {
       setLoading(false);
     }
   };
+  
+  
   const { lastSync } = useSocket();
   useEffect(() => { if (isAdmin) load(); else setLoading(false); }, [isAdmin]);
   useEffect(() => {

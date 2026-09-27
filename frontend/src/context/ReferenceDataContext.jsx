@@ -3,22 +3,6 @@ import { api } from '../api/client';
 import { useAuth } from './AuthContext';
 import { useSocket } from './SocketContext';
 
-/**
- * Reference data that outlives route changes.
- *
- * Messages is a route component, so navigating away unmounted it and threw
- * away everything it had loaded; coming back refetched all of it. Only the
- * session list is genuinely per-visit — contacts, numbers, templates, the
- * agent directory, company settings and so on are identical to what was just
- * discarded.
- *
- * This provider sits ABOVE the router, so the data survives navigation. It
- * loads once per sign-in and refreshes on the socket events that can actually
- * invalidate it, rather than on every mount.
- *
- * Deliberately excludes message sessions: a stale inbox is worse than a slow
- * one, so those stay owned by Messages with its own stale-while-revalidate.
- */
 const Ctx = createContext(null);
 
 const EMPTY = {
@@ -37,7 +21,6 @@ export function ReferenceDataProvider({ children }) {
   const isAgent = user?.role === 'agent';
   const set = useCallback((patch) => setData((d) => ({ ...d, ...patch })), []);
 
-  /** Each loader is independent: one slow or failing call cannot block the rest. */
   const loaders = useCallback(() => ({
     contacts: () => api.contacts().then((v) => set({ contacts: Array.isArray(v) ? v : [] })),
     templates: () => api.templates().then((v) => set({ templates: Array.isArray(v) ? v : [] })),
@@ -52,7 +35,7 @@ export function ReferenceDataProvider({ children }) {
     optStates: () => api.optEvents().then((rows) => {
       const m = {};
       (rows || []).forEach((r) => {
-        const d = String(r.phone_number ?? '').replace(/\\D/g, '');
+        const d = String(r.phone_number ?? '').replace(/\D/g, '');
         if (d) m[d] = r.direction;
       });
       set({ optStates: m });
@@ -63,7 +46,6 @@ export function ReferenceDataProvider({ children }) {
     subscriptions: () => api.subscriptions().then((v) => set({ subscriptions: Array.isArray(v) ? v : (v?.subscriptions || v || []) })),
   }), [isAgent, set]);
 
-  /** Refresh one slice by name; never throws. */
   const refresh = useCallback(async (...keys) => {
     const all = loaders();
     await Promise.all(keys.map((k) => (all[k] ? all[k]().catch(() => {}) : Promise.resolve())));
@@ -73,7 +55,6 @@ export function ReferenceDataProvider({ children }) {
     await refresh(...Object.keys(loaders()));
   }, [refresh, loaders]);
 
-  // Load once per signed-in user. Re-running on every mount is the bug.
   useEffect(() => {
     if (!user) { setData(EMPTY); setReady(false); loadedFor.current = null; return; }
     const key = `${user.role}:${user.id ?? user.user ?? ''}`;
@@ -83,35 +64,29 @@ export function ReferenceDataProvider({ children }) {
     refreshAll().finally(() => setReady(true));
   }, [user, refreshAll]);
 
-  // Targeted invalidation — only the slice the event can affect.
-  // Covers every DataChanged resource the backend emits so users on the same
-  // domain see each other's mutations instantly without a manual refresh.
   useEffect(() => {
     if (!user || !lastSync?.resource) return;
     const map = {
-      agents: ['agents'],
+      agents: ['agents', 'numbers'],
       contacts: ['contacts'],
       groups: ['groups'],
       companies: ['companies'],
       templates: ['templates'],
       scheduled: ['scheduled'],
       'auto-replies': ['autoReplies'],
-      'email-sms-senders': ['emailSenders', 'settings'],
+      'email-sms-senders': ['emailSenders', 'settings', 'numbers'],
       subscriptions: ['subscriptions'],
       'company-settings': ['settings', 'numbers', 'emailSenders'],
       numbers: ['numbers', 'settings'],
       optouts: ['optOuts', 'optStates'],
       'opt-events': ['optStates', 'optOuts'],
       'convo-meta': ['meta'],
-      // sessions are owned by Messages.jsx itself, but we refresh meta
-      // (queue status lives there) so the shared queue badge updates.
-      sessions: ['meta'],
+      sessions: ['meta', 'numbers'],
     };
     const keys = map[lastSync.resource];
     if (keys && keys.length) refresh(...keys);
   }, [lastSync, user, refresh]);
 
-  // Same-tab nudges from components that mutate these directly.
   useEffect(() => {
     const onContacts = () => refresh('contacts');
     const onCompanies = () => refresh('companies', 'groups');
@@ -148,7 +123,6 @@ export function ReferenceDataProvider({ children }) {
   );
 }
 
-/** Null-safe: pages rendered outside the provider still work. */
 export function useReferenceData() {
   return useContext(Ctx) || { ...EMPTY, ready: false, refresh: async () => {}, refreshAll: async () => {}, setLocal: () => {} };
 }

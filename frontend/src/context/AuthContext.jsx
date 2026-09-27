@@ -12,6 +12,16 @@ export function AuthProvider({ children }) {
     api.me().then(({ user }) => setUser(user)).catch(() => setUser(null)).finally(() => setLoading(false));
   }, []);
 
+  const refreshUser = async () => {
+    try {
+      const { user: fresh } = await api.me();
+      if (fresh) setUser(fresh);
+      return fresh;
+    } catch {
+      return null;
+    }
+  };
+
   // mode: 'admin' (tenant login) | 'agent' (local password) | 'legacy' (break-glass Dynalink).
   const login = async (username, password, mode = 'admin') => {
     const { user } = mode === 'agent'
@@ -33,5 +43,5 @@ export function AuthProvider({ children }) {
     return () => clearInterval(t);
   }, [user?.role]);
 
-  return <AuthCtx.Provider value={{ user, setUser, loading, login, logout }}>{children}</AuthCtx.Provider>;
+  return <AuthCtx.Provider value={{ user, setUser, loading, login, logout, refreshUser }}>{children}</AuthCtx.Provider>;
 }
