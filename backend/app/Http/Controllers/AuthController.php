@@ -186,7 +186,7 @@ class AuthController extends Controller
             'username' => $admin->username . '@' . ($admin->tenant->name ?? ''),
             'user' => $admin->tenant->dynalink_user ?? null,
             'domain' => $admin->tenant->domain ?? null,
-            'scope_user' => $admin->tenant->dynalink_user ?? null, // shared realtime channel scope
+            'scope_user' => BroadcastScope::ROOM, // shared realtime room for the domain
             'display_name' => $admin->displayName(),
             'first_name' => $admin->first_name, 'last_name' => $admin->last_name,
             'tenant_id' => $admin->tenant_id,
@@ -392,13 +392,22 @@ class AuthController extends Controller
     protected function agentIdentityPayload(\App\Models\AgentIdentity $i, ?Tenant $tenant = null): array
     {
         $tenant = $tenant ?: Tenant::where('domain', $i->domain)->first();
-        $visible = [];    // sendable: own + granted shared
-        $readable = [];   // readable: own + every shared number
+        $visible = [];    // sendable: own + reply + create grants
+        $readable = [];   // viewable: own + view grants
+        $replyable = [];  // own + reply grants (answer existing conversations)
+        $creatable = [];  // own + create grants (start new conversations)
+        $own = [];        // numbers the portal provisions to THIS extension
         try {
             $access = app(\App\Services\AgentAccess::class);
             $tok = $tenant?->accessToken();
-            $visible  = $access->sendableNumbers($i->domain, $i->ext, $tok);
-            $readable = $access->readableNumbers($i->domain, $i->ext, $tok);
+            $owners = [];
+            try { $owners = app(\App\Services\DynalinkService::class)->numberOwners((string) $tok, $i->domain); }
+            catch (\Throwable $e) { /* provider hiccups: own list stays empty */ }
+            $visible   = $access->sendableNumbers($i->domain, $i->ext, $tok, $owners);
+            $readable  = $access->readableNumbers($i->domain, $i->ext, $tok, $owners);
+            $replyable = $access->replyableNumbers($i->domain, $i->ext, $tok, $owners);
+            $creatable = $access->creatableNumbers($i->domain, $i->ext, $tok, $owners);
+            $own = $access->ownNumbers($owners, $i->ext);
         } catch (\Throwable $e) {
             Log::warning('agent payload: number sets failed', ['ext' => $i->ext, 'error' => $e->getMessage()]);
         }
@@ -407,20 +416,26 @@ class AuthController extends Controller
             'username' => $i->ext . '@' . $i->domain,
             'user' => $i->ext, 'domain' => $i->domain,
             'ext' => $i->ext,
-            // Realtime channel scope: the tenant's SHARED anchor user, not
-            // this extension. Every participant in the domain (admin + all
-            // agents) listens on sms.{domain}.{scope_user}; broadcasting to
-            // the extension user is how other agents went deaf.
-            'scope_user' => $tenant?->dynalink_user ?? $i->ext,
+            // Realtime channel: the domain's SHARED room, not this extension.
+            // Every participant in the domain (admin + all agents, each on a
+            // different user extension) listens on the same room.
+            'scope_user' => BroadcastScope::ROOM,
             'display_name' => $i->displayName(),
             'first_name' => $i->first_name,
             'last_name' => $i->last_name,
             'email' => $i->email,
             'color' => $i->tag_color, 'status' => $i->status,
             // assigned_numbers keeps its name for compatibility, but now means
-            // "may send from". readable_numbers is the wider view-only set.
+            // "may send from" (reply ∪ create). The finer sets:
+            //   own_numbers        — portal-provisioned to this extension
+            //   readable_numbers   — may see the inbox (view)
+            //   replyable_numbers  — may answer existing conversations
+            //   creatable_numbers  — may start new conversations
             'assigned_numbers' => $visible,
             'readable_numbers' => $readable,
+            'replyable_numbers' => $replyable,
+            'creatable_numbers' => $creatable,
+            'own_numbers' => $own,
             'main_number' => $tenant?->main_number,
             'onboarding' => \App\Services\OnboardingService::state($i),
             'portal_auth' => true,   // no local password: hide change-password UI
@@ -433,9 +448,8 @@ class AuthController extends Controller
             'role' => 'agent', 'id' => $agent->id,
             'username' => $agent->username . '@' . $agent->domain,
             'user' => $agent->username, 'domain' => $agent->domain,
-            // The realtime channel scope: owner's Dynalink user, or the
-            // tenant's shared anchor on tenant-managed domains.
-            'scope_user' => BroadcastScope::scopeFor($agent->domain, $agent->user)[1],
+            // Realtime channel: the domain's shared room (see BroadcastScope).
+            'scope_user' => BroadcastScope::ROOM,
             'display_name' => trim($agent->first_name . ' ' . $agent->last_name),
             'first_name' => $agent->first_name, 'last_name' => $agent->last_name,
             'color' => $agent->tag_color, 'status' => $agent->status,
@@ -636,8 +650,8 @@ class AuthController extends Controller
             'username'     => ($s['user'] ?? '') . '@' . ($s['domain'] ?? ''),
             'user'         => $s['user'] ?? null,
             'domain'       => $s['domain'] ?? null,
-            // Shared realtime channel scope (tenant anchor on tenant domains).
-            'scope_user'   => BroadcastScope::scopeFor((string) ($s['domain'] ?? ''), (string) ($s['user'] ?? ''))[1],
+            // Shared realtime room for the domain (see BroadcastScope).
+            'scope_user'   => BroadcastScope::ROOM,
             'display_name' => $s['display_name'] ?? null,
             'email'        => $s['email'] ?? null,
             'scope'        => $s['scope'] ?? null,

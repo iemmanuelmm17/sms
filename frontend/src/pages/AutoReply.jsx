@@ -99,7 +99,8 @@ export default function AutoReply() {
   const [mainNum, setMainNum] = useState('');
   // Numbers an agent may create rules for — everything they can send from,
   // including the main line if it is theirs.
-  const agentRuleNums = (user?.assigned_numbers || []).map((v) => digits(v)).filter(Boolean);
+  // Auto-replies answer INCOMING messages → own + reply grants.
+  const agentRuleNums = ((user?.replyable_numbers || user?.assigned_numbers) || []).map((v) => digits(v)).filter(Boolean);
   // Shared lines they can see but not send from: listed, but read-only.
   const agentViewNums = (user?.readable_numbers || []).map((v) => digits(v))
     .filter((d) => d && !agentRuleNums.includes(d));

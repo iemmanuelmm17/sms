@@ -261,7 +261,10 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
   // assigned_numbers = everything the agent may SEND from, which now includes
   // granted shared lines. Those are owned by another extension, so they are
   // absent from api.smsNumbers() and need a synthetic option.
-  const allowed = isAgent ? (user?.assigned_numbers || []).map((v) => String(v).replace(/\D/g, '')) : [];
+  // Scheduled sends START new conversations → own + CREATE grants
+  // (assigned_numbers, the reply ∪ create union, is the fallback).
+  const allowed = isAgent
+    ? ((user?.creatable_numbers || user?.assigned_numbers || [])).map((v) => String(v).replace(/\D/g, '')) : [];
   const sendOpts = (() => {
     if (!isAgent) return numbers;
     const mine = numbers.filter((n) => allowed.includes(String(n.number).replace(/\D/g, '')));
@@ -379,7 +382,7 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
       if (a?.message) setFooterText(a.message);
     }).catch(() => {});
   }, []);
-  const complianceOn = (estCount >= 5 || company !== '') && tcpaScript;
+  const complianceOn = tcpaScript; // footer applies to every scheduled send when checked
   const isMms = !!attach;
   const segs = (t) => (isMms ? 1 : smsSegments(t)); // shared estimator (GSM-7 + unicode)
   const wrappedPreview = `${companyName ? companyName + ': ' : ''}${message}\n${footerText}`;
@@ -742,7 +745,7 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
             <input type="checkbox" checked={tcpaScript} onChange={(e) => setTcpaScript(e.target.checked)} className="w-4 h-4 mt-0.5 accent-brand-600" />
             <span>
               <span className="font-medium text-slate-700">Add TCPA Script Footer</span>
-              <span className="block text-[11px] text-slate-400">Applies company name + opt-out line for bulk sends (5+ recipients).</span>
+              <span className="block text-[11px] text-slate-400">Applies company name + opt-out line to the message.</span>
             </span>
           </label>
           <label className="flex items-start gap-2 text-xs text-slate-600 cursor-pointer">
@@ -770,7 +773,7 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
         )}
         {complianceOn && (
           <div className="text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded-lg p-2.5 mt-2 dark:bg-amber-950/50 dark:border-amber-700/60 dark:text-amber-100">
-            🛡️ TCPA bulk wrap applies (5+ recipients): <strong>{wrappedPreview.length} chars • {segs(wrappedPreview)} segment(s){isMms ? ' • MMS' : ''}</strong> incl. company name + opt-out footer.
+            🛡️ TCPA wrap applies: <strong>{wrappedPreview.length} chars • {segs(wrappedPreview)} segment(s){isMms ? ' • MMS' : ''}</strong> incl. company name + opt-out footer.
             <div className="mt-1 text-amber-700 dark:text-amber-200/90 break-words whitespace-pre-wrap">“{preview}”</div>
           </div>
         )}
@@ -994,7 +997,7 @@ function ScheduleEditForm({ item, onClose, onSaved }) {
         <input value={name} onChange={(e) => setName(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mt-1 mb-2" />
         <label className="flex items-start gap-2 text-xs text-slate-600 cursor-pointer mb-2">
           <input type="checkbox" checked={tcpaScript} onChange={(e) => setTcpaScript(e.target.checked)} className="w-4 h-4 mt-0.5 accent-brand-600" />
-          <span>Add TCPA script <span className="text-slate-400">(company name + opt-out line on 5+ recipients)</span></span>
+          <span>Add TCPA script <span className="text-slate-400">(company name + opt-out line)</span></span>
         </label>
         <label className="flex items-start gap-2 text-xs text-slate-600 mb-2">
           <input type="checkbox" checked={includeOptin} onChange={(e) => setIncludeOptin(e.target.checked)}

@@ -70,7 +70,9 @@ class AutoReplyController extends Controller
             } catch (\Throwable $e) {}
             $allowed = [];
             try {
-                $allowed = app(\App\Services\AgentAccess::class)->sendableNumbers(
+                // Auto-replies answer INCOMING messages on the number's inbox
+                // — the reply permission, not the create-new one.
+                $allowed = app(\App\Services\AgentAccess::class)->replyableNumbers(
                     $domain, $me->ext, $this->dtoken($request));
             } catch (\Throwable $e) { $allowed = []; }   // fail closed
             return [$me, $creators, $main, $allowed];

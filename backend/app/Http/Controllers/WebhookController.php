@@ -127,16 +127,16 @@ class WebhookController extends Controller
                 $seen = 'bcast-sent:' . md5(($ev['messagesession-id'] ?? '') . '|' . ($ev['from-number'] ?? '') . '|' . ($ev['text'] ?? ''));
                 if (Cache::add($seen, 1, now()->addSeconds(30))) {
                     if ($channelUser && $domain) {
-                        // Echo channel = the domain's SHARED scope, not the
-                        // terminating extension: on tenant domains every
-                        // participant (admin + agents) sits on one channel,
-                        // so a message landing on any number in the domain
-                        // must be pushed there. (Outbound webhooks and push
-                        // below keep the raw terminating user.)
-                        [$rtDomain, $rtUser] = BroadcastScope::scopeFor((string) $domain, (string) $channelUser);
+                        // Echo room = the domain's SHARED room, not the
+                        // terminating extension: every participant of the
+                        // domain (admin + agents on any extension) sits in
+                        // one room, so a message landing on any number in
+                        // the domain is pushed there. (Outbound webhooks and
+                        // push below keep the raw terminating user.)
+                        [$rtDomain, $rtRoom] = BroadcastScope::scopeFor((string) $domain);
                         broadcast(new IncomingSmsReceived(
                             $rtDomain,
-                            $rtUser,
+                            $rtRoom,
                             $ev
                         ))->toOthers();
                     } else {

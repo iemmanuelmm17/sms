@@ -197,7 +197,12 @@ export default function Layout({ children }) {
     // Sharing a number on the Numbers page must show up here at once, with no
     // page reload. Covers this tab (custom event) and other tabs/users (socket).
     window.addEventListener('shared-numbers-changed', pull);
-    return () => { dead = true; window.removeEventListener('shared-numbers-changed', pull); };
+    // Permission grants (view/reply/create) live per-user, not in company
+    // settings — an agent's visible set only refreshes via the fresh /me
+    // payload after an admin changes them.
+    const pullMe = () => api.me().then((r) => { if (!dead && r?.user) setUser(r.user); }).catch(() => {});
+    window.addEventListener('shared-numbers-changed', pullMe);
+    return () => { dead = true; window.removeEventListener('shared-numbers-changed', pull); window.removeEventListener('shared-numbers-changed', pullMe); };
   }, [user?.role]);
 
   // Cross-tab / cross-user: the server broadcasts a settings change.
@@ -213,28 +218,34 @@ export default function Layout({ children }) {
   }, [lastSync]);
 
   const myNumbers = (() => {
+    // Portal agents: the payload carries the numbers the portal provisions to
+    // THIS extension — those are genuinely "theirs".
+    if (user?.portal_auth) {
+      return (user?.own_numbers || []).map((x) => String(x).replace(/\D/g, '')).filter(Boolean);
+    }
     const self = agents.find((a) => String(a.id) === String(user?.id));
     const src = (self?.numbers?.length ? self.numbers : (user?.assigned_numbers || []));
     const all = [...new Set(src.map((x) => String(x).replace(/\D/g, '')))].filter(Boolean);
-    // Portal agents: assigned_numbers is the full visible set from the server,
-    // and the tenant main number can legitimately be one of theirs.
-    if (user?.portal_auth) return all;
     return all.filter((d) => d !== mainNum);
   })();
 
   // Shared Inboxes excludes anything already shown under "Mine" — otherwise
   // a number that is both owned and shared appears twice in the sidebar.
-  const sharedOnlyList = sharedList.filter((d) => !myNumbers.includes(d));
+  // For portal agents this is exactly their VIEW-granted shared numbers
+  // (readable = own ∪ view grants, so subtract own below).
+  const sharedOnlyList = user?.portal_auth
+    ? (user?.readable_numbers || []).map((x) => String(x).replace(/\D/g, ''))
+        .filter((d) => d && !myNumbers.includes(d))
+    : sharedList.filter((d) => !myNumbers.includes(d));
 
   /**
-   * Shared lines an agent can READ but is not granted to SEND from.
-   * Sharing alone makes an inbox viewable; a grant is what allows replying,
-   * so these are listed under Inbox purely for viewing.
+   * Shared lines an agent can READ but has no send permission on at all
+   * (no reply, no create) — listed in the sidebar purely for viewing.
    */
   const viewOnlyShared = (user?.role === 'agent')
     ? (user?.readable_numbers || [])
         .map((x) => digits(x))
-        .filter((d) => d && !myNumbers.includes(d))
+        .filter((d) => d && !(user?.assigned_numbers || []).map((x) => digits(x)).includes(d))
     : [];
 
   const fmt99 = (c) => (c > 99 ? '99+' : c);

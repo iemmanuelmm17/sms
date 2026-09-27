@@ -38,13 +38,11 @@ class DataChanged implements ShouldBroadcastNow
     public static function send(string $domain, string $user, string $resource, string $action, mixed $id = null, array $payload = []): void
     {
         try {
-            // Callers pass the ACTOR's scope; the channel must be the
-            // domain's SHARED scope, or other participants (admin vs agents)
-            // never hear each other. scopeFor collapses extension users to
-            // the tenant's Dynalink user on tenant-managed domains and is a
-            // no-op elsewhere.
-            [$domain, $user] = BroadcastScope::scopeFor($domain, $user);
-            broadcast(new self($domain, $user, $resource, $action, $id, $payload));
+            // The channel is the domain's SHARED room, never the actor's own
+            // user extension — participants on different extensions (admin
+            // vs agents) must all hear every mutation.
+            [$domain, $room] = BroadcastScope::scopeFor($domain);
+            broadcast(new self($domain, $room, $resource, $action, $id, $payload));
         } catch (\Throwable $e) {
             Log::warning('Sync broadcast failed: ' . $e->getMessage());
         }

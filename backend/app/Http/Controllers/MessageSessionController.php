@@ -400,7 +400,7 @@ class MessageSessionController extends Controller
             'size'         => 'sometimes',
         ]);
 
-        $this->assertAgentNumber($request, (string) ($data['from-number'] ?? ''));
+        $this->assertAgentNumber($request, (string) ($data['from-number'] ?? ''), 'reply'); // in-session reply
         $data['message'] = app(\App\Services\CompanySettingsService::class)->resolve($s['domain'], $data['message'], (string) ($this->actor($request)['display_name'] ?? ''));
         $data['message'] = $this->appendAgentSignature($s, (string) ($data['from-number'] ?? ''), $data['message']);
 

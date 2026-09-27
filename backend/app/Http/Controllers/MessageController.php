@@ -66,7 +66,7 @@ class MessageController extends Controller
         ]);
 
         $this->assertMediaSize($data['data'] ?? null);
-        $this->assertAgentNumber($request, (string) ($data['from-number'] ?? ''));
+        $this->assertAgentNumber($request, (string) ($data['from-number'] ?? ''), 'new'); // new conversation
         $data['message'] = app(\App\Services\CompanySettingsService::class)->resolve($s['domain'], $data['message'], (string) ($this->actor($request)['display_name'] ?? ''));
 
         // TCPA: never send to opted-out numbers.
@@ -125,14 +125,23 @@ class MessageController extends Controller
             'destinations.*' => 'required|string',
             'from-number'  => 'required|string',
             'type'         => 'sometimes|in:sms,mms',
+            'tcpa_script'  => 'sometimes|boolean',
             'data'         => 'sometimes|string',
             'mime-type'    => 'sometimes|string',
             'size'         => 'sometimes|nullable|integer|min:0|max:1048576',
         ]);
 
         $this->assertMediaSize($data['data'] ?? null);
-        $this->assertAgentNumber($request, (string) ($data['from-number'] ?? ''));
+        $this->assertAgentNumber($request, (string) ($data['from-number'] ?? ''), 'new'); // new conversation
         $data['message'] = app(\App\Services\CompanySettingsService::class)->resolve($s['domain'], $data['message'], (string) ($this->actor($request)['display_name'] ?? ''));
+        // TCPA wrap — on whenever the composer's footer toggle is checked
+        // (default on), any recipient count. Same wrap as scheduled sends.
+        if (array_key_exists('tcpa_script', $data) && (bool) $data['tcpa_script']) {
+            $companySvc = app(\App\Services\CompanySettingsService::class);
+            $company = $companySvc->name($s['domain']);
+            $footer = $companySvc->tcpaFooter($s['domain'], $s['user'] ?? null);
+            $data['message'] = ($company !== '' ? $company . ': ' : '') . $data['message'] . "\n" . $footer;
+        }
 
         $dests = array_values(array_unique(array_map(
             fn($d) => preg_replace('/\D/', '', (string) $d),

@@ -178,11 +178,17 @@ function demoIdentities() {
   for (const n of mockSmsNumbers) owners[String(n.number).replace(/\D/g, '')] = String(n.dest ?? '');
   return {
     shared,
-    agents: demo.agentIdentities.map((a) => ({
-      ...a,
-      own_numbers: Object.entries(owners).filter(([, d]) => d === a.ext).map(([n]) => n).sort(),
-      granted_inactive: (a.granted || []).filter((d) => !shared.includes(d)),
-    })),
+    agents: demo.agentIdentities.map((a) => {
+      // Legacy seeded grants predate the fine-grained flags: full access.
+      const detail = { ...(a.grants_detail || {}) };
+      for (const d of a.granted || []) if (!detail[d]) detail[d] = { reply: true, create: true };
+      return {
+        ...a,
+        own_numbers: Object.entries(owners).filter(([, d]) => d === a.ext).map(([n]) => n).sort(),
+        grants_detail: detail,
+        granted_inactive: (a.granted || []).filter((d) => !shared.includes(d)),
+      };
+    }),
   };
 }
 
@@ -971,23 +977,38 @@ export const api = {
     }
     return (await http.post(`/api/agent-identities/${encodeURIComponent(ext)}/unlock`)).data;
   },
-  /** TCPA bulk-send footer (5+ recipients). */
+  /** TCPA footer text (appended whenever the "Add TCPA script" toggle is on). */
   async saveTcpaFooter(text) {
     if (DEMO_MODE) { await delay(120); demo.tcpaFooter = text; saveDemo(demo); return { tcpa_footer: text }; }
     return (await http.put('/api/company-settings', { tcpa_footer: text })).data;
   },
-  async setAgentGrants(ext, numbers) {
+  /**
+   * Replace one user's shared-number grants.
+   * @param {string} ext
+   * @param {Array<{number:string, view?:boolean, reply?:boolean, create?:boolean}>} grants
+   *        view (default true) = see the inbox; reply = answer existing
+   *        conversations; create = start new ones.
+   */
+  async setAgentGrants(ext, grants) {
+    const norm = (grants || []).map((g) => typeof g === 'string'
+      ? { number: g, view: true, reply: true, create: true }
+      : { number: String(g.number || '').replace(/\D/g, ''),
+          view: g.view !== false, reply: !!g.reply, create: !!g.create });
     if (DEMO_MODE) {
       await delay(200);
       const shared = demoShared();
-      const bad = (numbers || []).map((n) => String(n).replace(/\D/g, '')).find((d) => !shared.includes(d));
+      const bad = norm.filter((g) => g.view).map((g) => g.number).find((d) => !shared.includes(d));
       if (bad) throw { response: { data: { message: 'Only shared numbers can be granted. Mark the number shared first.' } } };
+      const detail = {};
+      for (const g of norm) if (g.view) detail[g.number] = { reply: g.reply, create: g.create };
       demo.agentIdentities = (demo.agentIdentities || demoSeedIdentities())
-        .map((a) => (a.ext === ext ? { ...a, granted: [...new Set((numbers || []).map((n) => String(n).replace(/\D/g, '')))] } : a));
+        .map((a) => (a.ext === ext
+          ? { ...a, granted: Object.keys(detail), grants_detail: detail }
+          : a));
       saveDemo(demo);
-      return { ok: true, numbers };
+      return { ok: true, grants: norm };
     }
-    return (await http.put(`/api/agent-identities/${encodeURIComponent(ext)}/grants`, { numbers })).data;
+    return (await http.put(`/api/agent-identities/${encodeURIComponent(ext)}/grants`, { grants: norm })).data;
   },
   async agentDirectory() {
     if (DEMO_MODE) {

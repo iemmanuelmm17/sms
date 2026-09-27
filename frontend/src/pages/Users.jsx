@@ -24,12 +24,40 @@ const STATUS = {
 };
 
 /**
+ * Small accessible info tooltip. Opens on hover AND on keyboard focus, closes
+ * on Escape/blur. Rendered inline (not `fixed`) so it can't be orphaned when a
+ * panel scrolls; `max-w` keeps it inside narrow viewports.
+ */
+function InfoTip({ label, children }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="relative inline-flex align-middle"
+      onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
+      <button type="button" aria-label={label} aria-expanded={open}
+        onFocus={() => setOpen(true)} onBlur={() => setOpen(false)}
+        onClick={(e) => { e.preventDefault(); setOpen((v) => !v); }}
+        onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); }}
+        className="w-4 h-4 shrink-0 rounded-full border border-slate-300 text-slate-400 hover:text-brand-600 hover:border-brand-400 text-[10px] font-bold leading-none flex items-center justify-center cursor-help">
+        i
+      </button>
+      {open && (
+        <span role="tooltip"
+          className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 z-30 w-64 max-w-[70vw] bg-slate-900 text-white text-[11px] font-normal leading-snug rounded-lg shadow-xl p-2.5 whitespace-normal text-left pointer-events-none">
+          {children}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/**
  * Users — the roster of portal-authenticated agents.
  *
  * Deliberately has no "add agent" or password controls: the Dynalink portal
  * owns authentication. Agents appear here automatically on first sign-in.
  * Admins control two things only — the active/disabled kill switch, and which
- * SHARED numbers each extension may read and reply on.
+ * SHARED numbers each extension may view, reply on, and create new messages
+ * from.
  */
 export default function Users() {
   const { user } = useAuth();
@@ -44,7 +72,9 @@ export default function Users() {
   const [err, setErr] = useState('');
   const [q, setQ] = useState('');
   const [open, setOpen] = useState(null);       // ext being edited
-  const [draft, setDraft] = useState([]);       // granted digits, mid-edit
+  // digits -> {view, reply, create} mid-edit. Presence of a digit is the view
+  // grant; reply/create only apply while view is on.
+  const [draft, setDraft] = useState({});
   const [busy, setBusy] = useState('');
 
   const load = async () => {
@@ -94,19 +124,49 @@ export default function Users() {
       (nq && [...(a.own_numbers || []), ...(a.granted || [])].some((d) => d.includes(nq))));
   }, [rows, q]);
 
+  /** Saved state for one user: digits -> {view, reply, create}. */
+  const grantBaseFor = (a) => {
+    const out = {};
+    for (const d of a.granted || []) {
+      const dd = digits(d);
+      if (!dd) continue;
+      const f = a.grants_detail?.[dd] || a.grants_detail?.[String(dd)] || { reply: true, create: true };
+      out[dd] = { view: true, reply: !!f.reply, create: !!f.create };
+    }
+    return out;
+  };
   const startEdit = (a) => {
     setOpen(a.ext);
-    setDraft([...(a.granted || [])].map(digits));
+    setDraft(grantBaseFor(a));
   };
-  const toggleGrant = (d) =>
-    setDraft((p) => (p.includes(d) ? p.filter((x) => x !== d) : [...p, d]));
+  const toggleGrant = (d, field) => setDraft((p) => {
+    const cur = { ...p };
+    if (field === 'view') {
+      // Unchecking view removes the grant entirely (its flags go with it).
+      // Checking it fresh starts with both actions ON (full access), like
+      // grants saved before the split existed.
+      if (cur[d]) delete cur[d];
+      else cur[d] = { view: true, reply: true, create: true };
+    } else if (cur[d]) {
+      cur[d] = { ...cur[d], [field]: !cur[d][field] };
+    }
+    return cur;
+  });
 
   const saveGrants = async (a) => {
     setBusy(`g-${a.ext}`);
     try {
-      await api.setAgentGrants(a.ext, draft);
+      const base = grantBaseFor(a);
+      const entries = Object.keys(draft).filter((d) => draft[d]?.view)
+        .map((d) => ({ number: d, ...draft[d] }));
+      const changed = JSON.stringify(
+        Object.keys(draft).sort().map((k) => [k, draft[k]?.reply, draft[k]?.create]))
+        !== JSON.stringify(
+          Object.keys(base).sort().map((k) => [k, base[k]?.reply, base[k]?.create]));
+      if (changed) await api.setAgentGrants(a.ext, entries);
       toastSuccess(`Updated shared access for ${a.display_name || a.ext}.`);
       setOpen(null);
+      window.dispatchEvent(new CustomEvent('shared-numbers-changed'));
       await load();
     } catch (e) {
       toastError(e?.response?.data?.message || 'Could not save access.');
@@ -251,8 +311,10 @@ export default function Users() {
         const own = a.own_numbers || [];
         const granted = a.granted || [];
         const stale = a.granted_inactive || [];
+        const base = grantBaseFor(a);
         const dirty = isOpen &&
-          JSON.stringify([...draft].sort()) !== JSON.stringify([...granted].sort());
+          JSON.stringify(Object.keys(draft).sort().map((k) => [k, draft[k]?.reply, draft[k]?.create]))
+            !== JSON.stringify(Object.keys(base).sort().map((k) => [k, base[k]?.reply, base[k]?.create]));
 
         return (
           <div key={a.ext} className="bg-white border rounded-xl overflow-hidden">
@@ -353,25 +415,68 @@ export default function Users() {
                   )}
                 </div>
 
-                <p className="text-xs font-semibold text-slate-700">Shared numbers</p>
+                <p className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+                  Shared numbers
+                  <InfoTip label="What do the access options mean?">
+                    <strong>View</strong> — the user sees this inbox in their Messages page and
+                    sidebar. Without it, they see nothing for that number.
+                    <br /><strong>Reply</strong> — they can answer existing conversations in the
+                    inbox, sent from that number itself.
+                    <br /><strong>Create New</strong> — they can start brand-new conversations
+                    from that number (new message, bulk send, scheduled send).
+                    <br />Reply and Create New only apply while View is checked.
+                  </InfoTip>
+                </p>
                 <p className="text-[11px] text-slate-500 mb-1.5">
-                  Tick the shared lines this agent may read and reply on.
+                  Tick View to give this user access to a shared line, then choose what they may do on it.
                   {shared.length === 0 && ' No numbers are marked shared yet — do that on the Numbers page first.'}
                 </p>
-                <div className="border rounded-lg bg-white divide-y max-h-56 overflow-y-auto">
-                  {shared.map((d) => (
-                    <label key={d} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-slate-50">
-                      <input
-                        type="checkbox" className="w-4 h-4 accent-brand-600 shrink-0"
-                        checked={draft.includes(d)} onChange={() => toggleGrant(d)}
-                      />
-                      <span className="min-w-0 truncate">{fmtPhone(d)}</span>
-                      {describe(d) && <span className="text-[11px] text-slate-400 truncate">{describe(d)}</span>}
-                      {own.includes(d) && (
-                        <span className="ml-auto text-[10px] text-slate-400 shrink-0">already theirs</span>
-                      )}
-                    </label>
-                  ))}
+                <div className="border rounded-lg bg-white divide-y max-h-64 overflow-y-auto">
+                  {shared.map((d) => {
+                    const g = draft[d]; // undefined = no access
+                    const view = !!g?.view;
+                    return (
+                      <div key={d} className="px-3 py-2 hover:bg-slate-50">
+                        <label className="flex items-center gap-2 text-sm cursor-pointer">
+                          <input
+                            type="checkbox" className="w-4 h-4 accent-brand-600 shrink-0"
+                            checked={view} onChange={() => toggleGrant(d, 'view')}
+                          />
+                          <span className="min-w-0 truncate">{fmtPhone(d)}</span>
+                          {describe(d) && <span className="text-[11px] text-slate-400 truncate">{describe(d)}</span>}
+                          {own.includes(d) && (
+                            <span className="ml-auto text-[10px] text-slate-400 shrink-0">already theirs</span>
+                          )}
+                          <InfoTip label={`What does View do for ${fmtPhone(d)}?`}>
+                            Checked: this user sees {fmtPhone(d)}'s inbox (read access). Uncheck to
+                            remove all access for this number.
+                          </InfoTip>
+                        </label>
+                        {view && (
+                          <div className="flex items-center gap-4 pl-6 mt-1.5">
+                            <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+                              <input type="checkbox" className="w-3.5 h-3.5 accent-brand-600"
+                                checked={!!g?.reply} onChange={() => toggleGrant(d, 'reply')} />
+                              Reply
+                              <InfoTip label={`What does Reply do for ${fmtPhone(d)}?`}>
+                                This user can reply to conversations in the {fmtPhone(d)} inbox —
+                                answers go out from {fmtPhone(d)} itself.
+                              </InfoTip>
+                            </label>
+                            <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+                              <input type="checkbox" className="w-3.5 h-3.5 accent-brand-600"
+                                checked={!!g?.create} onChange={() => toggleGrant(d, 'create')} />
+                              Create New
+                              <InfoTip label={`What does Create New do for ${fmtPhone(d)}?`}>
+                                This user can start NEW conversations from {fmtPhone(d)} — new
+                                messages, bulk sends and scheduled sends.
+                              </InfoTip>
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                   {shared.length === 0 && (
                     <p className="px-3 py-3 text-[11px] text-slate-400">No shared numbers.</p>
                   )}
@@ -386,7 +491,7 @@ export default function Users() {
                   </button>
                   {dirty && (
                     <>
-                      <button onClick={() => setDraft([...granted])}
+                      <button onClick={() => setDraft(grantBaseFor(a))}
                         className="text-sm text-slate-500 hover:text-slate-700 font-medium px-2 py-2">Discard</button>
                       <span className="text-[11px] text-amber-700">Unsaved changes</span>
                     </>
