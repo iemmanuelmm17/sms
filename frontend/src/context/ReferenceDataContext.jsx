@@ -22,8 +22,9 @@ import { useSocket } from './SocketContext';
 const Ctx = createContext(null);
 
 const EMPTY = {
-  contacts: [], templates: [], agents: [], numbers: [], companies: [],
+  contacts: [], templates: [], agents: [], numbers: [], companies: [], groups: [],
   optOuts: [], optStates: {}, meta: {}, settings: null,
+  scheduled: [], autoReplies: [], emailSenders: [], subscriptions: [],
 };
 
 export function ReferenceDataProvider({ children }) {
@@ -45,16 +46,21 @@ export function ReferenceDataProvider({ children }) {
     numbers: () => (isAgent ? api.smsNumbers() : api.domainSmsNumbers())
       .then((v) => set({ numbers: Array.isArray(v) ? v : (v?.numbers || []) })),
     companies: () => api.companies().then((v) => set({ companies: Array.isArray(v) ? v : [] })),
+    groups: () => api.groups().then((v) => set({ groups: Array.isArray(v) ? v : [] })),
     optOuts: () => api.optOuts().then((v) => set({ optOuts: Array.isArray(v) ? v : [] })),
     settings: () => api.companySettings().then((v) => set({ settings: v || {} })),
     optStates: () => api.optEvents().then((rows) => {
       const m = {};
       (rows || []).forEach((r) => {
-        const d = String(r.phone_number ?? '').replace(/\D/g, '');
+        const d = String(r.phone_number ?? '').replace(/\\D/g, '');
         if (d) m[d] = r.direction;
       });
       set({ optStates: m });
     }),
+    scheduled: () => api.scheduled().then((v) => set({ scheduled: Array.isArray(v) ? v : [] })),
+    autoReplies: () => api.autoReplies().then((v) => set({ autoReplies: Array.isArray(v) ? v : [] })),
+    emailSenders: () => api.emailSmsSenders().then((v) => set({ emailSenders: Array.isArray(v) ? v : [] })),
+    subscriptions: () => api.subscriptions().then((v) => set({ subscriptions: Array.isArray(v) ? v : (v?.subscriptions || v || []) })),
   }), [isAgent, set]);
 
   /** Refresh one slice by name; never throws. */
@@ -78,17 +84,28 @@ export function ReferenceDataProvider({ children }) {
   }, [user, refreshAll]);
 
   // Targeted invalidation — only the slice the event can affect.
+  // Covers every DataChanged resource the backend emits so users on the same
+  // domain see each other's mutations instantly without a manual refresh.
   useEffect(() => {
     if (!user || !lastSync?.resource) return;
     const map = {
       agents: ['agents'],
       contacts: ['contacts'],
-      'auto-replies': [],
+      groups: ['groups'],
+      companies: ['companies'],
       templates: ['templates'],
-      'convo-meta': ['meta'],
-      'company-settings': ['settings', 'numbers'],
+      scheduled: ['scheduled'],
+      'auto-replies': ['autoReplies'],
+      'email-sms-senders': ['emailSenders', 'settings'],
+      subscriptions: ['subscriptions'],
+      'company-settings': ['settings', 'numbers', 'emailSenders'],
       numbers: ['numbers', 'settings'],
       optouts: ['optOuts', 'optStates'],
+      'opt-events': ['optStates', 'optOuts'],
+      'convo-meta': ['meta'],
+      // sessions are owned by Messages.jsx itself, but we refresh meta
+      // (queue status lives there) so the shared queue badge updates.
+      sessions: ['meta'],
     };
     const keys = map[lastSync.resource];
     if (keys && keys.length) refresh(...keys);
@@ -97,18 +114,30 @@ export function ReferenceDataProvider({ children }) {
   // Same-tab nudges from components that mutate these directly.
   useEffect(() => {
     const onContacts = () => refresh('contacts');
-    const onCompanies = () => refresh('companies');
+    const onCompanies = () => refresh('companies', 'groups');
     const onMeta = () => refresh('meta');
-    const onShared = () => refresh('settings');
+    const onShared = () => refresh('settings', 'numbers');
+    const onGroups = () => refresh('groups');
+    const onTemplates = () => refresh('templates');
+    const onScheduled = () => refresh('scheduled');
+    const onAutoReplies = () => refresh('autoReplies');
     window.addEventListener('contacts-changed', onContacts);
     window.addEventListener('companies-changed', onCompanies);
     window.addEventListener('convo-meta-changed', onMeta);
     window.addEventListener('shared-numbers-changed', onShared);
+    window.addEventListener('groups-changed', onGroups);
+    window.addEventListener('templates-changed', onTemplates);
+    window.addEventListener('scheduled-changed', onScheduled);
+    window.addEventListener('auto-replies-changed', onAutoReplies);
     return () => {
       window.removeEventListener('contacts-changed', onContacts);
       window.removeEventListener('companies-changed', onCompanies);
       window.removeEventListener('convo-meta-changed', onMeta);
       window.removeEventListener('shared-numbers-changed', onShared);
+      window.removeEventListener('groups-changed', onGroups);
+      window.removeEventListener('templates-changed', onTemplates);
+      window.removeEventListener('scheduled-changed', onScheduled);
+      window.removeEventListener('auto-replies-changed', onAutoReplies);
     };
   }, [refresh]);
 

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, fmtPhone, initials } from '../api/client';
 import { toastError, toastSuccess } from '../lib/toast';
 import { useAuth } from '../context/AuthContext';
+import { useSocket } from '../context/SocketContext';
 
 import { useOnboarding } from '../components/onboarding/useOnboarding';
 const digits = (v) => String(v ?? '').replace(/\D/g, '');
@@ -98,7 +99,12 @@ export default function Users() {
       setLoading(false);
     }
   };
+  const { lastSync } = useSocket();
   useEffect(() => { if (isAdmin) load(); else setLoading(false); }, [isAdmin]);
+  useEffect(() => {
+    if (!lastSync) return;
+    if (lastSync.resource === 'agents' || lastSync.resource === 'company-settings') load();
+  }, [lastSync]);
 
   const labelFor = (d) => meta[d]?.label || '';
   const numById = useMemo(() => {
