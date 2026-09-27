@@ -105,7 +105,10 @@ export default function Users() {
   useEffect(() => { if (isAdmin) load(); else setLoading(false); }, [isAdmin]);
   useEffect(() => {
     if (!lastSync) return;
-    if (lastSync.resource === 'agents' || lastSync.resource === 'company-settings') load();
+    // 'agents' covers every roster mutation (status, grants, unlock, resync,
+    // first sign-in); 'company-settings'/'numbers' cover the shared-number
+    // inventory this page renders alongside it.
+    if (['agents', 'company-settings', 'numbers'].includes(lastSync.resource)) load();
   }, [lastSync]);
 
   const labelFor = (d) => meta[d]?.label || '';

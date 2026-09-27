@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Http\Controllers\Concerns\ResolvesActor;
+use App\Events\DataChanged;
 use App\Models\AgentIdentity;
 use App\Models\AgentNumberGrant;
 use App\Models\AuditLog;
@@ -137,6 +138,10 @@ class AgentIdentityController extends Controller
         if ($changed) {
             AuditLog::record($a['domain'], 'admin', null, $a['display_name'] ?? $a['username'],
                 'agent.profile-resynced', ['ext' => $ext], $request->ip());
+            // The roster changed: let the domain's shared room know so other
+            // open Users pages pull the fresh name/email instantly instead of
+            // waiting for a manual refresh.
+            DataChanged::send($a['domain'], $a['user'], 'agents', 'saved', $i->id, ['ext' => $ext]);
         }
         $i->refresh();
         return response()->json(['ok' => true, 'changed' => $changed, 'agent' => [
@@ -163,6 +168,10 @@ class AgentIdentityController extends Controller
         AuditLog::record($a['domain'], 'admin', null, $a['display_name'] ?? $a['username'],
             'agent.unlocked', ['ext' => $ext, 'attempts_cleared' => $cleared], $request->ip());
 
+        // Other admins watching the roster should see the lockout badge
+        // disappear the moment it is cleared — no refresh.
+        DataChanged::send($a['domain'], $a['user'], 'agents', 'saved', null, ['ext' => $ext, 'unlocked' => true]);
+
         return response()->json(['ok' => true, 'cleared' => $cleared, 'locked_secs' => 0]);
     }
 
@@ -181,6 +190,15 @@ class AgentIdentityController extends Controller
 
         AuditLog::record($a['domain'], 'admin', null, $a['display_name'] ?? $a['username'],
             'agent.status-changed', ['ext' => $ext, 'status' => $data['status']], $request->ip());
+
+        // Realtime kill switch: other admin tabs refetch the roster, and the
+        // affected agent's own browser hears this too — SocketContext refetches
+        // /me on an 'agents' event, which now 401s for a disabled identity and
+        // ends their session immediately ("They will be signed out"), instead
+        // of leaving them working until their next manual refresh.
+        DataChanged::send($a['domain'], $a['user'], 'agents', 'saved', $i->id, [
+            'ext' => $ext, 'status' => $i->status,
+        ]);
 
         return response()->json(['ok' => true, 'status' => $i->status]);
     }
@@ -283,6 +301,13 @@ class AgentIdentityController extends Controller
         if ($before !== $after) {
             AuditLog::record($a['domain'], 'admin', null, $a['display_name'] ?? $a['username'],
                 'agent.grants-changed', ['ext' => $ext, 'numbers' => $saved, 'permissions' => $want], $request->ip());
+            // Shared-access changes must reach (a) other admins' Users pages and
+            // (b) the affected agent's browser at once: SocketContext refetches
+            // /me on an 'agents' event, so their sidebar/permission set updates
+            // live with no refresh.
+            DataChanged::send($a['domain'], $a['user'], 'agents', 'saved', null, [
+                'ext' => $ext, 'grants' => $want,
+            ]);
         }
 
         return response()->json(['ok' => true, 'numbers' => $saved, 'grants' => $want]);

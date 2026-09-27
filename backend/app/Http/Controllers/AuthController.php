@@ -11,6 +11,7 @@ use App\Models\Tenant;
 use App\Models\TenantAdmin;
 use App\Services\Settings;
 use App\Services\BroadcastScope;
+use App\Events\DataChanged;
 use App\Models\AuditLog;
 use App\Services\LockoutService;
 use App\Models\PasswordHistory;
@@ -342,6 +343,16 @@ class AuthController extends Controller
         LockoutService::record($key, $request->ip(), true);
         AuditLog::record($tenant->domain, 'agent', $identity->id, $ext,
             $isNew ? 'agent.login.provisioned' : 'agent.login.success', [], $request->ip());
+
+        // A first sign-in adds a row to the admins' Users roster — announce it
+        // on the domain room so open Users pages show the new user instantly.
+        // Only on provisioning: ordinary logins just touch last_seen_at, which
+        // is not worth a roster refetch on every tab.
+        if ($isNew) {
+            DataChanged::send($tenant->domain, $ext, 'agents', 'saved', $identity->id, [
+                'ext' => $ext, 'provisioned' => true,
+            ]);
+        }
 
         return response()->json(['user' => $this->agentIdentityPayload($identity, $tenant)]);
     }
