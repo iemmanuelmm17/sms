@@ -354,7 +354,7 @@ export default function SuperSettings() {
           </div>
         </div>
         <div className="flex justify-end mt-5">
-          <button disabled={savingBc}
+          <button type="button" onClick={saveBroadcast} disabled={savingBc}
             className="text-sm bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg px-4 py-2 font-semibold">
             {savingBc ? 'Saving…' : 'Save broadcast settings'}
           </button>
@@ -396,7 +396,7 @@ export default function SuperSettings() {
           </div>
         </div>
         <div className="flex justify-end mt-5">
-          <button disabled={savingSvc}
+          <button type="button" onClick={saveService} disabled={savingSvc}
             className="text-sm bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg px-4 py-2 font-semibold">
             {savingSvc ? 'Saving…' : 'Save service account'}
           </button>
