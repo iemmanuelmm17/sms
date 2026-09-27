@@ -51,11 +51,12 @@ export default function Contacts() {
     return () => window.removeEventListener('contacts-changed', onChanged);
   }, []);
 
-  // Another instance changed contacts / companies → refresh.
+  // Another instance changed contacts / companies / groups → refresh.
   useEffect(() => {
     if (!lastSync) return;
     if (lastSync.resource === 'contacts') reload();
     if (lastSync.resource === 'companies') api.companies().then(setCompanies).catch(() => {});
+    if (lastSync.resource === 'groups') reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastSync]);
 

@@ -917,14 +917,14 @@ export default function Messages() {
   })();
   useEffect(() => {
     if (user?.role !== 'agent') return;
-    const opts = numbers.filter((n) => agentAllowed.includes(digits(n.number)));
+    const opts = agentAllowedOpts;
     if (!opts.length) { if (fromNumber) setFromNumber(''); return; }
     if (!opts.some((n) => String(n.number) === fromNumber)) {
       const dd = digits(user?.default_number);
       const pick = opts.find((n) => digits(n.number) === dd) || opts[0];
       setFromNumber(String(pick.number));
     }
-  }, [user, numbers]);
+  }, [user, numbers, agentAllowedOpts.length]);
 
   /**
    * Smart sender: reply from the number that RECEIVED the message.
@@ -1968,12 +1968,22 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
   const allowed = isAgent
     ? ((user?.creatable_numbers || user?.assigned_numbers || [])).map(digits) : [];
   const agentDefault = isAgent ? String(user?.default_number || allowed[0] || '') : '';
+  // Agent dropdown must show granted SHARED numbers even when the provider's
+  // smsNumbers list doesn't contain them (shared lines are owned by another
+  // extension). Synthesize a row for anything permitted but missing.
+  const sendOpts = (() => {
+    if (!isAgent) return numbers;
+    const mine = numbers.filter((n) => allowed.includes(digits(n.number)));
+    const have = new Set(mine.map((n) => digits(n.number)));
+    const extra = allowed.filter((d) => d && !have.has(d)).map((d) => ({ number: d }));
+    return [...mine, ...extra];
+  })();
   const [from, setFrom] = useState(isAgent ? agentDefault : (defaultFrom || (numbers[0] ? String(numbers[0].number) : '')));
   // Numbers may still be loading when the dialog opens from another page —
   // adopt the default sender as soon as the list arrives.
   useEffect(() => {
     if (isAgent) {
-      const opts = numbers.filter((n) => allowed.includes(digits(n.number)));
+      const opts = sendOpts;
       if (!opts.length) { if (from) setFrom(''); return; }
       if (!opts.some((n) => String(n.number) === from)) {
         const dd = digits(agentDefault);
@@ -1983,7 +1993,7 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
       return;
     }
     if (!from && numbers.length) setFrom(defaultFrom || String(numbers[0].number));
-  }, [numbers, defaultFrom, isAgent, agentDefault, allowed.length]);
+  }, [numbers, defaultFrom, isAgent, agentDefault, allowed.length, sendOpts.length]);
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState('');
   const [attach, setAttach] = useState(null);
@@ -2107,12 +2117,12 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
       </div>
       <label className="text-xs font-medium text-slate-600">From</label>
       {isAgent ? (
-        allowed.length > 1 ? (
+        sendOpts.length > 1 ? (
           <select value={from} onChange={(e) => setFrom(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mb-3 mt-1">
-            {numbers.filter((n) => allowed.includes(digits(n.number))).map((n) => <option key={n.number} value={String(n.number)}>{fmtPhone(n.number)}</option>)}
+            {sendOpts.map((n) => <option key={n.number} value={String(n.number)}>{fmtPhone(n.number)}</option>)}
           </select>
-        ) : allowed.length === 1 ? (
-          <div className="w-full border rounded-lg px-3 py-2 text-sm bg-slate-50 text-slate-700 mb-3 mt-1">📱 {fmtPhone(allowed[0])} <span className="text-[11px] text-slate-400">(your assigned number)</span></div>
+        ) : sendOpts.length === 1 ? (
+          <div className="w-full border rounded-lg px-3 py-2 text-sm bg-slate-50 text-slate-700 mb-3 mt-1">📱 {fmtPhone(sendOpts[0].number)} <span className="text-[11px] text-slate-400">(your assigned number)</span></div>
         ) : (
           <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2.5 mb-3 mt-1">⚠️ No SMS number assigned to your account — ask your admin to set one.</div>
         )

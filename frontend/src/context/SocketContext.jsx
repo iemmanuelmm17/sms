@@ -33,9 +33,6 @@ export function SocketProvider({ children }) {
         ]);
         window.Pusher = Pusher;
 
-        // Fallback to localhost:8000 if VITE_API_BASE_URL is not set in your .env
-        const backendUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-
         // Realtime connection target: Super → Settings (saved server-side,
         // served by /api/realtime) wins; the build-time .env values are the
         // per-field fallback. Fails soft — offline/demo keeps the .env values.
@@ -54,10 +51,11 @@ export function SocketProvider({ children }) {
           wssPort: rtPort,
           forceTLS: rtScheme === 'https',
           enabledTransports: ['ws', 'wss'],
-          
-          // Absolute path to the Laravel API server to prevent Vite port routing leaks
-          authEndpoint: `${backendUrl}/broadcasting/auth`,
-          
+
+          // Relative auth endpoint — works behind any proxy/preview host and
+          // ensures the session cookie is sent (see authorizer below).
+          authEndpoint: '/broadcasting/auth',
+
           // Intercept authorization using standard axios to force session inclusion
           authorizer: (channel, options) => {
             return {
@@ -76,22 +74,18 @@ export function SocketProvider({ children }) {
         });
 
         echoRef.current = echo;
-        
+
         // Same sanitization as the backend (ChannelName): Dynalink domains
         // contain dots ("1180.DynaCloud") but Laravel channel params can't
         // match dots — unsanitized names fail auth with 403.
         const safe = (v) => String(v).replace(/[^A-Za-z0-9-]/g, '_');
-        
+
         // ONE shared room per Dynalink domain: private-sms.{domain}.shared.
-        // The user/extension is deliberately NOT in the channel name — the
-        // domain's admin and every agent (each on a different user
-        // extension) all join the same room, and the backend sends every
-        // broadcast (mutations AND inbound SMS) to that same room. The
-        // payload's scope_user carries the token (kept for future room
-        // scheme changes); 'shared' is the historical agent-room token.
-        const scopeUser = user.scope_user || 'shared';
-		const chName = `sms.${safe(user.domain)}.${safe(scopeUser)}`;
-		const ch = echo.private(chName);
+        // Always subscribe to the shared room — the backend broadcasts every
+        // DataChanged and inbound SMS there so all users on the same domain
+        // see changes instantly without refresh, regardless of extension.
+        const chName = `sms.${safe(user.domain)}.shared`;
+        const ch = echo.private(chName);
         
         ch.listen('.sms.incoming', (e) => {
 		  // 1. Force a clean, brand-new object reference with a distinct timestamp

@@ -167,10 +167,18 @@ export default function Numbers() {
 
   const digitsOf = (n) => digits(n?.number);
   // Agents see the numbers they have VIEW on (own + view grants).
+  // Synthesize a row for any granted shared line missing from the provider list
+  // (owned by another extension) so the read-only view still shows it.
   const allowedNums = isAgent
     ? new Set((user?.readable_numbers || user?.assigned_numbers || []).map(digits).filter((d) => d.length >= 7))
     : null;
-  const visibleNumbers = isAgent ? numbers.filter((n) => allowedNums.has(digitsOf(n))) : numbers;
+  const visibleNumbers = (() => {
+    if (!isAgent) return numbers;
+    const mine = numbers.filter((n) => allowedNums.has(digitsOf(n)));
+    const have = new Set(mine.map((n) => digitsOf(n)));
+    const extra = [...allowedNums].filter((d) => d && !have.has(d)).map((d) => ({ number: d }));
+    return [...mine, ...extra];
+  })();
   const notifyFor = (d) => (numEmail[d]?.notify || []).join('; ');
   const rowsFor = (d) => senders.filter((r) => (r.numbers || []).map(String).includes(d));
   const sendFor = (d) => rowsFor(d).map((r) => r.email).join('; ');
