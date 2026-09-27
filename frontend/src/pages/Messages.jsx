@@ -210,7 +210,10 @@ export default function Messages() {
   // extension on the domain.
   const inboxNum = isAgent ? null : (numberFilter || mainNum || '');
 
-  const agentAllowed = isAgent ? (user?.assigned_numbers || []).map(digits) : [];
+  // Reply context: the numbers this agent may ANSWER on (own + reply grants).
+  // assigned_numbers (reply ∪ create) is the fallback for older payloads.
+  const agentAllowed = isAgent
+    ? ((user?.replyable_numbers || user?.assigned_numbers || [])).map(digits) : [];
   const isSharedNum = (s) => !!sharedNums[digits(s['messagesession-sms-number'])];
   const numOfSession = (s) => (s ? digits(s['messagesession-sms-number']) : '');
   // Inbox picker options: main number first, then the rest of the domain.
@@ -425,7 +428,7 @@ export default function Messages() {
     setFromNumber((cur) => {
       if (cur) return cur;
       if (user?.role === 'agent') {
-        const allow = (user?.assigned_numbers || []).map(digits);
+        const allow = (user?.replyable_numbers || user?.assigned_numbers || []).map(digits);
         const opts = numList.filter((x) => allow.includes(digits(x.number)));
         const pick = opts.find((x) => digits(x.number) === digits(user?.default_number)) || opts[0];
         return pick ? String(pick.number) : '';
@@ -1960,7 +1963,10 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
   const [sel, setSel] = useState([]);
   const [msg, setMsg] = useState('');
   const isAgent = user?.role === 'agent';
-  const allowed = isAgent ? (user?.assigned_numbers || []).map(digits) : [];
+  // New conversations → the numbers this agent may START on (own + create
+  // grants). assigned_numbers (reply ∪ create) is the fallback.
+  const allowed = isAgent
+    ? ((user?.creatable_numbers || user?.assigned_numbers || [])).map(digits) : [];
   const agentDefault = isAgent ? String(user?.default_number || allowed[0] || '') : '';
   const [from, setFrom] = useState(isAgent ? agentDefault : (defaultFrom || (numbers[0] ? String(numbers[0].number) : '')));
   // Numbers may still be loading when the dialog opens from another page —
@@ -1988,6 +1994,7 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
   const [showSched, setShowSched] = useState(false);
   const [schedAt, setSchedAt] = useState('');
   const [scheduling, setScheduling] = useState(false);
+  const [tcpaFooter, setTcpaFooter] = useState(true); // TCPA footer toggle, on by default
   const fileRef = useRef(null);
 
   // Manual numbers (comma/newline separated) + selected contacts → deduped list.
@@ -2046,6 +2053,7 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
         name: destinations.length > 1 ? `Bulk to ${destinations.length} numbers` : `Message to ${destinations[0]}`,
         message: msg || (attach ? `[Attachment: ${attach.name}]` : ''),
         'from-number': from,
+        tcpa_script: tcpaFooter,
         ...(attach ? { type: 'mms', data: attach.base64, 'mime-type': attach.mime, size: attach.size } : { type: 'sms' }),
         send_at: zonedTimeToUtc(schedAt, tz).toISOString(),
         timezone: tz,
@@ -2063,12 +2071,13 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
     try {
       // ONE message with a destination array (single Dynalink call).
       const resolved = resolveVars(msg || (attach ? `[Attachment: ${attach.name}]` : ''), firstContact, companyName, myName);
-      const res = await api.sendBulk({
-        message: withSender(resolved, senderName) || `[Attachment: ${attach.name}]`,
-        destinations,
-        'from-number': from,
-        ...(attach ? { type: 'mms', data: attach.base64, 'mime-type': attach.mime, size: attach.size } : { type: 'sms' }),
-      });
+        const res = await api.sendBulk({
+          message: withSender(resolved, senderName) || `[Attachment: ${attach.name}]`,
+          destinations,
+          'from-number': from,
+          tcpa_script: tcpaFooter,
+          ...(attach ? { type: 'mms', data: attach.base64, 'mime-type': attach.mime, size: attach.size } : { type: 'sms' }),
+        });
       if (res && res.status >= 200 && res.status < 300) {
         const skipped = res.skipped || [];
         const sent = destinations.length - skipped.length;
@@ -2174,6 +2183,10 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
         <button onClick={() => fileRef.current?.click()} className="text-xs border rounded-lg px-2.5 py-1.5 hover:bg-slate-50">📎 Attach file</button>
         <input ref={fileRef} type="file" className="hidden" accept="image/*,.gif,.pdf,.txt" onChange={(e) => onFile(e.target.files?.[0])} />
         <button onClick={() => setShowEmoji((v) => !v)} className="text-xs border rounded-lg px-2.5 py-1.5 hover:bg-slate-50">😀 Emoji</button>
+        <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none" title="Adds company name + opt-out line to the sent message">
+          <input type="checkbox" checked={tcpaFooter} onChange={(e) => setTcpaFooter(e.target.checked)} className="w-3.5 h-3.5 accent-brand-600" />
+          TCPA footer
+        </label>
         {showEmoji && (
           <div className="absolute bottom-12 left-0 bg-white border rounded-xl shadow-xl p-2 grid grid-cols-9 gap-1 z-10">
             {EMOJIS.map((em) => <button key={em} onClick={() => { setMsg((d) => d + em); setShowEmoji(false); }} className="text-xl hover:bg-slate-100 rounded p-0.5">{em}</button>)}

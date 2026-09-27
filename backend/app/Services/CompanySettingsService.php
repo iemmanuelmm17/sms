@@ -210,10 +210,11 @@ class CompanySettingsService
     }
 
     /**
-     * Footer appended to bulk (5+ recipient) sends for TCPA compliance.
+     * Footer appended to scheduled sends when the per-message "Add TCPA
+     * Script Footer" toggle is on (any recipient count).
      *
      * Falls back to the opt-out auto-reply default, then to a safe literal, so
-     * an unset value never means "no footer" on a bulk send.
+     * an unset value never means "no footer".
      */
     public function tcpaFooter(string $domain, ?string $user = null): string
     {

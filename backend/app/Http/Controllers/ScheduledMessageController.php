@@ -146,7 +146,7 @@ class ScheduledMessageController extends Controller
         ]);
 
         $this->assertMediaSize($data['data'] ?? null);
-        $this->assertAgentNumber($request, (string) ($data['from-number'] ?? ''));
+        $this->assertAgentNumber($request, (string) ($data['from-number'] ?? ''), 'new'); // scheduled new message
         // Per-account creation cap: scheduling is a future SMS budget.
         $storeKey = 'sched-store:' . $domain . ':' . ($actor['username'] ?? '?');
         if (RateLimiter::tooManyAttempts($storeKey, 10)) {

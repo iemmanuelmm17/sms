@@ -87,12 +87,13 @@ class SendScheduledMessage implements ShouldQueue
             $text
         );
 
-        // Resolve $CompanyName, then the TCPA bulk wrap (5+ recipients):
+        // Resolve $CompanyName, then the TCPA wrap:
         // "Company: body\n<footer>" — footer is Action A's live text.
         $companySvc = app(\App\Services\CompanySettingsService::class);
         $text = $companySvc->resolve($m->domain, $text, (string) ($m->created_by_name ?? ''));
-        // Bulk TCPA wrap — off when the composer's "Add TCPA Script Footer" is unchecked.
-        if (count($m->recipients ?? []) >= 5 && $m->tcpa_script !== false) {
+        // TCPA wrap — on whenever the composer's "Add TCPA Script Footer" is
+        // checked (default on), regardless of recipient count.
+        if ($m->tcpa_script !== false) {
             $company = $companySvc->name($m->domain);
             // One resolver: TCPA page setting → opt-out default → literal.
             // The old (domain,user) lookup missed for portal agents, whose

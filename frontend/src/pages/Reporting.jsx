@@ -139,7 +139,9 @@ export default function Reporting({
 }) {
   const { user } = useAuth();
   const isAgent = user?.role === 'agent';
-  const repAllowed = isAgent ? (user?.assigned_numbers || []).map((v) => String(v).replace(/\D/g, '')) : [];
+  // Reports cover conversations the agent may VIEW (own + view grants).
+  const repAllowed = isAgent
+    ? ((user?.readable_numbers || user?.assigned_numbers || [])).map((v) => String(v).replace(/\D/g, '')) : [];
   // Agents see per-agent rows for their own numbers (a shared line can be
   // worked by colleagues), so no client-side name filter — the server has
   // already limited the rows to numbers this agent can access.

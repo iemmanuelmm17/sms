@@ -8,16 +8,18 @@ use App\Models\AgentNumberGrant;
 /**
  * SINGLE SOURCE OF TRUTH for what an agent may see and send from.
  *
- * TWO distinct sets — do not conflate them:
+ * OWN numbers (from the provider map) always carry full access: view, reply,
+ * create. SHARED numbers are controlled by per-number grants:
  *
- *   readableNumbers()  own  ∪  every shared number      → may see the inbox
- *   sendableNumbers()  own  ∪  granted shared numbers   → may send from it
+ *   readableNumbers()   own  ∪  view grants      → may see the inbox
+ *   replyableNumbers()  own  ∪  reply grants     → may reply in existing
+ *                                                  conversations (same number)
+ *   creatableNumbers()  own  ∪  create grants    → may start NEW conversations
+ *   sendableNumbers()   own  ∪  reply ∪ create   → legacy "may send from"
  *
- * sendableNumbers is always a subset of readableNumbers: sharing a line lets
- * the team watch it, a grant is what allows replying on it.
- *
- * Every read path MUST use readableNumbers() and every write path MUST use
- * sendableNumbers(). If a caller computes either set itself they will drift,
+ * Every read path MUST use readableNumbers(), reply endpoints MUST use
+ * replyableNumbers() and new-conversation endpoints MUST use
+ * creatableNumbers(). If a caller computes either set itself they will drift,
  * and a drift on the write side means an agent can send as a number they are
  * not entitled to.
  *
@@ -56,75 +58,131 @@ class AgentAccess
     }
 
     /**
-     * Granted shared numbers, intersected with the live shared flags.
+     * Per-number grant flags for this extension, intersected with the live
+     * shared flags (un-sharing pauses a grant without deleting it).
      *
-     * @return list<string>
+     * @return array<string, array{view: true, reply: bool, create: bool}>
+     *         digits => flags; the key's presence IS the view grant.
      */
-    public function grantedShared(string $domain, string $ext): array
+    public function grantsMap(string $domain, string $ext): array
     {
         $ext = AgentIdentity::normalizeExt($ext);
         if ($ext === '') return [];
 
-        $granted = AgentNumberGrant::query()
+        $rows = AgentNumberGrant::query()
             ->where('domain', $domain)->where('ext', $ext)
-            ->pluck('number')->all();
-        if ($granted === []) return [];
+            ->get();
+        if ($rows->isEmpty()) return [];
 
-        // Intersect with what is actually shared right now.
         $shared = array_flip($this->settings->sharedNumbers($domain));
         $out = [];
-        foreach ($granted as $n) {
-            $d = AgentNumberGrant::normalizeNumber($n);
-            if ($d !== '' && isset($shared[$d])) $out[] = $d;
+        foreach ($rows as $g) {
+            $d = AgentNumberGrant::normalizeNumber($g->number);
+            if ($d === '' || !isset($shared[$d])) continue;
+            $out[$d] = ['view' => true, 'reply' => (bool) $g->reply, 'create' => (bool) $g->create];
         }
-        sort($out);
-        return array_values(array_unique($out));
+        ksort($out);
+        return $out;
+    }
+
+    /** Granted shared numbers (view) — see grantsMap(). */
+    public function grantedShared(string $domain, string $ext): array
+    {
+        return array_keys($this->grantsMap($domain, $ext));
+    }
+
+    /**
+     * The three permission sets in one shot (shared provider call).
+     *
+     * @param array<string,string>|null $owners pass the cached map to avoid a refetch
+     * @return array{0: list<string>, 1: list<string>, 2: list<string>}
+     *         [readable, replyable, creatable]
+     */
+    protected function permissionSets(string $domain, string $ext, ?string $token = null, ?array $owners = null): array
+    {
+        $ext = AgentIdentity::normalizeExt($ext);
+        if ($ext === '') return [[], [], []];
+
+        // Kill switch: a disabled agent has no access at all, regardless of
+        // grants or what the provider says they own.
+        $identity = AgentIdentity::where('domain', $domain)->where('ext', $ext)->first();
+        if ($identity && !$identity->isActive()) return [[], [], []];
+
+        if ($owners === null) {
+            try {
+                $owners = $this->dynalink->numberOwners((string) $token, $domain);
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::warning('AgentAccess: numberOwners failed', [
+                    'domain' => $domain, 'ext' => $ext, 'error' => $e->getMessage(),
+                ]);
+                $owners = [];
+            }
+        }
+
+        $own = $this->ownNumbers($owners, $ext);
+        $grants = $this->grantsMap($domain, $ext);
+
+        $merge = fn (array $pick) => array_values(array_unique(array_merge($own, $pick)));
+        $readable  = $merge(array_keys($grants));
+        $replyable = $merge(array_keys(array_filter($grants, fn ($f) => $f['reply'])));
+        $creatable = $merge(array_keys(array_filter($grants, fn ($f) => $f['create'])));
+
+        sort($readable); sort($replyable); sort($creatable);
+        return [$readable, $replyable, $creatable];
     }
 
     /**
      * Numbers this extension may READ (see the inbox for).
      *
-     *      own numbers  ∪  every number flagged shared
-     *
-     * Sharing a number is what makes its inbox visible to the team; a grant is
-     * NOT required to look. Grants control SENDING — see sendableNumbers().
+     *      own numbers  ∪  numbers with a VIEW grant (still flagged shared)
      *
      * @return list<string>
      */
     public function readableNumbers(string $domain, string $ext, ?string $token = null, ?array $owners = null): array
     {
-        $ext = AgentIdentity::normalizeExt($ext);
-        if ($ext === '') return [];
-        $identity = AgentIdentity::where('domain', $domain)->where('ext', $ext)->first();
-        if ($identity && !$identity->isActive()) return [];   // kill switch
-
-        $owners = $owners ?? $this->ownersOrEmpty($domain, $token, $ext);
-        $all = array_merge(
-            $this->ownNumbers($owners, $ext),
-            array_map(fn($d) => (string) $d, $this->settings->sharedNumbers($domain)),
-        );
-        $all = array_values(array_unique(array_filter($all)));
-        sort($all);
-        return $all;
+        return $this->permissionSets($domain, $ext, $token, $owners)[0];
     }
 
     /**
-     * Numbers this extension may SEND FROM.
+     * Numbers this extension may REPLY FROM — i.e. answer existing
+     * conversations on that number (sent as the number itself).
      *
-     *      own numbers  ∪  granted shared numbers (still flagged shared)
+     *      own numbers  ∪  numbers with a REPLY grant
      *
-     * Strictly a subset of readableNumbers(): an agent can watch a shared
-     * inbox without being allowed to reply on it.
+     * @return list<string>
+     */
+    public function replyableNumbers(string $domain, string $ext, ?string $token = null, ?array $owners = null): array
+    {
+        return $this->permissionSets($domain, $ext, $token, $owners)[1];
+    }
+
+    /**
+     * Numbers this extension may START NEW CONVERSATIONS FROM.
      *
-     * @deprecated Prefer sendableNumbers(); visibleNumbers() predates the
-     *             read/send split and its name no longer says which it is.
+     *      own numbers  ∪  numbers with a CREATE grant
      *
-     * @param array<string,string>|null $owners pass the cached map to avoid a refetch
+     * @return list<string>
+     */
+    public function creatableNumbers(string $domain, string $ext, ?string $token = null, ?array $owners = null): array
+    {
+        return $this->permissionSets($domain, $ext, $token, $owners)[2];
+    }
+
+    /**
+     * Sendable set: own ∪ reply ∪ create grants.
+     *
+     * @deprecated Prefer replyableNumbers() (reply endpoints) and
+     *             creatableNumbers() (new-conversation endpoints); this union
+     *             survives for payloads and pre-split call sites.
+     *
      * @return list<string>
      */
     public function sendableNumbers(string $domain, string $ext, ?string $token = null, ?array $owners = null): array
     {
-        return $this->visibleNumbers($domain, $ext, $token, $owners);
+        [, $replyable, $creatable] = $this->permissionSets($domain, $ext, $token, $owners);
+        $all = array_values(array_unique(array_merge($replyable, $creatable)));
+        sort($all);
+        return $all;
     }
 
     /** Owner map, or [] when the provider is unreachable (fail closed). */
@@ -140,43 +198,7 @@ class AgentAccess
         }
     }
 
-    /**
-     * Sendable set (own + granted shared). Disabled agents get nothing.
-     *
-     * @param array<string,string>|null $owners pass the cached map to avoid a refetch
-     * @return list<string>
-     */
-    public function visibleNumbers(string $domain, string $ext, ?string $token = null, ?array $owners = null): array
-    {
-        $ext = AgentIdentity::normalizeExt($ext);
-        if ($ext === '') return [];
-
-        // Kill switch: a disabled agent has no access at all, regardless of
-        // grants or what the provider says they own.
-        $identity = AgentIdentity::where('domain', $domain)->where('ext', $ext)->first();
-        if ($identity && !$identity->isActive()) return [];
-
-        if ($owners === null) {
-            try {
-                $owners = $this->dynalink->numberOwners((string) $token, $domain);
-            } catch (\Throwable $e) {
-                \Illuminate\Support\Facades\Log::warning('AgentAccess: numberOwners failed', [
-                    'domain' => $domain, 'ext' => $ext, 'error' => $e->getMessage(),
-                ]);
-                $owners = [];
-            }
-        }
-
-        $all = array_merge(
-            $this->ownNumbers($owners, $ext),
-            $this->grantedShared($domain, $ext),
-        );
-        $all = array_values(array_unique($all));
-        sort($all);
-        return $all;
-    }
-
-    /** May this extension SEND from the number? (grant required for shared) */
+    /** May this extension SEND from the number at all? (reply or create grant) */
     public function canUseNumber(string $domain, string $ext, ?string $number, ?string $token = null, ?array $owners = null): bool
     {
         $d = AgentNumberGrant::normalizeNumber($number);
@@ -184,12 +206,28 @@ class AgentAccess
         return in_array($d, $this->sendableNumbers($domain, $ext, $token, $owners), true);
     }
 
-    /** May this extension READ the number's inbox? (sharing alone is enough) */
+    /** May this extension READ the number's inbox? (view grant) */
     public function canReadNumber(string $domain, string $ext, ?string $number, ?string $token = null, ?array $owners = null): bool
     {
         $d = AgentNumberGrant::normalizeNumber($number);
         if ($d === '') return false;
         return in_array($d, $this->readableNumbers($domain, $ext, $token, $owners), true);
+    }
+
+    /** May this extension REPLY on the number's conversations? (reply grant) */
+    public function canReplyNumber(string $domain, string $ext, ?string $number, ?string $token = null, ?array $owners = null): bool
+    {
+        $d = AgentNumberGrant::normalizeNumber($number);
+        if ($d === '') return false;
+        return in_array($d, $this->replyableNumbers($domain, $ext, $token, $owners), true);
+    }
+
+    /** May this extension START NEW messages from the number? (create grant) */
+    public function canCreateNumber(string $domain, string $ext, ?string $number, ?string $token = null, ?array $owners = null): bool
+    {
+        $d = AgentNumberGrant::normalizeNumber($number);
+        if ($d === '') return false;
+        return in_array($d, $this->creatableNumbers($domain, $ext, $token, $owners), true);
     }
 
     /**

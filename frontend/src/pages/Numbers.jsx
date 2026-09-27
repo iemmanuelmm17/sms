@@ -104,7 +104,9 @@ export default function Numbers() {
   const [q, setQ] = useState(''); // search box
   // Portal-agent roster + per-number grant edits (mirror of the People page).
   const [identities, setIdentities] = useState([]);
-  const [grantDraft, setGrantDraft] = useState({});   // digits -> [ext]
+  // digits -> { ext -> {view, reply, create} }. Presence of an ext IS the
+  // view grant; reply/create only apply while view is on.
+  const [grantDraft, setGrantDraft] = useState({});
   const [sharedOnly, setSharedOnly] = useState(false);
 
   const reload = async () => {
@@ -164,8 +166,9 @@ export default function Numbers() {
   }, [lastSync]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const digitsOf = (n) => digits(n?.number);
+  // Agents see the numbers they have VIEW on (own + view grants).
   const allowedNums = isAgent
-    ? new Set((user?.assigned_numbers || []).map(digits).filter((d) => d.length >= 7))
+    ? new Set((user?.readable_numbers || user?.assigned_numbers || []).map(digits).filter((d) => d.length >= 7))
     : null;
   const visibleNumbers = isAgent ? numbers.filter((n) => allowedNums.has(digitsOf(n))) : numbers;
   const notifyFor = (d) => (numEmail[d]?.notify || []).join('; ');
@@ -289,36 +292,65 @@ export default function Numbers() {
   const removeTag = (d, t) => setMeta(d, { tags: metaFor(d).tags.filter((x) => x !== t) });
 
   // A number is "dirty" if assignments, label/tags or the email drafts changed.
-  // --- per-number grant mirror -------------------------------------------
-  const grantedExtsFor = (d) => identities
-    .filter((a) => (a.granted || []).map(digits).includes(d))
-    .map((a) => a.ext);
-  const toggleGrantFor = (d, ext) => setGrantDraft((p) => {
-    const cur = p[d] ?? grantedExtsFor(d);
-    return { ...p, [d]: cur.includes(ext) ? cur.filter((x) => x !== ext) : [...cur, ext] };
+  // --- per-number grant mirror (view / reply / create per user) -----------
+  /** Saved state for one number: ext -> {view, reply, create}. */
+  const grantBaseFor = (d) => {
+    const out = {};
+    for (const a of identities) {
+      if (!(a.granted || []).map(digits).includes(d)) continue;
+      const f = a.grants_detail?.[d] || a.grants_detail?.[String(d)] || { reply: true, create: true };
+      out[a.ext] = { view: true, reply: !!f.reply, create: !!f.create };
+    }
+    return out;
+  };
+  const grantDraftFor = (d) => grantDraft[d] ?? grantBaseFor(d);
+  const toggleGrantFor = (d, ext, field) => setGrantDraft((p) => {
+    const cur = { ...grantBaseFor(d), ...(p[d] || {}) };
+    if (field === 'view') {
+      // Unchecking view removes the grant entirely (its flags go with it).
+      // Checking it fresh starts with both actions ON (full access), like
+      // grants saved before the split existed.
+      if (cur[ext]) delete cur[ext];
+      else cur[ext] = { view: true, reply: true, create: true };
+    } else if (cur[ext]) {
+      cur[ext] = { ...cur[ext], [field]: !cur[ext][field] };
+    }
+    return { ...p, [d]: cur };
   });
+  const grantSnap = (m) => JSON.stringify(Object.keys(m).sort().map((k) => [k, m[k].reply, m[k].create]));
   const grantDirty = (d) => {
     const dft = grantDraft[d];
     if (!dft) return false;
-    return JSON.stringify([...dft].sort()) !== JSON.stringify([...grantedExtsFor(d)].sort());
+    return grantSnap(dft) !== grantSnap(grantBaseFor(d));
   };
   const saveGrantsFor = async (d) => {
-    const want = grantDraft[d] ?? [];
     setBusy((p) => ({ ...p, [`gr-${d}`]: true }));
     try {
-      // The API is per-agent, so push the delta for the agents that changed.
-      const before = grantedExtsFor(d);
-      const add = want.filter((e) => !before.includes(e));
-      const drop = before.filter((e) => !want.includes(e));
-      for (const ext of [...add, ...drop]) {
+      // The API is per-user, so push the FULL grant set for each user whose
+      // permission on THIS number changed (their other numbers untouched).
+      const before = grantBaseFor(d);
+      const after = grantDraftFor(d);
+      const changed = new Set(
+        [...new Set([...Object.keys(before), ...Object.keys(after)])]
+          .filter((ext) => JSON.stringify(before[ext] || null) !== JSON.stringify(after[ext] || null))
+      );
+      for (const ext of changed) {
         const ag = identities.find((a) => a.ext === ext);
-        const cur = (ag?.granted || []).map(digits);
-        const next = add.includes(ext) ? [...new Set([...cur, d])] : cur.filter((x) => x !== d);
-        await api.setAgentGrants(ext, next);
+        const flag = (n) => {
+          const f = ag?.grants_detail?.[n] || ag?.grants_detail?.[String(n)] || { reply: true, create: true };
+          return { view: true, reply: !!f.reply, create: !!f.create };
+        };
+        const entries = (ag?.granted || []).map(digits).filter(Boolean).map((n) => {
+          const f = n === d ? (after[ext] || { view: false }) : flag(n);
+          return f.view ? { number: n, ...f } : null;
+        }).filter(Boolean);
+        await api.setAgentGrants(ext, entries);
       }
       const r = await api.agentIdentities();
       setIdentities(Array.isArray(r?.agents) ? r.agents : []);
       setGrantDraft((p) => { const n = { ...p }; delete n[d]; return n; });
+      // Agent sidebars read these grants — refresh them without a reload.
+      window.dispatchEvent(new CustomEvent('shared-numbers-changed'));
       toastSuccess('Agent access updated.');
     } catch (e) {
       toastError(e?.response?.data?.message || 'Could not update agent access.');
@@ -717,11 +749,17 @@ export default function Numbers() {
                 {/* Who may use this shared line — mirror of the People page. */}
                 {!isAgent && numShared[d] && (
                   <div className="mt-2 border rounded-lg bg-slate-50 p-2.5">
-                    <p className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
-                      Agents with access
-                      <InfoTip label="Who can use this number?">
-                        Ticked agents can read this inbox and reply from this number. Their own
-                        portal-assigned numbers are separate and always available to them.
+                    <p className="text-xs font-semibold text-slate-700 flex items-center gap-1.5 flex-wrap">
+                      Users with access
+                      <InfoTip label="What do the access options mean?">
+                        <strong>View</strong> — the user sees this inbox in their Messages page and
+                        sidebar. Without it, they see nothing for {fmtPhone(d)}.
+                        <br /><strong>Reply</strong> — they can answer existing conversations in the
+                        inbox, sent from {fmtPhone(d)}.
+                        <br /><strong>Create New</strong> — they can start brand-new conversations
+                        from {fmtPhone(d)} (new message, bulk send, scheduled send).
+                        <br />Reply and Create New only apply while View is checked. Un-sharing the
+                        number revokes everyone instantly.
                       </InfoTip>
                     </p>
                     {identities.length === 0 ? (
@@ -730,21 +768,63 @@ export default function Numbers() {
                       </p>
                     ) : (
                       <>
-                        <div className="mt-1.5 space-y-1 max-h-40 overflow-y-auto">
-                          {identities.map((ag) => (
-                            <label key={ag.ext} className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-                              <input
-                                type="checkbox" className="w-4 h-4 accent-brand-600 shrink-0"
-                                checked={(grantDraft[d] ?? grantedExtsFor(d)).includes(ag.ext)}
-                                onChange={() => toggleGrantFor(d, ag.ext)}
-                              />
-                              <span className="min-w-0 truncate">{ag.display_name || ag.ext}</span>
-                              <span className="text-[11px] text-slate-400 shrink-0">Ext {ag.ext}</span>
-                              {ag.status === 'disabled' && (
-                                <span className="text-[10px] text-red-600 shrink-0">disabled</span>
-                              )}
-                            </label>
-                          ))}
+                        <div className="mt-1.5 space-y-2 max-h-64 overflow-y-auto">
+                          {identities.map((ag) => {
+                            const name = ag.display_name || ag.ext;
+                            const g = grantDraftFor(d)[ag.ext]; // undefined = no access
+                            const view = !!g?.view;
+                            return (
+                              <div key={ag.ext} className="pb-1.5 border-b border-slate-200/70 last:border-0 last:pb-0">
+                                <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                                  <input
+                                    type="checkbox" className="w-4 h-4 accent-brand-600 shrink-0"
+                                    checked={view}
+                                    onChange={() => toggleGrantFor(d, ag.ext, 'view')}
+                                  />
+                                  <span className="min-w-0 truncate">{name}</span>
+                                  <span className="text-[11px] text-slate-400 shrink-0">Ext {ag.ext}</span>
+                                  {ag.status === 'disabled' && (
+                                    <span className="text-[10px] text-red-600 shrink-0">disabled</span>
+                                  )}
+                                  <InfoTip label="What does View do here?">
+                                    Checked: <strong>{name}</strong> sees {fmtPhone(d)}'s inbox in
+                                    their Messages page and sidebar (read access). Uncheck to remove
+                                    all access for this number.
+                                  </InfoTip>
+                                </label>
+                                {view && (
+                                  <div className="flex items-center gap-4 pl-6 mt-1.5 flex-wrap">
+                                    <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+                                      <input
+                                        type="checkbox" className="w-3.5 h-3.5 accent-brand-600"
+                                        checked={!!g?.reply}
+                                        onChange={() => toggleGrantFor(d, ag.ext, 'reply')}
+                                      />
+                                      Reply
+                                      <InfoTip label="What does Reply do here?">
+                                        <strong>{name}</strong> can reply to conversations in this
+                                        inbox — answers go out from {fmtPhone(d)} itself, so the
+                                        customer keeps talking to the same number.
+                                      </InfoTip>
+                                    </label>
+                                    <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+                                      <input
+                                        type="checkbox" className="w-3.5 h-3.5 accent-brand-600"
+                                        checked={!!g?.create}
+                                        onChange={() => toggleGrantFor(d, ag.ext, 'create')}
+                                      />
+                                      Create New
+                                      <InfoTip label="What does Create New do here?">
+                                        <strong>{name}</strong> can start NEW conversations from{' '}
+                                        {fmtPhone(d)} — new messages, bulk sends and scheduled sends
+                                        all originate from this number.
+                                      </InfoTip>
+                                    </label>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                         {grantDirty(d) && (
                           <div className="flex items-center gap-2 mt-2 flex-wrap">

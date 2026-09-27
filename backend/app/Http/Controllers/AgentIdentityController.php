@@ -56,8 +56,18 @@ class AgentIdentityController extends Controller
         $grants = AgentNumberGrant::where('domain', $a['domain'])->get()->groupBy('ext');
         $shared = $this->settings->sharedNumbers($a['domain']);
 
+        // Per-number flags for the UI: digits => {reply, create} (the key's
+        // presence is the view grant).
+        $detail = [];
+        foreach ($grants as $ext => $g) {
+            foreach ($g as $row) {
+                $d = AgentNumberGrant::normalizeNumber($row->number);
+                if ($d !== '') $detail[(string) $ext][$d] = ['reply' => (bool) $row->reply, 'create' => (bool) $row->create];
+            }
+        }
+
         $rows = AgentIdentity::where('domain', $a['domain'])
-            ->orderBy('ext')->get()->map(function ($i) use ($owners, $grants, $shared) {
+            ->orderBy('ext')->get()->map(function ($i) use ($owners, $grants, $shared, $detail) {
                 $granted = ($grants[$i->ext] ?? collect())->pluck('number')->values()->all();
                 return [
                     'id'             => $i->id,
@@ -78,6 +88,7 @@ class AgentIdentityController extends Controller
                     'first_login_at' => $i->first_login_at?->toJSON(),
                     'own_numbers'    => $this->access->ownNumbers($owners, $i->ext),
                     'granted'        => $granted,
+                    'grants_detail'  => $detail[$i->ext] ?? [],
                     // granted but no longer shared: surfaced so admins can see
                     // why an agent lost access without a grant being deleted
                     'granted_inactive' => array_values(array_diff($granted, $shared)),
@@ -94,6 +105,7 @@ class AgentIdentityController extends Controller
                 'last_seen_at' => null, 'first_login_at' => null,
                 'own_numbers' => $this->access->ownNumbers($owners, (string) $ext),
                 'granted' => $g->pluck('number')->values()->all(),
+                'grants_detail' => $detail[(string) $ext] ?? [],
                 'granted_inactive' => array_values(array_diff($g->pluck('number')->all(), $shared)),
             ];
         }
@@ -176,53 +188,103 @@ class AgentIdentityController extends Controller
     /**
      * PUT /api/agent-identities/{ext}/grants — replace the grant set.
      *
-     * Only SHARED numbers can be granted: an agent's own numbers are implicit,
-     * and granting a private number belonging to someone else would be a way
-     * to bypass the sharing model entirely.
+     * Two accepted shapes:
+     *   { "numbers": ["5551234567"] }                      legacy: full access
+     *   { "grants":  [{ "number": "5551234567",
+     *                    "view": true, "reply": true, "create": false }] }
+     *
+     * view=false (or an absent number) REMOVES the grant. Only SHARED numbers
+     * can be granted: an agent's own numbers are implicit, and granting a
+     * private number belonging to someone else would be a way to bypass the
+     * sharing model entirely.
      */
     public function grants(Request $request, string $ext)
     {
         $a = $this->admin($request);
         $data = $request->validate([
-            'numbers'   => 'present|array',
+            'numbers'  => 'present_without:grants|array',
             'numbers.*' => 'string|max:32',
+            'grants'   => 'present_without:numbers|array',
+            'grants.*.number' => 'string|max:32',
+            'grants.*.view'   => 'sometimes|boolean',
+            'grants.*.reply'  => 'sometimes|boolean',
+            'grants.*.create' => 'sometimes|boolean',
         ]);
         $ext = AgentIdentity::normalizeExt($ext);
         abort_if($ext === '', 422, 'Extension is required.');
 
         $shared = array_flip($this->settings->sharedNumbers($a['domain']));
+
+        // Normalize both shapes to digits => {view, reply, create}.
         $want = [];
-        foreach ($data['numbers'] as $n) {
-            $d = AgentNumberGrant::normalizeNumber($n);
-            if ($d === '' || isset($want[$d])) continue;
-            if (!isset($shared[$d])) {
+        if (array_key_exists('numbers', $data)) {
+            foreach ($data['numbers'] as $n) {
+                $d = AgentNumberGrant::normalizeNumber($n);
+                if ($d !== '' && !isset($want[$d])) $want[$d] = ['view' => true, 'reply' => true, 'create' => true];
+            }
+        } else {
+            foreach ($data['grants'] as $g) {
+                $d = AgentNumberGrant::normalizeNumber($g['number'] ?? null);
+                if ($d === '') continue;
+                $view = (bool) ($g['view'] ?? true);
+                if (!isset($want[$d]) || $view) {
+                    $want[$d] = [
+                        'view'   => $view,
+                        'reply'  => $view && (bool) ($g['reply'] ?? false),
+                        'create' => $view && (bool) ($g['create'] ?? false),
+                    ];
+                }
+            }
+        }
+
+        foreach ($want as $d => $f) {
+            if ($f['view'] && !isset($shared[$d])) {
                 return response()->json([
                     'message' => 'Only shared numbers can be granted. Mark the number shared first.',
                 ], 422);
             }
-            $want[$d] = true;
-        }
-        $want = array_keys($want);
-
-        $have = AgentNumberGrant::where('domain', $a['domain'])->where('ext', $ext)
-            ->pluck('number')->all();
-
-        foreach (array_diff($want, $have) as $add) {
-            AgentNumberGrant::create([
-                'domain' => $a['domain'], 'ext' => $ext, 'number' => $add,
-                'granted_by' => $a['display_name'] ?? $a['username'] ?? null,
-            ]);
-        }
-        if ($remove = array_diff($have, $want)) {
-            AgentNumberGrant::where('domain', $a['domain'])->where('ext', $ext)
-                ->whereIn('number', $remove)->delete();
         }
 
-        if (array_diff($want, $have) || array_diff($have, $want)) {
+        $haveRows = AgentNumberGrant::where('domain', $a['domain'])->where('ext', $ext)->get()->keyBy(fn ($r) => AgentNumberGrant::normalizeNumber($r->number));
+
+        foreach ($want as $d => $f) {
+            if (!$f['view']) {
+                if ($haveRows->has($d)) $haveRows->get($d)->delete();
+                continue;
+            }
+            if ($haveRows->has($d)) {
+                $row = $haveRows->get($d);
+                if ((bool) $row->reply !== $f['reply'] || (bool) $row->create !== $f['create']) {
+                    $row->forceFill(['reply' => $f['reply'], 'create' => $f['create']])->save();
+                }
+            } else {
+                AgentNumberGrant::create([
+                    'domain' => $a['domain'], 'ext' => $ext, 'number' => $d,
+                    'reply' => $f['reply'], 'create' => $f['create'],
+                    'granted_by' => $a['display_name'] ?? $a['username'] ?? null,
+                ]);
+            }
+        }
+        foreach ($haveRows->keys() as $d) {
+            if (!array_key_exists($d, $want)) $haveRows->get($d)->delete();
+        }
+
+        $saved = array_keys(array_filter($want, fn ($f) => $f['view']));
+        // Audit any change at all — added/removed view grants AND reply/create
+        // flag flips on an unchanged set.
+        $before = [];
+        foreach ($haveRows as $row) {
+            $d = AgentNumberGrant::normalizeNumber($row->number);
+            if ($d !== '') $before[$d] = ['reply' => (bool) $row->reply, 'create' => (bool) $row->create];
+        }
+        $after = [];
+        foreach ($want as $d => $f) if ($f['view']) $after[$d] = ['reply' => $f['reply'], 'create' => $f['create']];
+        ksort($before); ksort($after);
+        if ($before !== $after) {
             AuditLog::record($a['domain'], 'admin', null, $a['display_name'] ?? $a['username'],
-                'agent.grants-changed', ['ext' => $ext, 'numbers' => $want], $request->ip());
+                'agent.grants-changed', ['ext' => $ext, 'numbers' => $saved, 'permissions' => $want], $request->ip());
         }
 
-        return response()->json(['ok' => true, 'numbers' => $want]);
+        return response()->json(['ok' => true, 'numbers' => $saved, 'grants' => $want]);
     }
 }

@@ -243,10 +243,16 @@ trait ResolvesActor
      * SECURITY: for portal agents this is the ONLY thing standing between an
      * agent and sending as any number on the domain — every call runs on the
      * tenant superadmin token, which can send as anything. It therefore uses
-     * AgentAccess::sendableNumbers(). The read path uses readableNumbers()
-     * from the same service, so the two sets can never drift apart.
+     * AgentAccess's permission sets:
+     *
+     *   $context = 'reply' → replyableNumbers()  (answer an existing convo)
+     *   $context = 'new'   → creatableNumbers()  (start a new conversation)
+     *   $context = 'send'  → sendableNumbers()   (legacy union)
+     *
+     * The read path uses readableNumbers() from the same service, so the
+     * sets can never drift apart.
      */
-    protected function assertAgentNumber(Request $r, ?string $number): void
+    protected function assertAgentNumber(Request $r, ?string $number, string $context = 'send'): void
     {
         $a = $this->actor($r);
         if ($a['role'] !== 'agent') return;
@@ -256,17 +262,25 @@ trait ResolvesActor
         if (!empty($a['portal_auth'])) {
             $access = app(\App\Services\AgentAccess::class);
             $ext = $a['ext'] ?? $a['user'];
-            $allowed = $access->sendableNumbers($a['domain'], $ext, $this->dtoken($r));
+            $tok = $this->dtoken($r);
+            $allowed = match ($context) {
+                'reply' => $access->replyableNumbers($a['domain'], $ext, $tok),
+                'new'   => $access->creatableNumbers($a['domain'], $ext, $tok),
+                default => $access->sendableNumbers($a['domain'], $ext, $tok),
+            };
             if (!$allowed) {
                 abort(response()->json(
                     ['message' => 'No SMS numbers available to you — ask your admin.'], 422));
             }
             if (!in_array($digits, $allowed, true)) {
-                // Distinguish "can't see it" from "can see it but may not send".
-                $readable = $access->readableNumbers($a['domain'], $ext, $this->dtoken($r));
-                abort(response()->json(['message' => in_array($digits, $readable, true)
-                    ? 'You can view this shared number but not send from it — ask your admin for access.'
-                    : 'You can only send from your own or shared numbers.'], 403));
+                // Distinguish "can't see it" from "can see it but may not use
+                // it this way" (view without reply / create).
+                $readable = $access->readableNumbers($a['domain'], $ext, $tok);
+                abort(response()->json(['message' => match (true) {
+                    !in_array($digits, $readable, true) => 'You can only use your own numbers or numbers your admin gave you access to.',
+                    $context === 'reply' => 'You can view this shared number but can\'t reply from it — ask your admin for the Reply permission.',
+                    default => 'You can view this shared number but can\'t start new messages from it — ask your admin for the Create New permission.',
+                }], 403));
             }
             return;
         }
