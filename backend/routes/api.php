@@ -47,6 +47,10 @@ Route::post('/login', [AuthController::class, 'login']);
 Route::get('/auth/login-options', [AuthController::class, 'loginOptions']);
 Route::post('/tenant/login', [AuthController::class, 'tenantLogin']);
 Route::post('/webhooks/dynalink', [WebhookController::class, 'dynalink']); // server-to-server
+// Dynalink URL validation, browsers and uptime monitors may ping the webhook
+// with a GET. Answer quietly with 200 instead of a 405 error page — the POST
+// route above does the real (IP-allowlisted) work.
+Route::get('/webhooks/dynalink', fn () => response()->json(['ok' => true, 'endpoint' => 'dynalink-webhook', 'expects' => 'POST']));
 Route::get('/branding', [BrandingController::class, 'show']);
 Route::get('/branding/logo', [BrandingController::class, 'logo']);
 Route::get('/realtime', [BrandingController::class, 'realtime']);
@@ -172,13 +176,15 @@ Route::get('/contacts/sync-status', [ContactController::class, 'status']);
 Route::post('/contacts/resync', [ContactController::class, 'resync']);
 Route::get('/contacts/template', [ContactController::class, 'template']);
 Route::post('/contacts/import', [ContactController::class, 'import'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':3,1');
-Route::apiResource('/contacts', ContactController::class)->except(['create', 'edit']);
+// No show(): these controllers never implemented GET /{id} — registering it
+// turned any direct hit into a 500 (BadMethodCallException) instead of a 404.
+Route::apiResource('/contacts', ContactController::class)->except(['create', 'edit', 'show']);
 
 Route::apiResource('/groups', GroupController::class);
 Route::apiResource('/companies', CompanyController::class);
 Route::get('/agents/directory', [AgentController::class, 'directory']);
 Route::get('/agents/{agent}/delete-preview', [AgentController::class, 'deletePreview']);
-Route::apiResource('/agents', AgentController::class)->except(['create', 'edit']);
+Route::apiResource('/agents', AgentController::class)->except(['create', 'edit', 'show']);
 Route::get('/conversation-meta', [ConversationMetaController::class, 'index']);
 Route::put('/conversation-meta/{sessionId}', [ConversationMetaController::class, 'upsert']);
 Route::get('/audit-logs/actions', [AuditLogController::class, 'actions']);
@@ -188,7 +194,7 @@ Route::post('/lockouts/users/unblock', [LockoutController::class, 'unblockUser']
 Route::post('/lockouts/ips/unblock', [LockoutController::class, 'unblockIp']);
 
 Route::post('/templates/{template}/resolve', [TemplateController::class, 'resolve']);
-Route::apiResource('/templates', TemplateController::class)->except(['create', 'edit']);
+Route::apiResource('/templates', TemplateController::class)->except(['create', 'edit', 'show']);
 Route::get('/opt-outs', [OptOutController::class, 'index']);
 Route::post('/opt-outs', [OptOutController::class, 'store']);
 Route::delete('/opt-outs/{phone}', [OptOutController::class, 'destroy']);

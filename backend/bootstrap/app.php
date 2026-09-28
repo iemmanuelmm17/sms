@@ -29,13 +29,17 @@ return Application::configure(basePath: dirname(__DIR__))
             'broadcast.user' => \App\Http\Middleware\ResolveBroadcastUser::class,
         ]);
 		
-		$middleware->trustProxies(at: '*');
-        $middleware->trustProxies(headers: Request::HEADER_X_FORWARDED_FOR |
-            Request::HEADER_X_FORWARDED_HOST |
-            Request::HEADER_X_FORWARDED_PORT |
-            Request::HEADER_X_FORWARDED_PORT |
-            Request::HEADER_X_FORWARDED_PROTO |
-            Request::HEADER_X_FORWARDED_AWS_ELB
+        // ONE call: two separate trustProxies() calls made the second
+        // override the first, silently un-trusting proxies. Behind any
+        // reverse proxy/tunnel $request->ip() was then the proxy's IP and
+        // the webhook IP allowlist failed closed (403 on every inbound).
+        $middleware->trustProxies(
+            at: '*',
+            headers: Request::HEADER_X_FORWARDED_FOR |
+                Request::HEADER_X_FORWARDED_HOST |
+                Request::HEADER_X_FORWARDED_PORT |
+                Request::HEADER_X_FORWARDED_PROTO |
+                Request::HEADER_X_FORWARDED_AWS_ELB
         );
     })
     ->withBroadcasting(
