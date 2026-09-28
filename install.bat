@@ -69,7 +69,7 @@ if not exist "%ROOT%backend\.env" (
 ) else (
   echo Keeping existing backend\.env (APP_KEY preserved^).
 )
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$f='%ROOT%backend\.env';function U($k,$v){$l=@();if(Test-Path $f){$l=Get-Content $f};$hit=$false;$n=@($l|ForEach-Object{if($_ -match ('^'+$k+'=')){$hit=$true;$k+'='+$v}else{$_}});if(-not $hit){$n+=$k+'='+$v};$n|Set-Content $f -Encoding Ascii};U 'APP_URL' 'http://%H%:8000';$c=Get-Content $f;function R{-join((48..57)+(65..90)+(97..122)|Get-Random -Count 32|ForEach-Object{[char]$_})};if(-not($c -match '^REVERB_APP_KEY=.+')){U 'REVERB_APP_KEY' (R)};if(-not($c -match '^REVERB_APP_SECRET=.+')){U 'REVERB_APP_SECRET' (R)};Write-Host 'backend .env updated'"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%update-env.ps1" -Target backend -HostName "%H%" || (echo [FAIL] could not update the .env files - see the PowerShell errors above. & pause & exit /b 1)
 findstr /R /C:"^APP_KEY=base64" "%ROOT%backend\.env" >nul || (
   echo Generating APP_KEY...
   cd /d "%ROOT%backend"
@@ -84,7 +84,7 @@ if not exist "%ROOT%frontend\.env" (
 ) else (
   echo Keeping existing frontend\.env (updating host keys^).
 )
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$f='%ROOT%frontend\.env';$b=(Get-Content '%ROOT%backend\.env'|Where-Object{$_ -match '^REVERB_APP_KEY='}|Select-Object -First 1) -replace '^REVERB_APP_KEY='','';function U($k,$v){$l=@();if(Test-Path $f){$l=Get-Content $f};$hit=$false;$n=@($l|ForEach-Object{if($_ -match ('^'+$k+'=')){$hit=$true;$k+'='+$v}else{$_}});if(-not $hit){$n+=$k+'='+$v};$n|Set-Content $f -Encoding Ascii};U 'VITE_API_URL' '/';U 'VITE_API_PROXY' 'http://localhost:8000';U 'VITE_ALLOWED_HOSTS' '%H%';U 'VITE_REVERB_APP_KEY' $b;U 'VITE_REVERB_HOST' '%H%';U 'VITE_REVERB_PORT' '8080';U 'VITE_REVERB_SCHEME' 'http';if($b -eq ''){Write-Host 'WARNING: backend REVERB_APP_KEY is empty'}else{Write-Host 'frontend .env updated'}"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%update-env.ps1" -Target frontend -HostName "%H%" || (echo [FAIL] could not update the .env files - see the PowerShell errors above. & pause & exit /b 1)
 findstr /C:"VITE_ALLOWED_HOSTS" "%ROOT%frontend\vite.config.js" >nul || (
   echo [WARN] frontend\vite.config.js does not support VITE_ALLOWED_HOSTS.
   echo        Copy the workspace vite.config.js or LAN browsers get "Blocked request".
