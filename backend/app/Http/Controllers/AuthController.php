@@ -13,6 +13,7 @@ use App\Services\Settings;
 use App\Services\BroadcastScope;
 use App\Events\DataChanged;
 use App\Models\AuditLog;
+use Illuminate\Support\Facades\Log;
 use App\Services\LockoutService;
 use App\Models\PasswordHistory;
 use App\Rules\PasswordPolicy;
