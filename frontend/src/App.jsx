@@ -125,6 +125,54 @@ function Guard({ children }) {
   return children;
 }
 
+/**
+ * Warm every lazy route chunk in the background once the browser is idle.
+ * The clicked page ALWAYS loads first (lazy() handles that); this just makes
+ * the first visit to every OTHER page instant too — in dev it moves Vite's
+ * on-demand compile off the click, in prod it warms the HTTP cache. Chunks
+ * load one idle slot at a time so they never compete with the page the user
+ * is waiting on, and failures are ignored (the real lazy() load retries on
+ * navigation). No behavior changes — purely a cache warm.
+ */
+function PrefetchRoutes() {
+  const { user } = useAuth();
+  const { superUser } = useSuperAuth();
+  const hasUser = !!user;
+  const hasSuper = !!superUser;
+  useEffect(() => {
+    if (!hasUser && !hasSuper) return;
+    const mods = [];
+    if (hasUser) mods.push(
+      () => import('./pages/Messages'), () => import('./pages/Users'), () => import('./pages/Scheduler'),
+      () => import('./pages/Contacts'), () => import('./pages/Companies'), () => import('./pages/Agents'),
+      () => import('./pages/Templates'), () => import('./pages/AutoReply'), () => import('./pages/Settings'),
+      () => import('./pages/TCPA'), () => import('./pages/AuditLog'), () => import('./pages/Reporting'),
+      () => import('./pages/Integration'), () => import('./pages/Numbers'), () => import('./pages/ForgotPassword'),
+    );
+    if (hasSuper) mods.push(
+      () => import('./pages/super/Tenants'), () => import('./pages/super/TenantDetail'),
+      () => import('./pages/super/SuperSettings'), () => import('./pages/super/SuperAudit'),
+      () => import('./pages/super/SuperIps'), () => import('./pages/super/SuperWebhookIps'),
+      () => import('./pages/super/SuperPassword'), () => import('./pages/super/SuperReporting'),
+      () => import('./pages/super/SuperMailGateway'),
+    );
+    let stopped = false;
+    const idle = window.requestIdleCallback || ((cb) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 0 }), 1500));
+    const schedule = (i) => {
+      if (stopped || i >= mods.length) return;
+      idle(() => {
+        if (stopped) return;
+        mods[i]().catch(() => {});
+        schedule(i + 1);
+      }, { timeout: 10000 });
+    };
+    // Let the current page paint and fetch first; start warming after a beat.
+    const t = setTimeout(() => schedule(0), 1500);
+    return () => { stopped = true; clearTimeout(t); };
+  }, [hasUser, hasSuper]);
+  return null;
+}
+
 function SuperGuard({ children }) {
   const { superUser, loading } = useSuperAuth();
   if (loading) return <div className="h-screen flex items-center justify-center text-slate-500">Loading…</div>;
@@ -142,6 +190,7 @@ export default function App() {
       <BrandProvider>
       <BrowserRouter>
         <SessionManager />
+        <PrefetchRoutes />
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/forgot-password" element={<Suspense fallback={<PageLoader />}><ForgotPassword /></Suspense>} />
