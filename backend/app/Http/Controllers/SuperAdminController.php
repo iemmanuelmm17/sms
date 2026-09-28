@@ -631,6 +631,19 @@ class SuperAdminController extends Controller
             && in_array($data['reverb_scheme'], ['ws', 'wss'], true)) {
             $data['reverb_scheme'] = $data['reverb_scheme'] === 'wss' ? 'https' : 'http';
         }
+        // The Reverb app key rides in the query string of the Pusher HTTP API
+        // calls that pusher-http-php builds WITHOUT URL-encoding: base64 keys
+        // containing '+' or '=' arrive at the server decoded as spaces and
+        // EVERY broadcast dies with "auth_key should be a valid app key".
+        // Browsers encode correctly (pusher-js), so only server publishing
+        // breaks — reject such keys at the door instead.
+        if (array_key_exists('reverb_app_key', $data)) {
+            $k = trim((string) ($data['reverb_app_key'] ?? ''));
+            if ($k !== '' && !preg_match('/^[A-Za-z0-9_\-]+$/', $k)) {
+                return response()->json(['message' => 'Realtime app key must contain only letters, digits, hyphens and underscores — base64 characters like + / = break server broadcasts ("auth_key should be a valid app key"). Regenerate it, then restart the Reverb process.'], 422);
+            }
+            $data['reverb_app_key'] = $k;
+        }
         $whKeySaved = array_key_exists('webhook_url', $data);
         $oldWh = $whKeySaved ? $this->webhookEffective() : null;
         $map = ['dynalink_client_id' => 'dynalink.client_id',

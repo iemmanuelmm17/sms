@@ -44,7 +44,15 @@ class DataChanged implements ShouldBroadcastNow
             [$domain, $room] = BroadcastScope::scopeFor($domain);
             broadcast(new self($domain, $room, $resource, $action, $id, $payload));
         } catch (\Throwable $e) {
-            Log::warning('Sync broadcast failed: ' . $e->getMessage());
+            $msg = $e->getMessage();
+            // Turn the two most common credential failures into a fix recipe:
+            // a key Reverb doesn't know (DB override from a migrated database,
+            // stale .env) or a base64 key whose '+' characters the Pusher HTTP
+            // API query string mangles into spaces.
+            if (str_contains($msg, 'auth_key') || str_contains($msg, 'auth_signature') || str_contains($msg, 'Unknown app')) {
+                $msg .= ' — Fix: the broadcaster key must equal REVERB_APP_KEY in the RUNNING Reverb process\'s .env, and must be letters/digits only (base64 keys with "+" or "=" break server publishing while browsers still connect). Check Super → Settings → Realtime (DB overrides beat .env — clear them after migrating a database), then restart all PHP processes.';
+            }
+            Log::warning('Sync broadcast failed: ' . $msg);
         }
     }
 

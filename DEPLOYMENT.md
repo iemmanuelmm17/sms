@@ -61,11 +61,28 @@ Then edit `.env` (see Section 4 for every key). Minimum for LAN use:
 
 ```ini
 APP_URL=http://192.168.18.5:8000      # <-- this machine's LAN IP
-REVERB_APP_KEY=<random-32+-chars>     # must match frontend VITE_REVERB_APP_KEY
-REVERB_APP_SECRET=<random-32+-chars>
+REVERB_APP_KEY=<random-32-chars>      # LETTERS/DIGITS ONLY — see warning below
+REVERB_APP_SECRET=<random-32-chars>   # LETTERS/DIGITS ONLY
 ```
 
-Generate random strings with: `php artisan key:generate --show` (run twice, use the outputs).
+> **⚠ Do NOT use `php artisan key:generate` for the REVERB keys.** Its base64
+> output contains `+` / `=` characters, and the Pusher HTTP API Laravel uses to
+> publish events does not URL-encode them — the Reverb server receives them as
+> spaces and rejects **every** broadcast with
+> `Sync broadcast failed: Pusher error: auth_key should be a valid app key`
+> in `storage/logs/laravel-*.log`. Browsers still connect (pusher-js encodes
+> correctly), which makes the failure look like flaky realtime instead of a
+> dead broadcaster. Generate safe keys in PowerShell (run twice — one for
+> `REVERB_APP_KEY`, one for `REVERB_APP_SECRET`):
+>
+> ```powershell
+> -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 32 | ForEach-Object {[char]$_})
+> ```
+>
+> `APP_KEY` itself SHOULD still come from `php artisan key:generate` (its
+> `base64:` value never travels in a URL). After changing any REVERB value:
+> kill all PHP processes and restart (`reverb:start` reads `.env` only at
+> boot), and keep `frontend/.env` `VITE_REVERB_APP_KEY` identical.
 
 ### 2.3 Frontend setup (PowerShell, in `frontend/`)
 
@@ -113,6 +130,7 @@ Windows Firewall will prompt for each port — allow on **private** networks.
 4. Create tenant + admin (portal or `tenant:create`), sign in on main portal, open Messages.
 5. Browser console (F12) shows `[realtime] channel subscribed ✓` (not the 403 auth error).
 6. Schedule a test message 2 minutes out → it sends (proves the queue worker is alive).
+7. **Two-window sync test**: change something in one browser (assign a conversation, toggle a user) → it appears in the other window within ~1 second, no refresh. If it doesn't, check `storage/logs/laravel-*.log` for `Sync broadcast failed` — `auth_key should be a valid app key` means `REVERB_APP_KEY` contains `+`/`=` (regenerate alphanumeric, Section 2.2) or a migrated database carries stale Super → Settings → Realtime overrides (clear those fields, save, restart PHP processes).
 
 ---
 
