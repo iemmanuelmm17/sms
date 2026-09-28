@@ -52,7 +52,7 @@ export default function TCPA() {
     api.contacts().then((d) => setContacts(Array.isArray(d) ? d : [])).catch(() => {});
   }, []);
   useEffect(() => {
-    if (lastSync?.resource === 'opt-events' || lastSync?.resource === 'optouts') reload();
+    if (['opt-events', 'optouts', 'resync'].includes(lastSync?.resource)) reload();
   }, [lastSync]);
 
   const nameByPhone = useMemo(() => {

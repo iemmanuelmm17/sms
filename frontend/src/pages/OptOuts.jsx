@@ -12,7 +12,7 @@ export default function OptOuts() {
 
   const reload = () => api.optOuts().then((d) => setItems(Array.isArray(d) ? d : [])).catch(() => {});
   useEffect(() => { reload(); }, []);
-  useEffect(() => { if (lastSync?.resource === 'optouts') reload(); }, [lastSync]);
+  useEffect(() => { if (['optouts', 'resync'].includes(lastSync?.resource)) reload(); }, [lastSync]);
 
   const add = async () => {
     if (!phone.trim()) return;

@@ -108,7 +108,7 @@ export default function Users() {
     // 'agents' covers every roster mutation (status, grants, unlock, resync,
     // first sign-in); 'company-settings'/'numbers' cover the shared-number
     // inventory this page renders alongside it.
-    if (['agents', 'company-settings', 'numbers'].includes(lastSync.resource)) load();
+    if (['agents', 'company-settings', 'numbers', 'resync'].includes(lastSync.resource)) load();
   }, [lastSync]);
 
   const labelFor = (d) => meta[d]?.label || '';

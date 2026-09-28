@@ -45,9 +45,10 @@ export default function Companies() {
   // Another instance changed companies / groups / contacts → refresh.
   useEffect(() => {
     if (!lastSync) return;
-    if (lastSync.resource === 'companies') reloadCompanies();
-    if (lastSync.resource === 'groups') reloadGroups();
-    if (lastSync.resource === 'contacts') reloadContacts();
+    const r = lastSync.resource;
+    if (r === 'companies' || r === 'resync') reloadCompanies();
+    if (r === 'groups' || r === 'resync') reloadGroups();
+    if (r === 'contacts' || r === 'resync') reloadContacts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastSync]);
 

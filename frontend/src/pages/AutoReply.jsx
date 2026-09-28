@@ -141,8 +141,8 @@ export default function AutoReply() {
   }, []);
 
   useEffect(() => {
-    if (lastSync?.resource === 'auto-replies') reload();
-    if (lastSync?.resource === 'subscriptions') api.subscriptions().then(setSubs).catch(() => {});
+    if (['auto-replies', 'resync'].includes(lastSync?.resource)) reload();
+    if (['subscriptions', 'resync'].includes(lastSync?.resource)) api.subscriptions().then(setSubs).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastSync]);
 

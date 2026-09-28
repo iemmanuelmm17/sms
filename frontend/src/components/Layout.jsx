@@ -144,7 +144,7 @@ export default function Layout({ children }) {
   }, []);
   useEffect(() => {
     if (!AGENTS_ENABLED) return;
-    if (lastSync?.resource === 'agents') {
+    if (lastSync?.resource === 'agents' || lastSync?.resource === 'resync') {
       api.agentDirectory().then((a) => setAgents(Array.isArray(a) ? a : [])).catch(() => {});
     }
   }, [lastSync]);

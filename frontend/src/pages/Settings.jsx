@@ -111,7 +111,7 @@ export default function Settings() {
   useEffect(() => { api.smsNumbers().then(setNumbers).catch(() => {}); }, []);
   const reloadCompany = () => api.companySettings().then((d) => { setCompanyName(d?.company_name || ''); setCooldown(d?.auto_reply_cooldown_minutes ?? 5); setQuiet(quietFromSettings(d)); }).catch(() => {});
   useEffect(() => { reloadCompany(); }, []);
-  useEffect(() => { if (lastSync?.resource === 'company-settings') reloadCompany(); }, [lastSync]);
+  useEffect(() => { if (['company-settings', 'resync'].includes(lastSync?.resource)) reloadCompany(); }, [lastSync]);
 
 
   const cooldownNum = () => Math.max(0, Math.min(1440, parseInt(cooldown, 10) || 0));

@@ -24,7 +24,7 @@ export default function Notification() {
   };
   useEffect(() => { if (!isAgent) reload(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (lastSync?.resource === 'company-settings' || lastSync?.resource === 'email-sms-senders') reload();
+    if (['company-settings', 'email-sms-senders', 'resync'].includes(lastSync?.resource)) reload();
   }, [lastSync]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (isAgent) return <div className="p-6 text-sm text-slate-500">Admins only.</div>;

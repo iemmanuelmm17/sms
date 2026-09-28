@@ -84,10 +84,11 @@ function AgentAdmin() {
   // Another instance changed agents / assignments / inbox -> refresh counts.
   useEffect(() => {
     if (!lastSync) return;
-    if (lastSync.resource === 'agents') api.agents().then(setAgents).catch(() => {});
-    if (lastSync.resource === 'convo-meta') api.convoMeta().then(setMeta).catch(() => {});
-    if (lastSync.resource === 'sessions') api.sessions().then(setSessions).catch(() => {});
-    if (lastSync.resource === 'contacts') api.contacts().then(setContacts).catch(() => {});
+    const r = lastSync.resource;
+    if (r === 'agents' || r === 'resync') api.agents().then(setAgents).catch(() => {});
+    if (r === 'convo-meta' || r === 'resync') api.convoMeta().then(setMeta).catch(() => {});
+    if (r === 'sessions' || r === 'resync') api.sessions().then(setSessions).catch(() => {});
+    if (r === 'contacts' || r === 'resync') api.contacts().then(setContacts).catch(() => {});
   }, [lastSync]);
 
   const contactByPhone = useMemo(() => buildContactMap(contacts), [contacts]);

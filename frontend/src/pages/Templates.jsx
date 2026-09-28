@@ -25,7 +25,7 @@ export default function Templates() {
 
   // Another instance changed templates → refresh.
   useEffect(() => {
-    if (lastSync?.resource === 'templates') reload();
+    if (['templates', 'resync'].includes(lastSync?.resource)) reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastSync]);
 

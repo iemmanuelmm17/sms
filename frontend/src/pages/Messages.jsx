@@ -582,6 +582,23 @@ export default function Messages() {
     // convo-meta / agents / contacts / optouts / company-settings / templates
     // are refreshed by ReferenceDataProvider, which owns them for the whole
     // app — refetching here too would double every request.
+    if (resource === 'resync') {
+      // Socket reconnected (or tab woke up): broadcasts that fired while we
+      // were away are lost, so pull the session list again. ReferenceData
+      // refreshes meta/agents/etc. on the same signal. Also refresh the open
+      // thread in case inbound messages were missed.
+      api.sessions(isAgent ? null : inboxNum).then((rows) => {
+        const list = Array.isArray(rows) ? rows : [];
+        sessionCache.set(isAgent ? 'agent' : String(inboxNum), list);
+        setSessions(list);
+      }).catch(() => {});
+      if (activeId) {
+        api.sessionMessages(activeId, numOfSession(active))
+          .then((m) => setMsgs((p) => mergeServerMsgs(p, m, activeId)))
+          .catch(() => {});
+      }
+      return;
+    }
     if (resource === 'sessions' && action === 'read' && id) {
       setSessions((prev) => prev.map((s) => String(s['messagesession-id']) === String(id)
         ? { ...s, 'messagesession-last-status': 'read' } : s));

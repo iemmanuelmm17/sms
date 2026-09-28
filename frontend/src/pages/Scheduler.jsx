@@ -44,7 +44,7 @@ export default function Scheduler() {
 
   // Another instance (or a finished queue job) changed the schedule → refresh.
   useEffect(() => {
-    if (lastSync?.resource === 'scheduled') reload();
+    if (['scheduled', 'resync'].includes(lastSync?.resource)) reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastSync]);
 

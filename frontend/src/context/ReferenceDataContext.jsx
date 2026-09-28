@@ -66,6 +66,10 @@ export function ReferenceDataProvider({ children }) {
 
   useEffect(() => {
     if (!user || !lastSync?.resource) return;
+    // SocketContext emits `resync` after a ws reconnect / long-hidden tab:
+    // broadcasts that fired while we were away are gone forever (Reverb does
+    // not replay), so pull everything this context owns from the server.
+    if (lastSync.resource === 'resync') { refreshAll(); return; }
     const map = {
       agents: ['agents', 'numbers'],
       contacts: ['contacts'],
@@ -85,7 +89,7 @@ export function ReferenceDataProvider({ children }) {
     };
     const keys = map[lastSync.resource];
     if (keys && keys.length) refresh(...keys);
-  }, [lastSync, user, refresh]);
+  }, [lastSync, user, refresh, refreshAll]);
 
   useEffect(() => {
     const onContacts = () => refresh('contacts');

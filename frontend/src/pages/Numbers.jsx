@@ -162,7 +162,7 @@ export default function Numbers() {
   useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
   useEffect(() => { reload(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (lastSync?.resource === 'company-settings' || lastSync?.resource === 'email-sms-senders' || lastSync?.resource === 'agents') reload();
+    if (['company-settings', 'email-sms-senders', 'agents', 'resync'].includes(lastSync?.resource)) reload();
   }, [lastSync]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const digitsOf = (n) => digits(n?.number);
