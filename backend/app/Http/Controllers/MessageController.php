@@ -134,12 +134,12 @@ class MessageController extends Controller
         $this->assertMediaSize($data['data'] ?? null);
         $this->assertAgentNumber($request, (string) ($data['from-number'] ?? ''), 'new'); // new conversation
         $data['message'] = app(\App\Services\CompanySettingsService::class)->resolve($s['domain'], $data['message'], (string) ($this->actor($request)['display_name'] ?? ''));
-        // TCPA wrap — on whenever the composer's footer toggle is checked
-        // (default on), any recipient count. Same wrap as scheduled sends.
+        // TCPA wrap — on only when the composer's footer toggle is checked
+        // (default OFF), any recipient count. Same wrap as scheduled sends.
         if (array_key_exists('tcpa_script', $data) && (bool) $data['tcpa_script']) {
             $companySvc = app(\App\Services\CompanySettingsService::class);
             $company = $companySvc->name($s['domain']);
-            $footer = $companySvc->tcpaFooter($s['domain'], $s['user'] ?? null);
+            $footer = $companySvc->tcpaFooter($s['domain'], $s['user'] ?? null, (string) ($actor['display_name'] ?? ''));
             $data['message'] = ($company !== '' ? $company . ': ' : '') . $data['message'] . "\n" . $footer;
         }
 

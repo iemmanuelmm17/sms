@@ -134,7 +134,8 @@ export default function Layout({ children }) {
   const perAgent = fcounts.perAgent || {};
   const perNumber = fcounts.perNumber || {};
   const agentTotal = Number(fcounts.agentTotal || 0);
-  const agentUnread = (a) => Number(perAgent[a.id] ?? perAgent[String(a.id)] ?? 0);
+  // Composite key first; raw-id fallback reads pre-upgrade localStorage counts.
+  const agentUnread = (a) => Number(perAgent[`${a.kind}:${a.id}`] ?? perAgent[a.id] ?? perAgent[String(a.id)] ?? 0);
 
   // Agent roster for the Agent Inboxes section (all roles see it).
   const [agents, setAgents] = useState([]);
@@ -361,11 +362,16 @@ export default function Layout({ children }) {
   }, [menuOpen]);
 
   const visible = (items) => items.filter((n) => !(n.hideForAgent && user?.role === 'agent'));
+  // Composite "kind:id" — legacy agents and portal identities are separate
+  // tables whose numeric ids collide; raw ids merged two different people
+  // into one inbox link/pill.
   const agentLink = (a) => ({
-    id: `agent-${a.id}`, path: '/app/messages', params: { agent: String(a.id) },
+    id: `agent-${a.kind}-${a.id}`, path: '/app/messages', params: { agent: `${a.kind}:${a.id}` },
     label: agentName(a), group: 'Agent Inboxes', agent: a,
   });
-  const subsFor = (a) => (user?.role !== 'agent' || String(user?.id) === String(a.id)) ? (a.numbers || []) : [];
+  const subsFor = (a) => (user?.role !== 'agent'
+    || (String(user?.id) === String(a.id) && a.kind === (user?.portal_auth ? 'identity' : 'agent')))
+    ? (a.numbers || []) : [];
   const numberLink = (a, num) => ({
     id: `agent-${a.id}-num-${num}`, path: '/app/messages', params: { number: String(num) },
     label: fmtPhone(num), group: 'Agent Inboxes', number: String(num),

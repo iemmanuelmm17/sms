@@ -88,17 +88,19 @@ class SendScheduledMessage implements ShouldQueue
         );
 
         // Resolve $CompanyName, then the TCPA wrap:
-        // "Company: body\n<footer>" — footer is Action A's live text.
+        // "Company: body\n<footer>" — footer is the opt-in disclosure
+        // (Action B) live text, itself resolved by tcpaFooter().
         $companySvc = app(\App\Services\CompanySettingsService::class);
         $text = $companySvc->resolve($m->domain, $text, (string) ($m->created_by_name ?? ''));
         // TCPA wrap — on whenever the composer's "Add TCPA Script Footer" is
-        // checked (default on), regardless of recipient count.
+        // checked, regardless of recipient count.
         if ($m->tcpa_script !== false) {
             $company = $companySvc->name($m->domain);
-            // One resolver: TCPA page setting → opt-out default → literal.
-            // The old (domain,user) lookup missed for portal agents, whose
-            // `user` is an extension rather than the tenant's dynalink_user.
-            $footer = $companySvc->tcpaFooter($m->domain, $m->user);
+            // One resolver: TCPA page setting → opt-in (Action B) default →
+            // literal, with $CompanyName/$AgentName substituted. The old
+            // (domain,user) lookup missed for portal agents, whose `user` is
+            // an extension rather than the tenant's dynalink_user.
+            $footer = $companySvc->tcpaFooter($m->domain, $m->user, (string) ($m->created_by_name ?? ''));
             $text = ($company !== '' ? $company . ': ' : '') . $text . "\n" . $footer;
         }
 

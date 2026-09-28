@@ -159,8 +159,15 @@ const agentOf = (agents, meta, sid, self = null) => {
     if (self && String(self.id) === String(m.identity_id)) return self;
     return agents.find((a) => String(a.id) === String(m.identity_id) && a.kind === 'identity') || null;
   }
+  // Legacy agent ids and portal identity ids come from DIFFERENT tables and
+  // collide freely (both start at 1) — filter by kind, or an agent_id can
+  // resolve to an identity's roster entry and vice versa.
   const id = m.agent_id;
-  return id ? agents.find((a) => String(a.id) === String(id)) || null : null;
+  return id
+    ? agents.find((a) => String(a.id) === String(id) && a.kind !== 'identity')
+      || agents.find((a) => String(a.id) === String(id))
+      || null
+    : null;
 };
 
 export default function Messages() {
@@ -258,7 +265,10 @@ export default function Messages() {
     setNumberFilter(numDigits.length >= 7 && numDigits.length <= 15 ? numDigits : null);
     const ag = searchParams.get('agent');
     const fo = searchParams.get('folder');
-    if (ag && agents.some((a) => String(a.id) === String(ag))) { setFolder(ag); return; }
+    if (ag) {
+      const hit = agents.find((a) => `${a.kind}:${a.id}` === String(ag));
+      if (hit) { setFolder(`${hit.kind}:${hit.id}`); return; }
+    }
     if (fo === 'queue' || fo === 'unassigned' || fo === 'main' || fo === 'archive' || fo === 'spam') {
       setFolder(fo);
       return;
@@ -575,6 +585,25 @@ export default function Messages() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastEvent]);
 
+  /**
+   * Refetch the session list, retrying briefly while a just-messaged remote
+   * is still missing. Dynalink can take a few seconds to surface a brand-new
+   * conversation, and a single refetch raced it — the sender had to refresh
+   * before their own new message showed in the list.
+   */
+  const syncSessions = (expect = [], attempt = 0) => {
+    api.sessions(isAgent ? null : inboxNum).then((rows) => {
+      const list = Array.isArray(rows) ? rows : [];
+      sessionCache.set(isAgent ? 'agent' : String(inboxNum), list);
+      setSessions(list);
+      const want = (expect || []).map(digits).filter(Boolean);
+      if (want.length && attempt < 3) {
+        const have = new Set(list.map((s) => digits(s['messagesession-remote'])));
+        if (!want.every((d) => have.has(d))) setTimeout(() => syncSessions(want, attempt + 1), 2500);
+      }
+    }).catch(() => {});
+  };
+
   // ---- Cross-instance sync: another browser/computer changed something ----
   useEffect(() => {
     if (!lastSync) return;
@@ -587,11 +616,7 @@ export default function Messages() {
       // were away are lost, so pull the session list again. ReferenceData
       // refreshes meta/agents/etc. on the same signal. Also refresh the open
       // thread in case inbound messages were missed.
-      api.sessions(isAgent ? null : inboxNum).then((rows) => {
-        const list = Array.isArray(rows) ? rows : [];
-        sessionCache.set(isAgent ? 'agent' : String(inboxNum), list);
-        setSessions(list);
-      }).catch(() => {});
+      syncSessions();
       if (activeId) {
         api.sessionMessages(activeId, numOfSession(active))
           .then((m) => setMsgs((p) => mergeServerMsgs(p, m, activeId)))
@@ -603,13 +628,9 @@ export default function Messages() {
       setSessions((prev) => prev.map((s) => String(s['messagesession-id']) === String(id)
         ? { ...s, 'messagesession-last-status': 'read' } : s));
     } else if (resource === 'sessions' && action === 'message-sent') {
-      api.sessions(isAgent ? null : inboxNum).then((rows) => {
-        const list = Array.isArray(rows) ? rows : [];
-        sessionCache.set(isAgent ? 'agent' : String(inboxNum), list);
-        setSessions(list);
-      }).catch(() => {});
       const sid = payload?.session_id;
       const remotes = [...(payload?.remotes || []), payload?.remote].filter(Boolean).map((r) => digits(r));
+      syncSessions(remotes);
       const openRemote = active ? digits(active['messagesession-remote']) : '';
       if (activeId && (String(sid) === String(activeId) || (openRemote && remotes.includes(openRemote)))) {
         api.sessionMessages(activeId, numOfSession(active)).then((m) => setMsgs((p) => mergeServerMsgs(p, m, activeId))).catch(() => {});
@@ -667,9 +688,10 @@ export default function Messages() {
     const perAgent = {};
     let agentTotal = 0;
     for (const a of asArray(agents)) {
-      const un = sessions.filter((s) => isActive(s) && String(folderOf(s) || '') === String(a.id)
+      const key = `${a.kind}:${a.id}`;
+      const un = sessions.filter((s) => isActive(s) && String(folderOf(s) || '') === key
         && s['messagesession-last-status'] === 'unread').length;
-      perAgent[a.id] = un;
+      perAgent[key] = un;
       agentTotal += un;
     }
     const perNumber = {};
@@ -708,7 +730,15 @@ export default function Messages() {
     } catch (e) { toastError('Bulk update failed: ' + (e?.response?.data?.message || e.message)); }
   };
 
-  const folderOf = (s) => agentOf(agents, meta, s['messagesession-id'], selfEntry)?.id || null;
+  // Composite folder key ("identity:3" / "agent:3"): legacy agents and portal
+  // identities have colliding numeric ids, so raw ids merged two different
+  // people into one folder/pill. Read straight from meta — no roster needed.
+  const folderOf = (s) => {
+    const m = meta[String(s['messagesession-id'])] || {};
+    if (m.identity_id) return `identity:${m.identity_id}`;
+    if (m.agent_id) return `agent:${m.agent_id}`;
+    return null;
+  };
   const statusOf = (s) => meta[String(s['messagesession-id'])]?.status || 'active';
   const isActive = (s) => statusOf(s) === 'active';
 
@@ -779,12 +809,18 @@ export default function Messages() {
     return () => io.disconnect();
   }, [filtered.length, sessLimit]);
 
-  const assignAgent = async (sid, agentId) => {
+  const assignAgent = async (sid, agentId, kind) => {
     // Which column depends on the TARGET, not on who is assigning: portal
     // users live in agent_identities, legacy agents in agents. Sending the
-    // wrong one fails validation with a 422 ("exists:agents,id").
+    // wrong one fails validation with a 422 ("exists:agents,id"). The two
+    // tables' ids COLLIDE (both start at 1), so resolve the roster entry WITH
+    // its kind — a raw-id find() could route an identity pick into agent_id,
+    // silently assigning the thread to the wrong entity.
     const val = agentId === null || agentId === undefined || agentId === '' ? null : agentId;
-    const target = val === null ? null : agents.find((a) => String(a.id) === String(val));
+    const target = val === null ? null
+      : agents.find((a) => String(a.id) === String(val) && (!kind || a.kind === kind))
+        || agents.find((a) => String(a.id) === String(val))
+        || null;
     const targetIsIdentity = val === null
       ? isPortal                                  // clearing: clear our own column
       : (target ? target.kind === 'identity' : isPortal);
@@ -1403,7 +1439,7 @@ export default function Messages() {
                   const mine = String((isPortal ? meta[String(ctx.sid)]?.identity_id : meta[String(ctx.sid)]?.agent_id) || '') === String(user?.id || '');
                   return mine
                     ? <button className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, null); }}><span>👤</span> Unassign</button>
-                    : <button className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, user.id); }}><span>✅</span> Claim for me</button>;
+                    : <button className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, user.id, isPortal ? 'identity' : 'agent'); }}><span>✅</span> Claim for me</button>;
                 })() : (
                 <div className="relative">
                   <button className={item} onClick={() => setCtxAssign((v) => !v)}><span>👤</span> Assign to agent <span className="ml-auto">▸</span></button>
@@ -1411,7 +1447,7 @@ export default function Messages() {
                     <div className={`absolute top-0 w-52 bg-white border rounded-xl shadow-xl py-1 max-h-56 overflow-y-auto ${mx > window.innerWidth - 480 ? 'right-full mr-1' : 'left-full ml-1'}`}>
                       <button className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, null); }}>👤 Unassigned</button>
                       {assignable.map((a) => (
-                        <button key={a.id} className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, a.id); }}>
+                        <button key={`${a.kind}:${a.id}`} className={item} onClick={() => { setCtx(null); assignAgent(ctx.sid, a.id, a.kind); }}>
                           <span className="w-3 h-3 rounded-full inline-block shrink-0" style={{ backgroundColor: a.tag_color }} /> {agentName(a)}
                         </button>
                       ))}
@@ -1614,14 +1650,19 @@ export default function Messages() {
                 </div>
               </div>
               <div className="ml-auto flex items-center gap-1.5 shrink-0">
-                <select value={activeAgent ? String(activeAgent.id) : ''} title="Assign agent"
-                  onChange={(e) => assignAgent(String(activeId), e.target.value || null)}
+                <select value={activeAgent ? `${activeAgent.kind}:${activeAgent.id}` : ''} title="Assign agent"
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (!v) { assignAgent(String(activeId), null); return; }
+                    const i = v.indexOf(':');
+                    assignAgent(String(activeId), v.slice(i + 1), v.slice(0, i));
+                  }}
                   className="hidden md:block border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500 text-slate-600 min-w-[160px] max-w-[220px]">
                   <option value="">Agent: Unassigned</option>
                   {isAgent ? (<>
-                    <option value={user?.id}>Agent: Claim for me</option>
-                    {activeAgent && String(activeAgent.id) !== String(user?.id) && <option value={activeAgent.id} disabled>Agent: {agentName(activeAgent)} (assigned)</option>}
-                  </>) : assignable.map((a) => <option key={a.id} value={a.id}>Agent: {agentName(a)}</option>)}
+                    <option value={`${isPortal ? 'identity' : 'agent'}:${user?.id}`}>Agent: Claim for me</option>
+                    {activeAgent && !(activeAgent.kind === (isPortal ? 'identity' : 'agent') && String(activeAgent.id) === String(user?.id)) && <option value={`${activeAgent.kind}:${activeAgent.id}`} disabled>Agent: {agentName(activeAgent)} (assigned)</option>}
+                  </>) : assignable.map((a) => <option key={`${a.kind}:${a.id}`} value={`${a.kind}:${a.id}`}>Agent: {agentName(a)}</option>)}
                 </select>
                 {/* Strict select: only real, permitted numbers — never a free
                     or blank value. The thread's own number is marked so the
@@ -1676,14 +1717,19 @@ export default function Messages() {
                   <div className="fixed inset-0 z-[90]" onClick={() => setShowExport(false)} />
                   <div className="fixed z-[100] w-64 md:w-48 bg-white border rounded-xl shadow-xl overflow-hidden" style={{ top: exportPos.top, right: exportPos.right }}>
                     <div className="md:hidden border-b border-slate-100 p-2 space-y-1.5">
-                      <select value={activeAgent ? String(activeAgent.id) : ''} aria-label="Assign agent"
-                        onChange={(e) => assignAgent(String(activeId), e.target.value || null)}
+                      <select value={activeAgent ? `${activeAgent.kind}:${activeAgent.id}` : ''} aria-label="Assign agent"
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (!v) { assignAgent(String(activeId), null); return; }
+                          const i = v.indexOf(':');
+                          assignAgent(String(activeId), v.slice(i + 1), v.slice(0, i));
+                        }}
                         className="w-full border rounded-lg px-2 py-2 text-xs text-slate-600">
                         <option value="">👤 Unassigned</option>
                         {isAgent ? (<>
-                  <option value={user?.id}>✅ Claim for me</option>
-                  {activeAgent && String(activeAgent.id) !== String(user?.id) && <option value={activeAgent.id} disabled>👤 {agentName(activeAgent)} (assigned)</option>}
-                </>) : assignable.map((a) => <option key={a.id} value={a.id}>{agentName(a)}</option>)}
+                  <option value={`${isPortal ? 'identity' : 'agent'}:${user?.id}`}>✅ Claim for me</option>
+                  {activeAgent && !(activeAgent.kind === (isPortal ? 'identity' : 'agent') && String(activeAgent.id) === String(user?.id)) && <option value={`${activeAgent.kind}:${activeAgent.id}`} disabled>👤 {agentName(activeAgent)} (assigned)</option>}
+                </>) : assignable.map((a) => <option key={`${a.kind}:${a.id}`} value={`${a.kind}:${a.id}`}>{agentName(a)}</option>)}
                       </select>
                       <select value={fromNumber} onChange={(e) => chooseFrom(e.target.value)} aria-label="Sending number"
                         disabled={(isAgent ? agentAllowedOpts : numbers).length === 0}
@@ -1916,7 +1962,7 @@ export default function Messages() {
         <NewMessageModal contacts={contacts} numbers={numbers} defaultFrom={fromNumber}
           templates={templates} contactByPhone={contactByPhone} companyName={companyName}
           senderName={senderName} user={user} myName={myName} onClose={() => setShowNew(false)}
-          onSent={() => { setShowNew(false); api.sessions(isAgent ? null : inboxNum).then(setSessions).catch(() => {}); }} />
+          onSent={(dests) => { setShowNew(false); syncSessions(dests || []); }} />
       )}
       </div>
     </div>
@@ -2021,7 +2067,7 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
   const [showSched, setShowSched] = useState(false);
   const [schedAt, setSchedAt] = useState('');
   const [scheduling, setScheduling] = useState(false);
-  const [tcpaFooter, setTcpaFooter] = useState(true); // TCPA footer toggle, on by default
+  const [tcpaFooter, setTcpaFooter] = useState(false); // TCPA footer toggle — OFF by default on new messages
   const fileRef = useRef(null);
 
   // Manual numbers (comma/newline separated) + selected contacts → deduped list.
@@ -2115,7 +2161,7 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
       } else {
         toastError('Send failed: ' + JSON.stringify(res?.response || res).slice(0, 200));
       }
-      onSent();
+      onSent(destinations);
     } catch (e) { toastError('Send failed: ' + (e?.response?.data?.message || e.message)); }
     finally { setBusy(false); }
   };
