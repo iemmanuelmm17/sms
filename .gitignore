@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# Secrets — NEVER commit real credentials (Dynalink client secret, Rev.io
+# password, APP_KEY, DB creds). .env.example files ARE tracked.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
+node_modules/
+backend/vendor/
+backend/node_modules/
+frontend/node_modules/
+
+# ---------------------------------------------------------------------------
+# Laravel runtime / cache
+# ---------------------------------------------------------------------------
+backend/bootstrap/cache/*.php
+backend/storage/framework/cache/*
+backend/storage/framework/sessions/*
+backend/storage/framework/testing/*
+backend/storage/framework/views/*
+backend/storage/logs/*
+backend/.phpunit.result.cache
+backend/phpunit.xml
+
+# Runtime data: per-tenant company settings + uploaded brand logo
+backend/storage/app/company-settings/
+backend/storage/app/brand/
+
+# ---------------------------------------------------------------------------
+# Local database (sqlite holds real tenant data)
+# ---------------------------------------------------------------------------
+backend/database/*.sqlite
+backend/database/*.sqlite-journal
+backend/database/*.sqlite-shm
+backend/database/*.sqlite-wal
+
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+frontend/dist/
+frontend/dist-ssr/
+backend/public/build/
+backend/public/hot
+backend/public/storage
+
+# ---------------------------------------------------------------------------
+# Editors / OS / logs
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+npm-debug.log*
+yarn-error.log*
+*.local
+*.swp
+
+# Dev artifacts (patch dumps from debugging sessions)
+*.patch
