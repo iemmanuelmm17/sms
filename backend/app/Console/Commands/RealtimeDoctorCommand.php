@@ -136,6 +136,22 @@ class RealtimeDoctorCommand extends Command
         if (is_file(base_path('bootstrap/cache/config.php'))) {
             $this->warn('    ! a cached config file exists (bootstrap/cache/config.php) — after ANY .env change run: php artisan config:clear');
         }
+        if (in_array($cfgHost, ['localhost', '127.0.0.1', '::1'], true)) {
+            $this->warn('    ! loopback host — browsers on THIS machine are fine, but browsers on');
+            $this->warn('      OTHER machines would point their WebSocket at themselves and never');
+            $this->warn('      connect. LAN/public fix (DEPLOYMENT.md 2.6): run update-env.ps1 with');
+            $this->warn('      -HostName <this machine IP> for BOTH targets, then restart everything.');
+        }
+        // CORS sanity: fruitcake/php-cors feeds allowed_origins_patterns
+        // entries straight into preg_match(). An invalid regex (e.g. a bare
+        // '*') 500s every request that carries an Origin header — POST
+        // /broadcasting/auth — while Origin-less GETs keep working.
+        foreach ((array) config('cors.allowed_origins_patterns', []) as $pat) {
+            if (@preg_match((string) $pat, 'https://example.com') === false) {
+                $this->error('    ✗ config/cors.php pattern is not a valid regex: ' . var_export($pat, true));
+                $problems[] = 'config/cors.php allowed_origins_patterns contains an invalid regex (' . var_export($pat, true) . ') — every POST /broadcasting/auth will 500. Entries must be full delimited PCRE like #^https?://.+$# . Fix config/cors.php, then: php artisan config:clear';
+            }
+        }
 
         // ---------- [4] Ground truth: probe through the framework's OWN broadcaster ----------
         $this->line('');

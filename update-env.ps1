@@ -85,6 +85,11 @@ function New-RandomKey {
 if ($Target -eq 'backend') {
     $f = Join-Path $RootDir 'backend\.env'
     Set-EnvValue -File $f -Key 'APP_URL' -Value ('http://' + $HostName + ':8000')
+    # REVERB_HOST is the address BROWSERS get from /api/realtime for the
+    # WebSocket. 'localhost' only works for browsers on this machine; use the
+    # LAN/public IP so other devices can connect (the server-side broadcaster
+    # loops back to it fine).
+    Set-EnvValue -File $f -Key 'REVERB_HOST' -Value $HostName
     if ((Get-EnvValue -File $f -Key 'REVERB_APP_KEY') -eq '') {
         Set-EnvValue -File $f -Key 'REVERB_APP_KEY' -Value (New-RandomKey)
     }

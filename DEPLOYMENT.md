@@ -128,9 +128,30 @@ Windows Firewall will prompt for each port — allow on **private** networks.
 2. `php artisan superadmin:create` → sign in at `/super/login` → forced password change → Tenants page.
 3. Superadmin → Allowed IPs page shows **your real LAN IP** as "Your current IP". (If it shows `127.0.0.1` while you're remote, see Section 8, item 8.)
 4. Create tenant + admin (portal or `tenant:create`), sign in on main portal, open Messages.
-5. Browser console (F12) shows `[realtime] channel subscribed ✓` (not the 403 auth error).
+5. Browser console (F12) shows `[realtime] socket target: ws://<host>:8080 ... (server settings)` followed by `[realtime] channel subscribed ✓` (not a 403/500 auth error). `<host>` must be an address the BROWSER's machine can reach — see Section 2.6 for LAN setups.
 6. Schedule a test message 2 minutes out → it sends (proves the queue worker is alive).
-7. **Two-window sync test**: change something in one browser (assign a conversation, toggle a user) → it appears in the other window within ~1 second, no refresh. If it doesn't, check `storage/logs/laravel-*.log` for `Sync broadcast failed` — `auth_key should be a valid app key` means `REVERB_APP_KEY` contains `+`/`=` (regenerate alphanumeric, Section 2.2) or a migrated database carries stale Super → Settings → Realtime overrides (clear those fields, save, restart PHP processes).
+7. **Two-window sync test**: change something in one browser (assign a conversation, toggle a user) → it appears in the other window within ~1 second, no refresh. If it doesn't, run `php artisan realtime:doctor` first — it cross-checks `.env` vs DB overrides vs the running Reverb vs the broadcaster Laravel actually uses and prints the exact broken layer. (`auth_key should be a valid app key` means `REVERB_APP_KEY` contains `+`/`=` — regenerate alphanumeric, Section 2.2 — or a migrated database carries stale Super → Settings → Realtime overrides.)
+
+### 2.6 LAN / public access (other computers)
+
+Browsers must reach Reverb and the API at an address that works **from the
+browser's machine**. `localhost` only works on the server itself — a phone or
+another PC would connect to *itself*. Use the server's LAN IP (or public
+hostname) everywhere:
+
+1. Find the server's IP on the server: `ipconfig` (Windows) / `ip a` (Linux) — e.g. `192.168.18.5`.
+2. Backend `.env`: `REVERB_HOST=192.168.18.5` and `APP_URL=http://192.168.18.5:8000`. Browsers read `REVERB_HOST` through `/api/realtime`, and the broadcaster loops back to it fine.
+3. Frontend `.env`: `VITE_REVERB_HOST=192.168.18.5` and add the IP to `VITE_ALLOWED_HOSTS` (vite rejects unknown Host headers with "Blocked request").
+   Both files in one shot from the project root:
+   `powershell -NoProfile -ExecutionPolicy Bypass -File update-env.ps1 -Target backend -HostName 192.168.18.5` then the same with `-Target frontend`.
+4. Firewall: open 5173/8000/8080 (installer step 9 does this; or `netsh advfirewall firewall add rule name="SMS App 8080" dir=in action=allow protocol=TCP localport=8080 profile=private`).
+5. Restart everything: `taskkill /F /IM php.exe` then `.\start-all.bat` (Reverb, serve, queue and vite read `.env` only at boot).
+6. From another device open `http://192.168.18.5:5173` → console must show `[realtime] socket target: ws://192.168.18.5:8080` and `channel subscribed ✓`.
+
+Notes:
+- The stack serves plain `http`/`ws`. HTTPS/WSS needs a reverse proxy in front (nginx/Caddy) forwarding WebSockets on 8080 — then set `REVERB_SCHEME=https` in both `.env` files.
+- Public-internet exposure: the superadmin portal has an IP allowlist (`php artisan superadmin:ip`); keep it configured. CORS reflects the request Origin with credentials, which is safe **because** session cookies are `SameSite=lax` (cross-site fetches never carry them).
+- After moving machines, clear stale Super → Settings → Realtime overrides (they beat `.env`): `php artisan app:setting reverb.host --forget` (same for `port`/`scheme`/`app_key`), then `php artisan cache:clear`.
 
 ---
 
