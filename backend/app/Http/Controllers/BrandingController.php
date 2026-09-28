@@ -24,11 +24,14 @@ class BrandingController extends Controller
     public function realtime()
     {
         $c = config('broadcasting.connections.reverb', []);
+        // Prefer the SDK-facing `options` block (source of truth for the
+        // broadcaster), fall back to the legacy top-level mirrors.
+        $o = is_array($c['options'] ?? null) ? $c['options'] : [];
         $s = fn ($v) => (is_string($v) || is_numeric($v)) ? trim((string) $v) : '';
         return response()->json([
-            'host' => $this->orNull($s($c['host'] ?? null)),
-            'port' => $this->orNullInt($c['port'] ?? null),
-            'scheme' => $this->orNull($s($c['scheme'] ?? null)),
+            'host' => $this->orNull($s($o['host'] ?? $c['host'] ?? null)),
+            'port' => $this->orNullInt($o['port'] ?? $c['port'] ?? null),
+            'scheme' => $this->orNull($s($o['scheme'] ?? $c['scheme'] ?? null)),
             'app_key' => $this->orNull($s($c['key'] ?? null)),
         ]);
     }

@@ -21,9 +21,12 @@ use Illuminate\Console\Command;
  *      still validating the old one. Same story for queue workers.
  *
  * This command reads all three, cross-checks them, and live-probes the socket
- * server with the Pusher HTTP API (GET /channels) — first with the effective
- * (broadcaster) credentials, then with the pure .env ones. The combination of
- * the two probe results identifies the broken layer exactly.
+ * server with the Pusher HTTP API (GET /channels) — first THROUGH the exact
+ * broadcaster instance Laravel itself uses (ground truth: it reveals when the
+ * SDK is secretly talking to api-mt1.pusher.com because host/port are not
+ * nested inside the reverb connection's `options` array), then directly with
+ * the effective credentials, then with the pure .env ones. The combination of
+ * the probe results identifies the broken layer exactly.
  */
 class RealtimeDoctorCommand extends Command
 {
@@ -105,11 +108,20 @@ class RealtimeDoctorCommand extends Command
         $this->comment('[3] Effective broadcaster config (after overrides — what requests/jobs use)');
         $default = (string) config('broadcasting.default');
         $cfg = config('broadcasting.connections.reverb', []);
+        // The Pusher SDK only ever sees the nested `options` block, so that
+        // is the effective truth; top-level values are legacy mirrors.
+        $cfgOpts = is_array($cfg['options'] ?? null) ? $cfg['options'] : [];
         $cfgKey  = (string) ($cfg['key'] ?? '');
-        $cfgHost = (string) ($cfg['host'] ?? '');
-        $cfgPort = (int) ($cfg['port'] ?? 0);
-        $cfgScheme = (string) ($cfg['scheme'] ?? 'http');
+        $cfgHost = (string) ($cfgOpts['host'] ?? $cfg['host'] ?? '');
+        $cfgPort = (int) ($cfgOpts['port'] ?? $cfg['port'] ?? 0);
+        $cfgScheme = (string) ($cfgOpts['scheme'] ?? $cfg['scheme'] ?? 'http');
         $cfgAppId = (string) ($cfg['app_id'] ?? '');
+        if (empty($cfgOpts) && ($cfg['host'] ?? '') !== '') {
+            $this->error('    ✗ the reverb connection has NO nested `options` block — Laravel hands ONLY');
+            $this->error('      `options` to the Pusher SDK, so host/port above are IGNORED and every');
+            $this->error('      broadcast() goes to Pusher CLOUD (api-mt1.pusher.com).');
+            $problems[] = 'config/broadcasting.php: host/port/scheme must be nested inside the reverb connection\'s `options` array (currently top-level only). Fix backend/config/broadcasting.php, then: php artisan config:clear';
+        }
         $this->kv('default connection', $default);
         if ($default !== 'reverb') $problems[] = "Effective broadcast connection is \"$default\", not \"reverb\" — events go nowhere. Check BROADCAST_CONNECTION and run: php artisan config:clear";
         $this->kv('key', $cfgKey !== '' ? $this->mask($cfgKey) : '(MISSING)');
@@ -125,13 +137,64 @@ class RealtimeDoctorCommand extends Command
             $this->warn('    ! a cached config file exists (bootstrap/cache/config.php) — after ANY .env change run: php artisan config:clear');
         }
 
-        // ---------- [4] Live probe of the RUNNING Reverb server ----------
+        // ---------- [4] Ground truth: probe through the framework's OWN broadcaster ----------
         $this->line('');
-        $this->comment('[4] Live probe — GET /channels on the running Reverb server');
+        $this->comment('[4] Ground truth — probe through the broadcaster Laravel actually uses');
+        $driverProbe = ['ok' => false, 'err' => 'not attempted'];
+        $driverTarget = '';
+        if ($default !== 'reverb') {
+            $this->line('    · skipped — default connection is "' . $default . '", not "reverb".');
+        } else {
+            try {
+                $manager = $this->laravel->make(\Illuminate\Contracts\Broadcasting\Factory::class);
+                $broadcaster = $manager->connection('reverb');
+                $pusher = method_exists($broadcaster, 'getPusher') ? $broadcaster->getPusher() : null;
+                if (!$pusher instanceof \Pusher\Pusher) {
+                    $this->warn('    ! could not resolve the Pusher SDK instance from the broadcaster.');
+                } else {
+                    $st = $pusher->getSettings();
+                    $dHost = (string) ($st['host'] ?? '?');
+                    $dScheme = (string) ($st['scheme'] ?? 'http');
+                    $dPort = $st['port'] ?? ($dScheme === 'https' ? 443 : 80);
+                    $driverTarget = $dScheme . '://' . $dHost . ':' . $dPort;
+                    $this->kv('    broadcaster talks to', $driverTarget);
+                    if (str_contains($dHost, 'pusher.com')) {
+                        $this->error('    ✗ THAT IS PUSHER CLOUD — not your Reverb server!');
+                        $this->error('      Laravel passes ONLY $config[\'options\'] to the Pusher SDK; without a');
+                        $this->error('      nested options.host it silently defaults to api-mt1.pusher.com, which');
+                        $this->error('      rejects your local key with "auth_key should be a valid app key".');
+                        $problems[] = 'Framework broadcaster targets PUSHER CLOUD (' . $driverTarget . ') — config/broadcasting.php must nest host/port/scheme inside the reverb connection\'s `options` array. Update backend/, php artisan config:clear, then restart (taskkill /F /IM php.exe + start-all.bat).';
+                    }
+                    try {
+                        $r = $pusher->get('/channels');
+                        $driverProbe = ['ok' => true, 'channels' => is_object($r) ? (array) ($r->channels ?? []) : (array) $r];
+                    } catch (\Throwable $e) {
+                        $driverProbe = ['ok' => false, 'err' => $e->getMessage()];
+                    }
+                    if ($driverProbe['ok']) {
+                        $this->ok('    ✓ broadcast() through the framework reached the server — publishing WORKS.');
+                        $this->line('      channels currently open: ' . count($driverProbe['channels']));
+                    } else {
+                        $this->error('    ✗ framework probe failed: ' . $driverProbe['err']);
+                    }
+                }
+            } catch (\Throwable $e) {
+                $this->warn('    ! could not build the broadcaster: ' . $e->getMessage());
+                $driverProbe = ['ok' => false, 'err' => $e->getMessage()];
+            }
+        }
+
+        // ---------- [5] Direct probe of the RUNNING Reverb server ----------
+        $this->line('');
+        $this->comment('[5] Direct probe — GET /channels on the running Reverb server');
         $effective = $this->probe($cfgKey, (string) ($cfg['secret'] ?? ''), $cfgAppId, $cfgHost, $cfgPort, $cfgScheme);
         if ($effective['ok']) {
             $this->ok('    ✓ Reverb ACCEPTED the broadcaster credentials — realtime publishing works.');
             $this->line('      channels currently open: ' . count($effective['channels']));
+            if (!$driverProbe['ok'] && $default === 'reverb' && $driverTarget !== '') {
+                $this->warn('    ! ...BUT the framework broadcaster ([4]) failed targeting ' . $driverTarget);
+                $this->warn('      → this probe passes host/port explicitly; broadcast() cannot. See [4].');
+            }
         } else {
             $this->error('    ✗ effective credentials rejected: ' . $effective['err']);
             $sameAsEnv = ($cfgKey === $envKey && $cfgHost === $envHost && $cfgPort === $envPort && $cfgAppId === $envAppId);
@@ -162,9 +225,9 @@ class RealtimeDoctorCommand extends Command
             }
         }
 
-        // ---------- [5] frontend/.env (informational) ----------
+        // ---------- [6] frontend/.env (informational) ----------
         $this->line('');
-        $this->comment('[5] frontend/.env (fallback for browsers; /api/realtime normally wins)');
+        $this->comment('[6] frontend/.env (fallback for browsers; /api/realtime normally wins)');
         $fenv = $this->readEnvFile(dirname(base_path()) . '/frontend/.env');
         $fKey = (string) ($fenv['VITE_REVERB_APP_KEY'] ?? '');
         if ($fKey === '') {

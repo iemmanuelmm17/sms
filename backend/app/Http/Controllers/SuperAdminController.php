@@ -429,9 +429,9 @@ class SuperAdminController extends Controller
             // Realtime broadcast (Reverb) — where browsers connect for live
             // updates. DB override → .env, same pattern as the fields above.
             'broadcast' => [
-                'host' => $this->envOverride('reverb.host', config('broadcasting.connections.reverb.host')),
-                'port' => $this->envOverride('reverb.port', config('broadcasting.connections.reverb.port')),
-                'scheme' => $this->envOverride('reverb.scheme', config('broadcasting.connections.reverb.scheme')),
+                'host' => $this->envOverride('reverb.host', config('broadcasting.connections.reverb.options.host', config('broadcasting.connections.reverb.host'))),
+                'port' => $this->envOverride('reverb.port', config('broadcasting.connections.reverb.options.port', config('broadcasting.connections.reverb.port'))),
+                'scheme' => $this->envOverride('reverb.scheme', config('broadcasting.connections.reverb.options.scheme', config('broadcasting.connections.reverb.scheme'))),
                 'app_key' => $this->envOverride('reverb.app_key', config('broadcasting.connections.reverb.key')),
             ],
             // Shared Dynalink login used for agent sends.
