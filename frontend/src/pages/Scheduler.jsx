@@ -390,7 +390,14 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
   const complianceOn = tcpaScript; // footer applies to every scheduled send when checked
   const isMms = !!attach;
   const segs = (t) => (isMms ? 1 : smsSegments(t)); // shared estimator (GSM-7 + unicode)
-  const wrappedPreview = `${companyName ? companyName + ': ' : ''}${message}\n${footerText}`;
+  // Mirror the backend's tcpaFooter() exactly: a leading "$CompanyName:" is
+  // dropped (the wrap already prefixes the company name) and remaining
+  // placeholders resolve — so the char/segment counts match what really sends.
+  const resolvedFooter = footerText
+    .replace(/^\s*\$CompanyName\s*:?\s*/i, '')
+    .split('$CompanyName').join(companyName || '')
+    .split('$AgentName').join('');
+  const wrappedPreview = `${companyName ? companyName + ': ' : ''}${message}\n${resolvedFooter}`;
   const preview = wrappedPreview.length > 120 ? wrappedPreview.slice(0, 120) + '…' : wrappedPreview;
 
   const selectedDigits = new Set([
@@ -575,7 +582,7 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
         {!asap && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
             <div>
-              <label className="text-[11px] text-slate-500">Date &amp; time <span className="text-slate-400">(past = send now)</span></label>
+              <label className="text-[11px] text-slate-500">Date & time <span className="text-slate-400">(past = send now)</span></label>
               <input type="datetime-local" value={sendAt} onChange={(e) => setSendAt(e.target.value)}
                 className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mt-1" />
             </div>
@@ -633,7 +640,7 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
       <div className="border-t mt-4 pt-3">
         <p className={section}>Send To</p>
         <div className="flex gap-2 mt-1.5 flex-wrap">
-          <button type="button" onClick={() => setSendTab('contacts')} className={tabCls('contacts')}>👥 Contacts &amp; Groups</button>
+          <button type="button" onClick={() => setSendTab('contacts')} className={tabCls('contacts')}>👥 Contacts & Groups</button>
           <button type="button" onClick={() => setSendTab('csv')} className={tabCls('csv')}>⬆ Upload CSV</button>
           <button type="button" onClick={() => setSendTab('manual')} className={tabCls('manual')}>⌨ Enter Numbers</button>
           <button type="button" onClick={() => setSendTab('company')} className={tabCls('company')}>🏢 Entire Company</button>
@@ -744,13 +751,13 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
 
       {/* Compliance */}
       <div className="border-t mt-4 pt-3">
-        <p className={section}>Compliance &amp; Delivery Rules</p>
+        <p className={section}>Compliance & Delivery Rules</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
           <label className="flex items-start gap-2 text-xs text-slate-600 cursor-pointer">
             <input type="checkbox" checked={tcpaScript} onChange={(e) => setTcpaScript(e.target.checked)} className="w-4 h-4 mt-0.5 accent-brand-600" />
             <span>
               <span className="font-medium text-slate-700">Add TCPA Script Footer</span>
-              <span className="block text-[11px] text-slate-400">Applies company name + opt-out line to the message.</span>
+              <span className="block text-[11px] text-slate-400">Applies company name + TCPA footer to the message.</span>
             </span>
           </label>
           <label className="flex items-start gap-2 text-xs text-slate-600 cursor-pointer">
@@ -778,7 +785,7 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
         )}
         {complianceOn && (
           <div className="text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded-lg p-2.5 mt-2 dark:bg-amber-950/50 dark:border-amber-700/60 dark:text-amber-100">
-            🛡️ TCPA wrap applies: <strong>{wrappedPreview.length} chars • {segs(wrappedPreview)} segment(s){isMms ? ' • MMS' : ''}</strong> incl. company name + opt-out footer.
+            🛡️ TCPA wrap applies: <strong>{wrappedPreview.length} chars • {segs(wrappedPreview)} segment(s){isMms ? ' • MMS' : ''}</strong> incl. company name + TCPA footer.
             <div className="mt-1 text-amber-700 dark:text-amber-200/90 break-words whitespace-pre-wrap">“{preview}”</div>
           </div>
         )}
@@ -855,7 +862,7 @@ function ScheduleView({ item, onClose, onChanged }) {
           {item.updated_at && item.updated_at !== item.created_at && <div className="flex"><dt className="w-24 text-slate-400">Updated</dt><dd>{item.updated_by_name || item.updated_by || 'System'}{' • '}{fmtDateTimeIn(item.updated_at)}</dd></div>}
           <div className="flex"><dt className="w-24 text-slate-400">Send at</dt><dd>{fmtDateTimeIn(item.send_at, getTimezone())} ({item.timezone || getTimezone()})</dd></div>
           <div className="flex"><dt className="w-24 text-slate-400">From</dt><dd>{fmtPhone(item.from_number)} • {item.type?.toUpperCase()}</dd></div>
-          <div className="flex"><dt className="w-24 text-slate-400">TCPA script</dt><dd className={item.tcpa_script === false ? 'text-red-600 font-medium' : ''}>{item.tcpa_script === false ? 'Off — no opt-out line' : 'On'}</dd></div>
+          <div className="flex"><dt className="w-24 text-slate-400">TCPA script</dt><dd className={item.tcpa_script === false ? 'text-red-600 font-medium' : ''}>{item.tcpa_script === false ? 'Off — no TCPA footer' : 'On'}</dd></div>
           <div className="flex"><dt className="w-24 text-slate-400">Recipients</dt><dd>{item.include_optin ? 'Selection + all opt-in numbers' : 'Selection only (opt-outs filtered at send)'}</dd></div>
           {item.recurrence && (
             <div className="flex"><dt className="w-24 text-slate-400">Repeats</dt>
@@ -1002,7 +1009,7 @@ function ScheduleEditForm({ item, onClose, onSaved }) {
         <input value={name} onChange={(e) => setName(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 mt-1 mb-2" />
         <label className="flex items-start gap-2 text-xs text-slate-600 cursor-pointer mb-2">
           <input type="checkbox" checked={tcpaScript} onChange={(e) => setTcpaScript(e.target.checked)} className="w-4 h-4 mt-0.5 accent-brand-600" />
-          <span>Add TCPA script <span className="text-slate-400">(company name + opt-out line)</span></span>
+          <span>Add TCPA script <span className="text-slate-400">(company name + TCPA footer)</span></span>
         </label>
         <label className="flex items-start gap-2 text-xs text-slate-600 mb-2">
           <input type="checkbox" checked={includeOptin} onChange={(e) => setIncludeOptin(e.target.checked)}

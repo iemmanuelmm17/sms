@@ -183,7 +183,7 @@ export default function Settings() {
                 <div className="flex gap-1 bg-slate-100 rounded-lg p-1 text-xs font-medium">
                   <button onClick={() => saveBg(undefined, 'fit')}
                     className={`flex-1 rounded-md px-3 py-1 ${bgMode !== 'repeat' ? 'bg-white shadow text-slate-800' : 'text-slate-500'}`}>
-                    Center &amp; fit
+                    Center & fit
                   </button>
                   <button onClick={() => saveBg(undefined, 'repeat')}
                     className={`flex-1 rounded-md px-3 py-1 ${bgMode === 'repeat' ? 'bg-white shadow text-slate-800' : 'text-slate-500'}`}>
@@ -203,7 +203,7 @@ export default function Settings() {
           <input ref={bgFileRef} type="file" accept="image/*" className="hidden" onChange={(e) => onBgFile(e.target.files?.[0])} />
           <p className="text-[11px] text-slate-400 mt-2">
             Shown faintly (12% opacity) behind your conversations so text stays readable.
-            "Repeat pattern" tiles a small pattern; "Center &amp; fit" stretches a photo to fill.
+            "Repeat pattern" tiles a small pattern; "Center & fit" stretches a photo to fill.
           </p>
         </section>
         <section className="bg-white rounded-xl border p-5">
@@ -231,7 +231,7 @@ export default function Settings() {
           <p className="text-[11px] text-slate-400 mt-1">After hitting Send, you have a few seconds to undo before the message goes out.</p>
         </section>
         <section className="bg-white rounded-xl border p-5">
-          <h3 className="font-semibold text-sm mb-2">Date &amp; time format</h3>
+          <h3 className="font-semibold text-sm mb-2">Date & time format</h3>
           <div className="grid grid-cols-2 gap-3 max-w-xs">
             <div><label className="text-xs text-slate-500">Time</label>
               <select value={prefs.timeFormat || '12'} onChange={(e) => set('timeFormat', e.target.value)}
