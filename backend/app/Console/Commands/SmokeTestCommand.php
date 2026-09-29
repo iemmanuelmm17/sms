@@ -197,7 +197,9 @@ class SmokeTestCommand extends Command
                 ]);
                 TenantAdmin::create([
                     'tenant_id' => $tenant->id, 'username' => 'admin',
+                    'first_name' => 'Smoke', 'last_name' => 'Admin',
                     'password_hash' => Hash::make('correct-horse-9'), 'status' => 'active',
+                    'secret_question' => 'smoke?', 'secret_answer_hash' => Hash::make('no'),
                     'session_version' => 0,
                 ]);
                 $last = null;
@@ -243,6 +245,7 @@ class SmokeTestCommand extends Command
                     'domain' => 'smoke.test', 'user' => '9999', 'name' => 'Smoke', 'message' => 'hi',
                     'from_number' => '15550009999', 'type' => 'sms',
                     'send_at' => now()->toDateTimeString(), 'timezone' => 'UTC',
+                    'targets' => ['contacts' => [], 'group_ids' => [], 'company' => false],
                     'recipients' => [['phone' => '15550001111', 'name' => 'T']],
                     'send_log' => [['phone' => '15550001111', 'ok' => true]],
                     'status' => 'sent',
@@ -260,6 +263,7 @@ class SmokeTestCommand extends Command
                     'domain' => 'smoke.test', 'user' => '9999', 'name' => 'Smoke2', 'message' => 'hi',
                     'from_number' => '15550009999', 'type' => 'sms',
                     'send_at' => now()->toDateTimeString(), 'timezone' => 'UTC',
+                    'targets' => ['contacts' => [], 'group_ids' => [], 'company' => false],
                     'recipients' => [['phone' => '15550001111', 'name' => 'T']],
                     'send_log' => [['phone' => '15550001111', 'ok' => true]],
                     'status' => 'sending', // in-flight retry, not the early-return statuses
