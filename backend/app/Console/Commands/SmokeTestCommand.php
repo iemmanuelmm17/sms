@@ -254,8 +254,13 @@ class SmokeTestCommand extends Command
                 (new SendScheduledMessage($m->id, 0))->handle(
                     app(DynalinkService::class), app(OptOutService::class)
                 );
-                Http::assertNothingSent();
-                return null;
+                // Not Http::assertNothingSent(): Laravel's Http assertions call
+                // PHPUnit, which is a dev dependency — absent on production
+                // boxes, where smoke:test must still run. recorded() is plain data.
+                $sent = Http::recorded();
+                return count($sent) === 0
+                    ? null
+                    : 'expected zero HTTP calls for an already-sent schedule, recorded ' . count($sent);
             });
 
             $this->check('scheduled send skips a recipient already confirmed in send_log', function () {
@@ -272,8 +277,11 @@ class SmokeTestCommand extends Command
                 (new SendScheduledMessage($m->id, 0))->handle(
                     app(DynalinkService::class), app(OptOutService::class)
                 );
-                Http::assertNothingSent();
-                return null;
+                // PHPUnit-free assertion (see the check above).
+                $sent = Http::recorded();
+                return count($sent) === 0
+                    ? null
+                    : 'expected zero HTTP calls for a recipient already in send_log, recorded ' . count($sent);
             });
 
             // ---- Local PII surface (privacy commands have something to find) ----
