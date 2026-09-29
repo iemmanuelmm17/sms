@@ -68,11 +68,11 @@ export default function ForgotPassword() {
         {step === 1 && (
           <form onSubmit={doVerify} className="space-y-4">
             <div>
-              <label className="text-sm font-medium text-slate-700">{isAdmin ? 'Admin username' : 'Agent username'}</label>
-              <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder={isAdmin ? 'admin@tenantname' : 'maria@tenantname'} autoFocus
+              <label htmlFor="fp-username" className="text-sm font-medium text-slate-700">{isAdmin ? 'Admin username' : 'Agent username'}</label>
+              <input id="fp-username" value={username} onChange={(e) => setUsername(e.target.value)} placeholder={isAdmin ? 'admin@tenantname' : 'maria@tenantname'} autoFocus
                 className="mt-1 w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
             </div>
-            {err && <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{err}</div>}
+            {err && <div role="alert" className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{err}</div>}
             <button disabled={busy} className="w-full bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-semibold">
               {busy ? 'Verifying…' : 'Verify'}
             </button>
@@ -86,11 +86,11 @@ export default function ForgotPassword() {
               <div className="font-medium text-slate-800 mt-0.5">{question}</div>
             </div>
             <div>
-              <label className="text-sm font-medium text-slate-700">Your answer</label>
-              <input value={answer} onChange={(e) => setAnswer(e.target.value)} autoFocus
+              <label htmlFor="fp-answer" className="text-sm font-medium text-slate-700">Your answer</label>
+              <input id="fp-answer" value={answer} onChange={(e) => setAnswer(e.target.value)} autoFocus
                 className="mt-1 w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
             </div>
-            {err && <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{err}</div>}
+            {err && <div role="alert" className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{err}</div>}
             <button disabled={busy} className="w-full bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-semibold">
               {busy ? 'Checking…' : 'Verify answer'}
             </button>
@@ -100,16 +100,16 @@ export default function ForgotPassword() {
         {step === 3 && (
           <form onSubmit={doReset} className="space-y-4">
             <div>
-              <label className="text-sm font-medium text-slate-700">New password (min 8 characters)</label>
-              <input type="password" value={pw1} onChange={(e) => setPw1(e.target.value)} autoFocus
+              <label htmlFor="fp-pw1" className="text-sm font-medium text-slate-700">New password (min 8 characters)</label>
+              <input id="fp-pw1" type="password" value={pw1} onChange={(e) => setPw1(e.target.value)} autoFocus
                 className="mt-1 w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
             </div>
             <div>
-              <label className="text-sm font-medium text-slate-700">Confirm new password</label>
-              <input type="password" value={pw2} onChange={(e) => setPw2(e.target.value)}
+              <label htmlFor="fp-pw2" className="text-sm font-medium text-slate-700">Confirm new password</label>
+              <input id="fp-pw2" type="password" value={pw2} onChange={(e) => setPw2(e.target.value)}
                 className="mt-1 w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
             </div>
-            {err && <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{err}</div>}
+            {err && <div role="alert" className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{err}</div>}
             <button disabled={busy} className="w-full bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-semibold">
               {busy ? 'Saving…' : 'Set new password'}
             </button>

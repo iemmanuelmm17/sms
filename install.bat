@@ -130,6 +130,7 @@ echo cd /d %ROOT%backend
 echo start "SMS Backend :8000" php artisan serve --host=0.0.0.0 --port=8000
 echo start "SMS Sockets :8080" php artisan reverb:start --host=0.0.0.0 --port=8080
 echo start "SMS Queue" php artisan queue:work --tries=3 --timeout=120
+echo start "SMS Scheduler" php artisan schedule:work
 echo cd /d %ROOT%frontend
 echo start "SMS Frontend :5173" cmd /k npm run dev
 echo echo All services starting in separate windows. Close a window to stop it.
@@ -138,7 +139,7 @@ echo Created start-all.bat
 echo.
 echo ============================================================
 echo  DONE. Next steps:
-echo  1. Double-click start-all.bat (4 windows open)
+echo  1. Double-click start-all.bat (5 windows open)
 echo  2. Open http://%H%:5173 from any machine on the network
 echo  3. Sign in at /super/login, create tenants, verify realtime
 echo  Full verify list: DEPLOYMENT.md section 2.5

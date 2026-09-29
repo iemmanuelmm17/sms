@@ -12,6 +12,11 @@ Schedule::command('mail:poll-email-sms')->everyMinute()->withoutOverlapping(5);
 // source; this keeps it fresh when contacts are edited directly in Dynalink).
 Schedule::command('contacts:sync')->dailyAt('03:10')->withoutOverlapping(30);
 
+// Nightly local backup: consistent SQLite snapshot (VACUUM INTO) + .env +
+// uploaded files, 14 generations kept. Point BACKUP_DIR at another disk in
+// .env for real safety. Manual run: `php artisan backup:run`.
+Schedule::command('backup:run')->dailyAt('02:30')->withoutOverlapping(60);
+
 // Queue worker heartbeat: queue:work loops even when idle, so every loop
 // iteration refreshes this timestamp. The Scheduler page reads it via
 // GET /api/ops/health to show worker online/offline. (Registered here

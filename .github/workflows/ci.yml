@@ -1,0 +1,144 @@
+# CI gate: backend smoke suite, frontend build + audit, installer script tests.
+# Runs on every push/PR. The smoke suite boots a THROWAWAY sqlite DB, so it
+# needs no services and touches nothing real.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, mbstring, sqlite3, openssl, ctype, json, tokenizer, xml, curl
+          coverage: none
+
+      - name: Validate composer.json / lock sync
+        run: composer validate --no-check-publish
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          touch database/database.sqlite
+          php artisan key:generate --force
+
+      - name: Migrate
+        run: php artisan migrate --force
+
+      - name: Smoke tests
+        run: php artisan smoke:test
+
+      - name: Code style (advisory)
+        continue-on-error: true
+        run: vendor/bin/pint --test
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # Gate on CRITICAL only. Known backlog (2026-09): vite <=6.4.2 (high,
+      # dev-server CORS) and react-router 6.x (moderate) both need MAJOR
+      # upgrades (vite 8 / RR 7, Node 20+) — deferred deliberately; see
+      # DEPLOYMENT.md §9 Security checklist. Blocks NEW critical advisories.
+      - name: Dependency audit (critical only)
+        run: npm audit --audit-level=critical
+
+  installer-scripts:
+    # update-env.ps1 uses Windows path joins (backend\.env) — it is a
+    # Windows installer helper, so it gets tested on a Windows runner.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: update-env.ps1 round-trip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tmp = Join-Path ([IO.Path]::GetTempPath()) ("envtest_" + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path (Join-Path $tmp 'backend') | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $tmp 'frontend') | Out-Null
+
+          # Seed a backend .env with values that MUST survive the rewrite.
+          @(
+            'APP_NAME="SMS App"'
+            'APP_ENV=production'
+            'APP_KEY=base64:PREEXISTINGKEY=='
+            '# a comment line'
+            ''
+            'REVERB_APP_KEY=EXISTINGKEY1234567890abcdefghij'
+            'REVERB_HOST=localhost'
+            'CUSTOM_LINE=keepme'
+          ) | Set-Content -LiteralPath (Join-Path $tmp 'backend\.env')
+          @('VITE_APP_NAME="SMS App"') | Set-Content -LiteralPath (Join-Path $tmp 'frontend\.env')
+
+          & .\update-env.ps1 -Target backend -HostName '10.0.0.5' -RootDir $tmp
+          & .\update-env.ps1 -Target frontend -HostName '10.0.0.5' -RootDir $tmp
+
+          $b = Get-Content -LiteralPath (Join-Path $tmp 'backend\.env') -Raw
+          $f = Get-Content -LiteralPath (Join-Path $tmp 'frontend\.env') -Raw
+
+          function Assert-Contains($hay, $needle, $what) {
+            if ($hay -notmatch [regex]::Escape($needle)) { throw "FAIL: $what (expected to find: $needle)" }
+            Write-Host "ok: $what"
+          }
+
+          Assert-Contains $b 'APP_URL=http://10.0.0.5:8000' 'backend APP_URL rewritten'
+          Assert-Contains $b 'REVERB_HOST=10.0.0.5' 'backend REVERB_HOST rewritten'
+          Assert-Contains $b 'APP_KEY=base64:PREEXISTINGKEY==' 'APP_KEY preserved untouched'
+          Assert-Contains $b 'REVERB_APP_KEY=EXISTINGKEY1234567890abcdefghij' 'existing REVERB_APP_KEY preserved'
+          Assert-Contains $b 'CUSTOM_LINE=keepme' 'unrelated lines preserved'
+          Assert-Contains $b '# a comment line' 'comments preserved'
+          if ($b -notmatch 'REVERB_APP_SECRET=([A-Za-z0-9]{32})') {
+            throw 'FAIL: missing REVERB_APP_SECRET was not generated as a 32-char alphanumeric key'
+          }
+          Write-Host 'ok: empty REVERB_APP_SECRET generated (alphanumeric, no base64 chars)'
+
+          Assert-Contains $f 'VITE_REVERB_APP_KEY=EXISTINGKEY1234567890abcdefghij' 'frontend mirrors backend key'
+          Assert-Contains $f 'VITE_ALLOWED_HOSTS=10.0.0.5' 'VITE_ALLOWED_HOSTS set'
+          Assert-Contains $f 'VITE_REVERB_HOST=10.0.0.5' 'VITE_REVERB_HOST set'
+          Assert-Contains $f 'VITE_REVERB_PORT=8080' 'VITE_REVERB_PORT set'
+
+          # Second pass: empty REVERB_APP_KEY must be generated alphanumeric
+          # (base64 chars broke the Pusher SDK auth query string once).
+          @(
+            'APP_KEY=base64:PREEXISTINGKEY=='
+            'REVERB_APP_KEY='
+          ) | Set-Content -LiteralPath (Join-Path $tmp 'backend\.env')
+          & .\update-env.ps1 -Target backend -HostName '10.0.0.5' -RootDir $tmp
+          $b2 = Get-Content -LiteralPath (Join-Path $tmp 'backend\.env') -Raw
+          if ($b2 -notmatch 'REVERB_APP_KEY=([A-Za-z0-9]{32})') {
+            throw 'FAIL: generated REVERB_APP_KEY is not 32-char alphanumeric'
+          }
+          Write-Host 'ok: empty REVERB_APP_KEY regenerated alphanumeric'
+
+          Remove-Item -Recurse -Force $tmp
+          Write-Host 'installer script tests passed'

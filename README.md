@@ -1,6 +1,6 @@
 # SMS/MMS Messaging Web App
 
-**Stack:** Laravel 11 (PHP API + WebSockets) · React 18 + Vite · Tailwind CSS
+**Stack:** Laravel 12 (PHP API + WebSockets) · React 18 + Vite · Tailwind CSS
 
 Dynalink NS-API v2 integration for SMS/MMS sessions, contacts, sender numbers, and event subscriptions.
 
@@ -8,7 +8,7 @@ Dynalink NS-API v2 integration for SMS/MMS sessions, contacts, sender numbers, a
 
 ```
 sms-app/
-├── backend/    # Laravel 11 API (session auth, Dynalink proxy, Reverb broadcast)
+├── backend/    # Laravel 12 API (session auth, Dynalink proxy, Reverb broadcast)
 │   ├── app/Services/DynalinkService.php   # all Dynalink endpoints
 │   ├── app/Http/Controllers/              # Auth, MessageSession, Message, Contact,
 │   │                                      # SmsNumber, Subscription, Group, Template,

@@ -765,7 +765,9 @@ class SuperAdminController extends Controller
     {
         $data = $request->validate([
             'app_name' => 'sometimes|nullable|string|max:60',
-            'logo' => 'sometimes|nullable|image|mimes:jpeg,png,webp,gif,svg|max:512',
+            // SVG deliberately excluded: an uploaded .svg can carry inline
+            // <script>, and the logo endpoint serves it from this origin.
+            'logo' => 'sometimes|nullable|image|mimes:jpeg,png,webp,gif|max:512',
             'logo_clear' => 'sometimes|boolean',
         ]);
         if (array_key_exists('app_name', $data)) \App\Services\Branding::setName($data['app_name']);

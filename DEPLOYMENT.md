@@ -16,7 +16,8 @@ No Docker, no web-server config required — 4 plain processes (Section 1).
 | 1 | Backend API | `php artisan serve --host=0.0.0.0 --port=8000` (in `backend/`) | 8000 | API + sessions + broadcast auth |
 | 2 | Socket server | `php artisan reverb:start --host=0.0.0.0 --port=8080` (in `backend/`) | 8080 | Realtime SMS push to browsers |
 | 3 | Queue worker | `php artisan queue:work --tries=3 --timeout=120` (in `backend/`) | — | Sends scheduled messages (**must stay running**) |
-| 4 | Frontend | `npm run dev` (in `frontend/`) | 5173 | The UI users open |
+| 4 | Scheduler | `php artisan schedule:work` (in `backend/`) | — | Nightly backups, contacts sync, email↔SMS polling |
+| 5 | Frontend | `npm run dev` (in `frontend/`) | 5173 | The UI users open |
 
 Traffic flow (same on both OS):
 
@@ -26,7 +27,7 @@ Browser ──:8080──▶ Reverb (:8080, direct socket; auth via the :5173→
 Dynalink ──internet──▶ webhook URL (your tunnel URL — Section 5) ──▶ Laravel (:8000)
 ```
 
-No cron/scheduler needed — scheduled sends are delayed queue jobs, not cron. No MySQL/Redis needed — SQLite + file/database drivers.
+Scheduled *sends* need no cron — they are delayed queue jobs. But the app's own timed tasks (nightly `backup:run` at 02:30, `contacts:sync` at 03:10, `mail:poll-email-sms` every minute) DO need the scheduler process: keep `php artisan schedule:work` running (or cron `schedule:run` every minute on Linux). No MySQL/Redis needed — SQLite + file/database drivers.
 
 **Ports to open on the LAN:** `5173`, `8000`, `8080` (TCP, private network only — never expose to the internet).
 
@@ -107,7 +108,7 @@ VITE_REVERB_SCHEME=http
 
 ### 2.4 Start everything
 
-Open **4 terminals** (or use the starter script in Section 7):
+Open **5 terminals** (or use the starter script in Section 7):
 
 ```powershell
 # terminal 1 — backend
@@ -116,7 +117,9 @@ cd C:\xampp\sms_app\backend; php artisan serve --host=0.0.0.0 --port=8000
 cd C:\xampp\sms_app\backend; php artisan reverb:start --host=0.0.0.0 --port=8080
 # terminal 3 — queue (keep running or scheduled SMS never sends)
 cd C:\xampp\sms_app\backend; php artisan queue:work --tries=3 --timeout=120
-# terminal 4 — frontend
+# terminal 4 — scheduler (nightly backups, contacts sync, email↔SMS gateway)
+cd C:\xampp\sms_app\backend; php artisan schedule:work
+# terminal 5 — frontend
 cd C:\xampp\sms_app\frontend; npm run dev
 ```
 
@@ -129,8 +132,9 @@ Windows Firewall will prompt for each port — allow on **private** networks.
 3. Superadmin → Allowed IPs page shows **your real LAN IP** as "Your current IP". (If it shows `127.0.0.1` while you're remote, see Section 8, item 8.)
 4. Create tenant + admin (portal or `tenant:create`), sign in on main portal, open Messages.
 5. Browser console (F12) shows `[realtime] socket target: ws://<host>:8080 ... (server settings)` followed by `[realtime] channel subscribed ✓` (not a 403/500 auth error). `<host>` must be an address the BROWSER's machine can reach — see Section 2.6 for LAN setups.
-6. Schedule a test message 2 minutes out → it sends (proves the queue worker is alive).
-7. **Two-window sync test**: change something in one browser (assign a conversation, toggle a user) → it appears in the other window within ~1 second, no refresh. If it doesn't, run `php artisan realtime:doctor` first — it cross-checks `.env` vs DB overrides vs the running Reverb vs the broadcaster Laravel actually uses and prints the exact broken layer. (`auth_key should be a valid app key` means `REVERB_APP_KEY` contains `+`/`=` — regenerate alphanumeric, Section 2.2 — or a migrated database carries stale Super → Settings → Realtime overrides.)
+6. Schedule a test message 2 minutes out → it sends (proves the queue worker is alive). The scheduler window should tick every minute (proves `schedule:work` is alive).
+7. Run `php artisan smoke:test` in `backend/` → all checks ✓ (exit 0). It boots a throwaway database and re-tests every failure class this app has shipped before: CORS regex crash, Reverb `options` nesting, broadcast-auth 403-vs-500, webhook fail-closed, login lockout, double-send prevention. Safe on production; also runs in CI on every push.
+8. **Two-window sync test**: change something in one browser (assign a conversation, toggle a user) → it appears in the other window within ~1 second, no refresh. If it doesn't, run `php artisan realtime:doctor` first — it cross-checks `.env` vs DB overrides vs the running Reverb vs the broadcaster Laravel actually uses and prints the exact broken layer. (`auth_key should be a valid app key` means `REVERB_APP_KEY` contains `+`/`=` — regenerate alphanumeric, Section 2.2 — or a migrated database carries stale Super → Settings → Realtime overrides.)
 
 ### 2.6 LAN / public access (other computers)
 
@@ -234,6 +238,15 @@ autorestart=true
 redirect_stderr=true
 stdout_logfile=/opt/sms-app/backend/storage/logs/queue.log
 
+[program:sms-scheduler]
+directory=/opt/sms-app/backend
+command=php artisan schedule:work
+user=ian
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/opt/sms-app/backend/storage/logs/scheduler.log
+
 [program:sms-frontend]
 directory=/opt/sms-app/frontend
 command=/usr/bin/npm run dev
@@ -247,10 +260,12 @@ environment=HOME="/home/ian",PATH="/usr/bin:/bin"
 
 ```bash
 sudo supervisorctl reread && sudo supervisorctl update
-sudo supervisorctl status   # all four should be RUNNING
+sudo supervisorctl status   # all five should be RUNNING
 ```
 
-**Option B — 4 terminals** (testing only): same 4 commands as Windows 2.4. Use `tmux`/`screen` so they survive logout.
+(Prefer cron over a resident scheduler? Then skip `sms-scheduler` and add `* * * * * cd /opt/sms-app/backend && php artisan schedule:run >> storage/logs/scheduler.log 2>&1` to the service user's crontab.)
+
+**Option B — 5 terminals** (testing only): same 5 commands as Windows 2.4. Use `tmux`/`screen` so they survive logout.
 
 ### 3.5 Firewall + verify
 
@@ -260,7 +275,7 @@ sudo ufw allow from 192.168.1.0/24 to any port 5173,8000,8080 proto tcp
 sudo ufw enable && sudo ufw status
 ```
 
-Then run the same 6-step verify list as Windows (Section 2.5).
+Then run the same verify list as Windows (Section 2.5, 8 steps).
 
 ---
 
@@ -281,6 +296,8 @@ Then run the same 6-step verify list as Windows (Section 2.5).
 | `REVERB_PORT` | `8080` | Must equal frontend `VITE_REVERB_PORT` |
 | `DYNALINK_CLIENT_ID` / `DYNALINK_CLIENT_SECRET` | — | Or set later in superadmin portal (portal wins) |
 | `DYNALINK_WEBHOOK_URL` | — | Or set later in superadmin portal (portal wins) |
+| `LOG_LEVEL` | `info` | `debug` only while diagnosing |
+| `BACKUP_DIR` | `D:\sms_backups` | Nightly `backup:run` target — **another disk**. Empty = `backend/storage/app/backups` |
 
 Full template with defaults: `backend/.env.example`.
 
@@ -334,7 +351,16 @@ Copy these from the old machine **before first boot**:
 
 Then on the new machine: `php artisan migrate` (picks up any tables the old DB lacks) → start processes → continue at Section 5 step 2.
 
-**Backups (do this regularly):** same three items — `database.sqlite` + `storage/app/` + `.env` somewhere safe.
+**Backups — automated (preferred):** with the scheduler process running (Section 1, #4), `backup:run` executes nightly at 02:30. It writes a **consistent** SQLite snapshot (`VACUUM INTO` — safe even mid-write, unlike a file copy), plus `.env.bak` and a copy of `storage/app/`, into `backend/storage/backups/<timestamp>/`, keeping the last 14. Set `BACKUP_DIR=D:\sms_backups` (another disk!) in `backend/.env` so a disk failure doesn't take the backups with it. Run it manually any time:
+
+```powershell
+cd C:\xampp\sms_app\backend
+php artisan backup:run           # or: backup:run --keep=30
+```
+
+**Restore:** stop everything (`taskkill /F /IM php.exe`), copy `database/database.sqlite`, `.env` and `storage/app/` back from the newest backup folder, start `start-all.bat`, then `php artisan queue:restart`.
+
+**Manual backup (fallback, e.g. scheduler not running):** same three items — `database.sqlite` + `storage/app/` + `.env` somewhere safe.
 
 ```powershell
 # Windows example
@@ -344,7 +370,7 @@ copy C:\xampp\sms_app\backend\.env D:\backup\sms\.env.bak /Y
 ```
 
 ```bash
-# Linux example
+# Linux example (cron: 30 2 * * * cd /opt/sms-app/backend && php artisan backup:run)
 tar -czf ~/backup/sms-$(date +%F).tar.gz -C /opt/sms-app/backend database/database.sqlite storage/app .env
 ```
 
@@ -353,13 +379,14 @@ tar -czf ~/backup/sms-$(date +%F).tar.gz -C /opt/sms-app/backend database/databa
 ## 7. Daily ops
 
 **Starting / stopping**
-- Windows: keep the 4 terminal windows, or save this as `start-all.bat` next to the project (edit paths) and double-click it. Close windows to stop.
+- Windows: keep the 5 terminal windows, or save this as `start-all.bat` next to the project (edit paths) and double-click it. Close windows to stop.
   ```bat
   @echo off
   cd /d C:\xampp\sms_app\backend
   start "SMS Backend :8000" php artisan serve --host=0.0.0.0 --port=8000
   start "SMS Sockets :8080" php artisan reverb:start --host=0.0.0.0 --port=8080
   start "SMS Queue" php artisan queue:work --tries=3 --timeout=120
+  start "SMS Scheduler" php artisan schedule:work
   cd /d C:\xampp\sms_app\frontend
   start "SMS Frontend :5173" cmd /k npm run dev
   ```
@@ -402,6 +429,8 @@ Restart `serve`/`reverb` only if backend files changed (cheap anyway). Restart `
 - [ ] Firewall allows the 3 ports from the LAN/private network only — no internet port-forwarding
 - [ ] Superadmin password changed from the created one; each human gets their own account
 - [ ] `APP_KEY` + `.env` backed up somewhere safe (not on the same disk as the only copy)
-- [ ] `database.sqlite` + `storage/app/` on a backup routine
+- [ ] Scheduler process running (`schedule:work` / cron) so nightly `backup:run` fires — and `BACKUP_DIR` points at a different disk (Section 6)
+- [ ] `php artisan smoke:test` passes after every deploy/upgrade (throwaway DB, safe on production)
 - [ ] Trusted proxies configured if the portal is reached through the Vite proxy (Section 8, item 8)
 - [ ] Tunnel URL (if any) is yours alone — whoever holds it receives your inbound SMS webhooks
+- [ ] Known `npm audit` backlog: vite ≤6 (dev-server CORS, high) + react-router 6 (moderate). Fixes are MAJOR upgrades (vite 8 / RR 7) needing Node 20+; deferred until a planned migration. Meanwhile keep 5173 LAN-only and don't browse untrusted sites from the server machine. CI gates new *critical* advisories.

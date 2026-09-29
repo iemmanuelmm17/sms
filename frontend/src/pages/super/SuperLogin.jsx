@@ -62,20 +62,20 @@ export default function SuperLogin() {
         )}
         <form onSubmit={submit} className="space-y-4">
           <div>
-            <label className="text-sm font-medium text-slate-700">Username</label>
-            <input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus
+            <label htmlFor="sl-username" className="text-sm font-medium text-slate-700">Username</label>
+            <input id="sl-username" value={username} onChange={(e) => setUsername(e.target.value)} autoFocus
               placeholder="owner"
               className="mt-1 w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
           </div>
           <div>
-            <label className="text-sm font-medium text-slate-700">Password</label>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+            <label htmlFor="sl-password" className="text-sm font-medium text-slate-700">Password</label>
+            <input id="sl-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)}
               placeholder="••••••••"
               className="mt-1 w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
           </div>
-          {err && <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{err}</div>}
+          {err && <div role="alert" className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{err}</div>}
           {lockSecs > 0 && (
-            <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2 text-center font-semibold">
+            <div role="status" className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2 text-center font-semibold">
               🔒 Locked — retry in {fmtCountdown(lockSecs)}
             </div>
           )}

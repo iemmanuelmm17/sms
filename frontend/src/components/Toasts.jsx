@@ -27,12 +27,15 @@ export default function Toasts() {
   if (!items.length) return null;
 
   return (
-    <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[200] space-y-2 w-[min(32rem,90vw)]">
+    <div role="status" aria-live="polite" aria-label="Notifications"
+      className="fixed top-4 left-1/2 -translate-x-1/2 z-[200] space-y-2 w-[min(32rem,90vw)]">
       {items.map((t) => (
-        <div key={t.id} className={`${STYLE[t.type] || STYLE.info} text-white rounded-xl shadow-2xl px-4 py-3 flex items-start gap-2.5`}>
-          <span className="text-base leading-none mt-0.5">{ICON[t.type] || ICON.info}</span>
+        <div key={t.id} role={t.type === 'error' ? 'alert' : undefined}
+          className={`${STYLE[t.type] || STYLE.info} text-white rounded-xl shadow-2xl px-4 py-3 flex items-start gap-2.5`}>
+          <span aria-hidden="true" className="text-base leading-none mt-0.5">{ICON[t.type] || ICON.info}</span>
           <span className="text-sm flex-1 break-words whitespace-pre-wrap">{t.message}</span>
-          <button onClick={() => setItems((x) => x.filter((i) => i.id !== t.id))}
+          <button type="button" onClick={() => setItems((x) => x.filter((i) => i.id !== t.id))}
+            aria-label="Dismiss notification"
             className="opacity-70 hover:opacity-100 font-bold leading-none">✕</button>
         </div>
       ))}

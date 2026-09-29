@@ -56,6 +56,9 @@ class BrandingController extends Controller
         return response()->file($path, [
             'Cache-Control' => 'public, max-age=86400',
             'X-Content-Type-Options' => 'nosniff',
+            // Neutralizes any legacy/inline SVG: no scripts, no same-origin
+            // powers, render-only in a sandboxed context.
+            'Content-Security-Policy' => "default-src 'none'; sandbox",
         ]);
     }
 }
