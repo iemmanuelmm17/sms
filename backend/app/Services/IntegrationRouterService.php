@@ -79,7 +79,7 @@ class IntegrationRouterService
             }
 
             SentMessageLog::record([
-                'tenant_id' => SentMessageLog::tenantIdFor($domain, $user),
+                'tenant_id' => SentMessageLog::tenantFor($domain, $user),
                 'domain' => $domain, 'user' => $user,
                 'agent_id' => null,
                 'actor_name' => 'Integration (' . Integration::labelFor($integration->provider) . ')',

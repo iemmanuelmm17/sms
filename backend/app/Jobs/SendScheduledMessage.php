@@ -135,7 +135,11 @@ class SendScheduledMessage implements ShouldQueue
                 $toDigits = preg_replace('/\D/', '', (string) ($recipient['phone'] ?? ''));
                 $newSid = is_array($body) ? ($body['messagesession-id'] ?? $body['messagesession_id'] ?? null) : null;
                 SentMessageLog::record([
-                    'tenant_id' => SentMessageLog::tenantIdFor($m->domain, $m->user),
+                    // tenantFor, not tenantIdFor: schedules created by portal
+                    // agents carry the agent's EXTENSION in $m->user, which
+                    // never matches (domain, dynalink_user) — the row was
+                    // logged tenant-less and vanished from every report.
+                    'tenant_id' => SentMessageLog::tenantFor($m->domain, $m->user),
                     'domain' => $m->domain, 'user' => $m->user,
                     'agent_id' => $trigId,
                     'actor_name' => $m->created_by_name,

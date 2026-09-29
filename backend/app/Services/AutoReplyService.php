@@ -269,7 +269,10 @@ class AutoReplyService
                         $anySent = true;
                         $toDigits = preg_replace('/\D/', '', (string) $from);
                         SentMessageLog::record([
-                            'tenant_id' => SentMessageLog::tenantIdFor($domain, $user),
+                            // tenantFor: rules created by portal agents carry the
+                            // extension in $user — exact-match-only attribution
+                            // logged those rows tenant-less (invisible in reports).
+                            'tenant_id' => SentMessageLog::tenantFor($domain, $user),
                             'domain' => $domain, 'user' => $user,
                             'agent_id' => null,
                             'actor_name' => 'Auto-reply',

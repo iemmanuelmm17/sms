@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Jobs\SendScheduledMessage;
 use App\Models\Contact;
 use App\Models\ScheduledMessage;
+use App\Models\SentMessageLog;
 use App\Models\Tenant;
 use App\Models\TenantAdmin;
 use App\Services\DynalinkService;
@@ -15,6 +16,7 @@ use App\Http\Middleware\EnsureSuperAdminIp;
 use Illuminate\Console\Command;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Http;
@@ -158,6 +160,33 @@ class SmokeTestCommand extends Command
                 }
                 $b = json_decode($r->getContent(), true) ?: [];
                 return !empty($b['test']) ? null : 'ack missing test:true';
+            });
+
+            // ---- Report attribution (the "mass SMS missing from Reporting" bug) ----
+            $this->check('send-log attribution resolves the tenant for portal-agent sends', function () {
+                $t = Tenant::create([
+                    'name' => 'attr', 'domain' => 'attr.test', 'dynalink_user' => '7777',
+                    'dynalink_pass' => 'x', 'main_number' => '15550001234', 'status' => 'active',
+                ]);
+                Cache::forget('tenant:id:attr.test:7777');
+                Cache::forget('tenant:iddom:attr.test');
+                $admin = SentMessageLog::tenantFor('attr.test', '7777');   // exact match
+                $agent = SentMessageLog::tenantFor('attr.test', '101');    // extension — never a dynalink_user
+                $legacy = SentMessageLog::tenantFor('no-such-domain.test', '1');
+                $t->delete();
+                Cache::forget('tenant:id:attr.test:7777');
+                Cache::forget('tenant:iddom:attr.test');
+                if ($admin !== (int) $t->id) {
+                    return 'admin send attributed ' . var_export($admin, true) . ", expected {$t->id}";
+                }
+                if ($agent !== (int) $t->id) {
+                    return 'portal-agent send attributed ' . var_export($agent, true)
+                        . " — mass SMS would vanish from tenant reports (expected {$t->id})";
+                }
+                if ($legacy !== null) {
+                    return 'a domain with NO tenant was attributed tenant ' . $legacy . ' — legacy rows must stay NULL';
+                }
+                return null;
             });
 
             // ---- Login brute-force lockout ----

@@ -99,4 +99,19 @@ class SentMessageLog extends Model
             return null;
         }
     }
+
+    /**
+     * Attribution for send sites that only have (domain, user) strings —
+     * the scheduler job, auto-replies, integrations. Exact (domain,
+     * dynalink_user) match first; when that misses, fall back to the
+     * domain's tenant. The fallback is what makes PORTAL-AGENT traffic
+     * visible: their `user` is an EXTENSION, which never matches a
+     * tenant's dynalink_user, and the row was logged with tenant_id NULL
+     * — filtered out of every tenant-scoped report (mass SMS "missing").
+     * Legacy domains have no Tenant row, so their rows correctly stay NULL.
+     */
+    public static function tenantFor(string $domain, string $user): ?int
+    {
+        return static::tenantIdFor($domain, $user) ?? static::tenantIdForDomain($domain);
+    }
 }
