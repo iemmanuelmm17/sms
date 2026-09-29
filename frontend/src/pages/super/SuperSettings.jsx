@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Info } from 'lucide-react';
 import { api } from '../../api/client';
 import { useBrand } from '../../context/BrandContext';
-import { toastError, toastSuccess } from '../../lib/toast';
+import { toastError, toastSuccess, toastInfo } from '../../lib/toast';
 
 const isLocalUrl = (u) => /^(https?:\/\/)(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(u || '');
 
@@ -212,6 +212,7 @@ export default function SuperSettings() {
       const r = await api.superWebhookTest();
       setWhTest(r);
       if (r?.ok) toastSuccess(`Webhook reachable — ${r.status} in ${r.ms} ms.`);
+      else if (r?.inconclusive) toastInfo('Webhook endpoint healthy locally — external reach needs a phone/mobile-data check (details below).');
       else toastError('Webhook test failed — see details below.');
     } catch (e) {
       setWhTest({ ok: false, error: e?.response?.data?.message || e.message });
@@ -536,15 +537,26 @@ export default function SuperSettings() {
         )}
         {whErr && <div className="text-xs text-red-600 mt-2">{whErr}</div>}
         {whTest && (
-          <div className={`text-xs rounded-lg p-2.5 mt-2 border ${whTest.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-700'}`}>
+          <div className={`text-xs rounded-lg p-2.5 mt-2 border ${whTest.ok
+            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+            : whTest.inconclusive
+              ? 'bg-amber-50 border-amber-200 text-amber-800'
+              : 'bg-red-50 border-red-200 text-red-700'}`}>
             {whTest.ok ? (
               <>✓ Webhook reachable — HTTP {whTest.status} in {whTest.ms} ms. Inbound events will flow as long as Dynalink&apos;s IPs are on the allowlist below.</>
+            ) : whTest.inconclusive ? (
+              <>
+                ⚠ Inconclusive — the app endpoint is healthy (HTTP {whTest.local_status} via 127.0.0.1 in {whTest.local_ms} ms),
+                but this server can&apos;t reach its own public address (routers usually block NAT loopback — that&apos;s normal).
+                Dynalink connects from the internet, so this says nothing about them.
+                <div className="mt-1 font-semibold">Verify: open the effective URL on a phone using MOBILE DATA (not WiFi) — it should return {"{\"ok\":true,…}"}.</div>
+              </>
             ) : (
               <>
                 ✗ Test failed{whTest.status ? ` — HTTP ${whTest.status}` : ''}{whTest.ms != null ? ` after ${whTest.ms} ms` : ''}.
                 {whTest.error ? <div className="mt-1 font-mono break-all">{whTest.error}</div> : null}
                 {whTest.body_excerpt ? <div className="mt-1 font-mono break-all">{whTest.body_excerpt}</div> : null}
-                {whTest.hint ? <div className="mt-1">{whTest.hint}</div> : null}
+                {whTest.hint && !whTest.inconclusive ? <div className="mt-1">{whTest.hint}</div> : null}
               </>
             )}
           </div>

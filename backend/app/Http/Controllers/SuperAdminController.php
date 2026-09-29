@@ -812,6 +812,80 @@ class SuperAdminController extends Controller
             return response()->json(['ok' => false, 'url' => null, 'error' => 'No webhook URL configured.']);
         }
         AuditLog::record(null, 'superadmin', null, $this->sa($request)->username, 'webhook.test', ['url' => $url], $request->ip());
+
+        [$ok, $status, $ms, $body, $err] = $this->probeWebhook($url);
+
+        // Does the URL point at THIS server (its own public/LAN address)?
+        // A box behind a router usually cannot reach its OWN public IP —
+        // most routers do no NAT loopback (hairpinning), so the probe hangs
+        // until timeout even though everything is healthy. That verdict must
+        // not read as "Dynalink can't reach you": they connect from outside,
+        // which takes the normal port-forward path. Confirm the app side via
+        // a loopback probe and report INCONCLUSIVE with that explanation.
+        $wh = parse_url($url) ?: [];
+        $app = parse_url(rtrim((string) config('app.url'), '/')) ?: [];
+        $whHost = strtolower((string) ($wh['host'] ?? ''));
+        $selfTargeted = $whHost !== '' && (
+            in_array($whHost, ['localhost', '127.0.0.1', '::1'], true)
+            || $whHost === strtolower((string) ($app['host'] ?? ''))
+        );
+
+        $localOk = null;
+        $localStatus = null;
+        $localMs = null;
+        if ($selfTargeted && !$ok) {
+            $port = (int) ($wh['port'] ?? $app['port'] ?? 8000);
+            $path = (string) ($wh['path'] ?? '/api/webhooks/dynalink');
+            [$localOk, $localStatus, $localMs] = $this->probeWebhook('http://127.0.0.1:' . $port . $path);
+        }
+
+        $inconclusive = false;
+        $hint = null;
+        if ($ok) {
+            $hint = null;
+        } elseif ($selfTargeted && $localOk === true) {
+            $inconclusive = true;
+            $hint = 'The URL points at THIS server, and its own public address is unreachable from the inside — '
+                . 'typical when the router has no NAT loopback (hairpinning). The app endpoint itself is healthy '
+                . '(HTTP ' . $localStatus . ' via 127.0.0.1 in ' . $localMs . ' ms), and Dynalink connects from the '
+                . 'internet, which takes the normal port-forward path. To confirm external reachability, open the '
+                . 'URL on a phone using MOBILE DATA (not WiFi) — it should return {"ok":true,...}. '
+                . 'Inside error: ' . ($err ?: ('HTTP ' . var_export($status, true)));
+        } elseif ($selfTargeted && $localOk === false) {
+            $hint = 'Both the public address AND the local endpoint (127.0.0.1) failed — is the backend running '
+                . 'on the expected port (php artisan serve --host=0.0.0.0 --port=' . (int) ($wh['port'] ?? $app['port'] ?? 8000) . ')? '
+                . 'Inside error: ' . ($err ?: 'unknown');
+        } elseif ($status === 403) {
+            $hint = 'Reached a server but got 403 — if this URL points at THIS app, a proxy/tunnel may be stripping '
+                . 'the test header; otherwise something else answers at that URL.';
+        } elseif ($err !== null) {
+            $hint = 'Could not connect at all — DNS failure, tunnel down, or the URL is unreachable from this server.';
+        } else {
+            $hint = 'Something answered, but not this app\'s webhook test ack — check the URL path ends with '
+                . '/api/webhooks/dynalink and the tunnel targets THIS server.';
+        }
+
+        return response()->json([
+            'ok' => $ok,
+            'inconclusive' => $inconclusive,
+            'self_targeted' => $selfTargeted,
+            'url' => $url,
+            'status' => $status,
+            'ms' => $ms,
+            'local_status' => $localStatus,
+            'local_ms' => $localMs,
+            'body_excerpt' => $body !== '' ? mb_substr($body, 0, 200) : null,
+            'error' => $err,
+            'hint' => $hint,
+        ]);
+    }
+
+    /**
+     * One webhook probe. Returns [ok, status, ms, body, error].
+     * ok = HTTP 200 carrying the app's own test ack.
+     */
+    protected function probeWebhook(string $url): array
+    {
         $t0 = microtime(true);
         try {
             $res = \Illuminate\Support\Facades\Http::timeout(10)->withHeaders([
@@ -823,20 +897,9 @@ class SuperAdminController extends Controller
             $body = (string) $res->body();
             $decoded = json_decode($body, true);
             $ok = $res->status() === 200 && is_array($decoded) && !empty($decoded['test']);
-            return response()->json([
-                'ok' => $ok, 'url' => $url, 'status' => $res->status(), 'ms' => $ms,
-                'body_excerpt' => mb_substr($body, 0, 200),
-                'hint' => $ok ? null : ($res->status() === 403
-                    ? 'Reached a server but got 403 — if this URL points at THIS app, a proxy/tunnel may be stripping the test header; otherwise something else answers at that URL.'
-                    : 'Something answered, but not this app\'s webhook test ack — check the URL path ends with /api/webhooks/dynalink and the tunnel targets THIS server.'),
-            ]);
+            return [$ok, $res->status(), $ms, $body, null];
         } catch (\Throwable $e) {
-            return response()->json([
-                'ok' => false, 'url' => $url, 'status' => null,
-                'ms' => (int) round((microtime(true) - $t0) * 1000),
-                'error' => $e->getMessage(),
-                'hint' => 'Could not connect at all — DNS failure, tunnel down, or the URL is unreachable from this server.',
-            ]);
+            return [false, null, (int) round((microtime(true) - $t0) * 1000), '', $e->getMessage()];
         }
     }
 
