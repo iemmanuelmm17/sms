@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useBrand } from '../context/BrandContext';
+import { useReferenceData } from '../context/ReferenceDataContext';
 import { useSocket } from '../context/SocketContext';
 import { useTheme } from '../context/ThemeContext';
 import { api, agentName, fmtPhone, initials, setPasswordExpiredHandler } from '../api/client';
@@ -129,6 +130,57 @@ export default function Layout({ children }) {
     window.addEventListener('folder-sync', onF);
     return () => window.removeEventListener('folder-sync', onF);
   }, []);
+
+  // ---- Keep the pills live from ANY page ----
+  // Messages/Scheduler push exact counts only while THEY are mounted
+  // (folder-sync / pending-sync are same-window events). Sitting on
+  // Contacts, a queue assignment or a new schedule broadcast by another
+  // user never moved the pills until a manual refresh. Layout therefore
+  // also derives them from app-wide data that ReferenceData refreshes on
+  // every broadcast:
+  //   'scheduled'                          → pending pill from ref.scheduled
+  //   'convo-meta' / 'sessions' / 'resync' → queue pill via the server's
+  //     queued folder (same call the Queue page itself makes).
+  const refData = useReferenceData();
+
+  useEffect(() => {
+    if (!refData.ready) return;   // don't flash 0 over the stored count at login
+    const list = Array.isArray(refData.scheduled) ? refData.scheduled : [];
+    const count = list.filter((m) => m && m.status === 'pending').length;
+    setPending(count);
+    try { localStorage.setItem('sms-pending', String(count)); } catch {}
+  }, [refData.scheduled, refData.ready]);
+
+  const queuePillTimer = useRef(null);
+  const refreshQueuePill = () => {
+    api.sessions(null, null, 'queued')
+      .then((rows) => {
+        const n = Array.isArray(rows) ? rows.length : 0;
+        setFcounts((p) => {
+          if (Number(p?.queue || 0) === n) return p;
+          const d = { ...(p || {}), queue: n };
+          try { localStorage.setItem('sms-fcounts', JSON.stringify(d)); } catch {}
+          return d;
+        });
+      })
+      .catch(() => {});
+  };
+  useEffect(() => {
+    refreshQueuePill();   // mount: cure a stale localStorage count
+    return () => { if (queuePillTimer.current) clearTimeout(queuePillTimer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    const r = lastSync?.resource;
+    if (!r) return;
+    if (['convo-meta', 'sessions', 'resync'].includes(r)) {
+      // Debounced: bursts of sends must not fan out one call per event.
+      if (queuePillTimer.current) clearTimeout(queuePillTimer.current);
+      queuePillTimer.current = setTimeout(refreshQueuePill, 800);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastSync]);
+
   const queueTotal = Number(fcounts.queue || 0);
   const unassignedTotal = Number(fcounts.unassigned || 0);
   const perAgent = fcounts.perAgent || {};
