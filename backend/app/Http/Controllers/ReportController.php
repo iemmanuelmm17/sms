@@ -190,6 +190,16 @@ class ReportController extends Controller
     {
         if (($cats = $this->categories($r)) !== null) $q->whereIn('category', $cats);
         if (($ids = $this->agentIds($r)) !== null) $q->whereIn('agent_id', $ids);
+        // Actor-name filter: portal agents and tenant admins record agent_id
+        // NULL, so byAgent groups by actor_name and the UI filters on names.
+        $actors = $r->query('actors');
+        if ($actors !== null && $actors !== '') {
+            $names = array_values(array_filter(
+                is_array($actors) ? $actors : explode(',', (string) $actors),
+                fn($v) => trim((string) $v) !== ''
+            ));
+            if ($names) $q->whereIn('actor_name', $names);
+        }
         return $q;
     }
 
@@ -262,7 +272,16 @@ class ReportController extends Controller
         }));
     }
 
-    /** One row per sending agent + an aggregate Admin row (manual sends). */
+    /**
+     * One row per SENDER (actor_name): tenant admins, portal agents and
+     * legacy agents all record a display name on every send, while agent_id
+     * is NULL for anyone who isn't a legacy Agent row — grouping by agent_id
+     * (the old behavior) made portal-only tenants show an empty breakdown
+     * and dropped mass/scheduled sends entirely. Unattended sends (auto-
+     * replies) group under '(unattended)'.
+     */
+    public const UNATTENDED = '(unattended)';
+
     public function byAgent(Request $request)
     {
         $scope = $this->scope($request);
@@ -270,30 +289,23 @@ class ReportController extends Controller
         return response()->json($this->cached($request, 'byAgent', $scope, function () use ($request, $scope, $from, $to) {
         $q = $this->applyFilters($this->applyScope(SentMessageLog::query(), $scope), $request)
             ->whereBetween('sent_at', [$from, $to]);
-        $agents = (clone $q)->whereNotNull('agent_id')
-            ->selectRaw('agent_id, MAX(actor_name) name, COUNT(*) total')
+        $un = self::UNATTENDED;
+        $byActor = (clone $q)
+            ->selectRaw("COALESCE(NULLIF(TRIM(actor_name), ''), '{$un}') AS actor")
+            ->selectRaw('MAX(agent_id) agent_id, COUNT(*) total')
             ->selectRaw("SUM(CASE WHEN category='new_sms' THEN 1 ELSE 0 END) new_sms")
             ->selectRaw("SUM(CASE WHEN category='regular_reply' THEN 1 ELSE 0 END) regular_reply")
             ->selectRaw("SUM(CASE WHEN category='mass_sms' THEN 1 ELSE 0 END) mass_triggered")
-            ->groupBy('agent_id')->get();
+            ->groupBy('actor')->orderByDesc('total')->get();
         $rows = [];
-        foreach ($agents as $a) {
-            $rows[] = ['agent_id' => (int) $a->agent_id, 'agent_name' => $a->name ?? ('Agent #' . $a->agent_id),
+        foreach ($byActor as $a) {
+            $rows[] = [
+                'actor' => (string) $a->actor,
+                'agent_id' => $a->agent_id !== null ? (int) $a->agent_id : null,
+                'agent_name' => (string) $a->actor,
                 'total' => (int) $a->total, 'new_sms' => (int) $a->new_sms,
-                'regular_reply' => (int) $a->regular_reply, 'mass_triggered' => (int) $a->mass_triggered];
-        }
-        if ($this->agentIds($request) === null) {
-            $admin = (clone $q)->whereNull('agent_id')
-                ->whereIn('category', [SentMessageLog::NEW_SMS, SentMessageLog::REGULAR_REPLY])
-                ->selectRaw('COUNT(*) total')
-                ->selectRaw("SUM(CASE WHEN category='new_sms' THEN 1 ELSE 0 END) new_sms")
-                ->selectRaw("SUM(CASE WHEN category='regular_reply' THEN 1 ELSE 0 END) regular_reply")
-                ->first();
-            if ($admin && (int) $admin->total > 0) {
-                $rows[] = ['agent_id' => null, 'agent_name' => 'Admin',
-                    'total' => (int) $admin->total, 'new_sms' => (int) $admin->new_sms,
-                    'regular_reply' => (int) $admin->regular_reply, 'mass_triggered' => 0];
-            }
+                'regular_reply' => (int) $a->regular_reply, 'mass_triggered' => (int) $a->mass_triggered,
+            ];
         }
             return ['rows' => $rows];
         }));
@@ -335,6 +347,15 @@ class ReportController extends Controller
             ->whereBetween('sent_at', [$from, $to])->orderByDesc('sent_at')->orderByDesc('id');
         if ($request->query('agent_id') !== null && $request->query('agent_id') !== '') {
             $q->where('agent_id', (int) $request->query('agent_id'));
+        }
+        // Drill-down by sender name (portal sends have no agent_id).
+        $actor = trim((string) $request->query('actor', ''));
+        if ($actor !== '') {
+            if ($actor === self::UNATTENDED) {
+                $q->where(fn($w) => $w->whereNull('actor_name')->orWhereRaw("TRIM(actor_name) = ''"));
+            } else {
+                $q->where('actor_name', $actor);
+            }
         }
         $total = (clone $q)->count();
         $data = (clone $q)->forPage($page, $per)->get([

@@ -109,10 +109,20 @@ const STATUS_META = [
 ];
 function StatusTag({ status, ts }) {
   const s = String(status || '');
-  const ageMs = ts ? Date.now() - parseTs(ts) : 0;
+  const [, flip] = useState(0);
+  const parsed = ts ? parseTs(ts) : 0;
+  const ageMs = ts ? Date.now() - parsed : 0;
   // The provider leaves history parked at 'sending'/'scheduled' — anything
   // older than 5 minutes already went out, so call it delivered. (The server
   // also normalizes this since 2026-09; this stays as the offline/demo fallback.)
+  const waiting = parsed > 0 && /sending|pending|queued|scheduled/i.test(s) && ageMs <= 5 * 60 * 1000;
+  // Self-timer: re-render once the boundary passes so an idle window flips
+  // Sending → Delivered on its own — no manual refresh.
+  useEffect(() => {
+    if (!waiting) return undefined;
+    const t = setTimeout(() => flip((x) => x + 1), 5 * 60 * 1000 - ageMs + 500);
+    return () => clearTimeout(t);
+  });
   if (/sending|pending|queued|scheduled/i.test(s) && ageMs > 5 * 60 * 1000) {
     return <span className="text-emerald-200 font-bold" title={s}>✓✓ Delivered</span>;
   }
@@ -631,6 +641,10 @@ export default function Messages() {
     } else if (resource === 'sessions' && action === 'message-sent') {
       const sid = payload?.session_id;
       const remotes = [...(payload?.remotes || []), payload?.remote].filter(Boolean).map((r) => digits(r));
+      // The broadcaster already got its 2xx — pin the fingerprint so the
+      // refetched twin renders as Delivered here immediately instead of
+      // sitting at the provider's parked 'sending' for 5 minutes.
+      if (payload?.text) confirmSent(payload.text, payload.type || 'sms');
       syncSessions(remotes);
       const openRemote = active ? digits(active['messagesession-remote']) : '';
       if (activeId && (String(sid) === String(activeId) || (openRemote && remotes.includes(openRemote)))) {

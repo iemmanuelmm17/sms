@@ -92,6 +92,8 @@ class MessageController extends Controller
         if ($status >= 200 && $status < 300) {
             DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', null, [
                 'remote' => preg_replace('/\D/', '', (string) $data['destination']),
+                'text' => (string) $data['message'],
+                'type' => (string) ($data['type'] ?? 'sms'),
             ]);
             \App\Services\OnboardingService::markAgentStep($s, 'first_send');
             SentMessageLog::record([
@@ -181,7 +183,11 @@ class MessageController extends Controller
                 'from-number' => $data['from-number'],
             ] + $mms);
             if ($status >= 200 && $status < 300) {
-                DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', null, ['remote' => $dests[0]]);
+                DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', null, [
+                    'remote' => $dests[0],
+                    'text' => (string) $data['message'],
+                    'type' => (string) ($data['type'] ?? 'sms'),
+                ]);
                 \App\Services\OnboardingService::markAgentStep($s, 'first_send');
                 SentMessageLog::record([
                     'tenant_id' => SentMessageLog::scopeTenant($s),
@@ -219,7 +225,11 @@ class MessageController extends Controller
         );
 
         if ($status >= 200 && $status < 300) {
-            DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', null, ['remotes' => $dests]);
+            DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', null, [
+                'remotes' => $dests,
+                'text' => (string) $data['message'],
+                'type' => (string) ($data['type'] ?? 'sms'),
+            ]);
             \App\Services\OnboardingService::markAgentStep($s, 'first_send');
             foreach ($dests as $d) {
                 SentMessageLog::record([

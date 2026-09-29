@@ -44,7 +44,10 @@ export default function Scheduler() {
 
   // Another instance (or a finished queue job) changed the schedule → refresh.
   useEffect(() => {
-    if (['scheduled', 'resync'].includes(lastSync?.resource)) reload();
+    if (['scheduled', 'resync'].includes(lastSync?.resource)) {
+      console.info('[scheduler] live sync —', lastSync?.resource, lastSync?.action, lastSync?.id ?? '');
+      reload();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastSync]);
 
@@ -93,6 +96,13 @@ export default function Scheduler() {
                     </span>
                   )}
                   <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${statusBadge(m.status)}`}>{m.status}</span>
+                  {['pending', 'sending'].includes(m.status) && m.send_at
+                    && new Date(m.send_at).getTime() < Date.now() - 10 * 60 * 1000 && (
+                    <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-red-100 text-red-700"
+                      title="Past its scheduled time with work left — the queue worker likely missed it (restart, crash, timeout). Use Send now / Retry.">
+                      ⚠ stuck
+                    </span>
+                  )}
                 </span>
               </div>
               <div className="text-xs text-slate-500 truncate mt-0.5">{m.message}</div>
@@ -117,9 +127,9 @@ export default function Scheduler() {
                     <button onClick={() => api.cancelScheduled(m.id).then(() => { reload(); toastSuccess('Cancelled'); }).catch((e) => toastError(e.message))} className="text-[11px] text-amber-700 hover:underline py-1">Cancel</button>
                   </>
                 )}
-                {m.status === 'partial' && (
+                {['partial', 'sending'].includes(m.status) && (
                   <button
-                    onClick={() => api.retryScheduled(m.id).then(() => { reload(); toastSuccess('Retrying failed recipients…'); }).catch((e) => toastError(e?.response?.data?.message || e.message))}
+                    onClick={() => api.retryScheduled(m.id).then(() => { reload(); toastSuccess('Retrying failed/stuck recipients…'); }).catch((e) => toastError(e?.response?.data?.message || e.message))}
                     className="text-[11px] text-emerald-700 hover:underline font-semibold py-1">↻ Retry failed</button>
                 )}
                 {m.status !== 'sent' && (

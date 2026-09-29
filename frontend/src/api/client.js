@@ -397,6 +397,10 @@ export const api = {
     if (DEMO_MODE) throw { response: { data: { message: 'Superadmin portal needs the backend (unavailable in demo).' } } };
     return (await http.post('/api/superadmin/settings/mail-test', { to })).data;
   },
+  async superWebhookTest() {
+    if (DEMO_MODE) throw { response: { data: { message: 'Superadmin portal needs the backend (unavailable in demo).' } } };
+    return (await http.post('/api/superadmin/webhooks/test')).data;
+  },
   async mailCheckInbox() {
     if (DEMO_MODE) throw { response: { data: { message: 'Superadmin portal needs the backend (unavailable in demo).' } } };
     return (await http.post('/api/superadmin/settings/mail-test', { check_inbox: true })).data;

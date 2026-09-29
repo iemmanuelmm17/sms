@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { api, getTimezone, fmtPhone, initials } from '../api/client';
-import { AGENTS_ENABLED } from '../lib/features';
 import { toastError } from '../lib/toast';
 import { CATS, catColor, catLabel, PRESETS, rangeFor, rangeDays, escCsv, saveFile } from '../lib/reporting';
 
@@ -160,7 +159,7 @@ export default function Reporting({
   const [err, setErr] = useState('');
   const [sort, setSort] = useState({ key: 'total', dir: 'desc' });
   const [sortNum, setSortNum] = useState({ key: 'total', dir: 'desc' });
-  const [drill, setDrill] = useState(null); // { agent_id, name }
+  const [drill, setDrill] = useState(null); // { actor, name }
   const [drillRows, setDrillRows] = useState([]);
   const [drillTotal, setDrillTotal] = useState(0);
   const [drillLoading, setDrillLoading] = useState(false);
@@ -172,7 +171,7 @@ export default function Reporting({
   const range = rangeFor(filters.preset, filters.from, filters.to);
   const rangeStr = range ? `${range.from}|${range.to}` : '';
   const catsKey = [...filters.cats].sort().join(',');
-  const agentKey = [...agentSel].sort((a, b) => a - b).join(',');
+  const agentKey = [...agentSel].sort().join(',');
   const showTenant = !!tenantMap && (tenantId === null || tenantId === undefined);
 
   const baseParams = () => {
@@ -180,7 +179,7 @@ export default function Reporting({
     // so a send made a few minutes ago lands inside the range.
     const p = { from: range.from, to: range.to, tz: getTimezone() };
     if (filters.cats.length < CATS.length) p.categories = filters.cats.join(',');
-    if (agentSel.length) p.agent_ids = agentSel.join(',');
+    if (agentSel.length) p.actors = agentSel.join(',');
     if (tenantId !== null && tenantId !== undefined) p.tenant_id = tenantId;
     return p;
   };
@@ -225,8 +224,8 @@ export default function Reporting({
     if (!drill || !range) return;
     let dead = false;
     setDrillLoading(true);
-    const p = { ...baseParams(), agent_id: drill.agent_id, per_page: 50, page: 1 };
-    delete p.agent_ids;
+    const p = { ...baseParams(), actor: drill.actor, per_page: 50, page: 1 };
+    delete p.actors;
     api.reportDetail(apiBase, p)
       .then((d) => {
         if (dead) return;
@@ -239,8 +238,10 @@ export default function Reporting({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drill, rangeStr, catsKey, apiBase, tenantId]);
 
+  // Every sender with rows in the view — portal agents and admins record
+  // agent_id NULL, so the list keys on names, not ids.
   const agentOptions = useMemo(
-    () => (agents?.rows || []).filter((r) => r.agent_id !== null),
+    () => (agents?.rows || []),
     [agents]
   );
 
@@ -340,12 +341,13 @@ export default function Reporting({
     </th>
   );
 
-  const exportCsv = async (agentId = null, fileTag = 'report') => {
+  const exportCsv = async (agentId = null, fileTag = 'report', actorName = null) => {
     if (!range || exporting) return;
     setExporting(true);
     try {
       const p = { ...baseParams(), per_page: 5000, page: 1 };
-      if (agentId !== null) { p.agent_id = agentId; delete p.agent_ids; }
+      if (actorName) { p.actor = actorName; delete p.actors; }
+      else if (agentId !== null) { p.agent_id = agentId; delete p.actors; }
       const d = await api.reportDetail(apiBase, p);
       const rows = d.data || [];
       if (!rows.length) { toastError('Nothing to export.'); return; }
@@ -462,19 +464,19 @@ export default function Reporting({
               onClick={() => setShowAgents((v) => !v)}
               className="text-xs font-medium px-3 py-1.5 rounded-lg border text-slate-600 hover:bg-slate-100 whitespace-nowrap"
             >
-              {agentSel.length ? `Agents: ${agentSel.length} selected ▾` : 'Agents: All members ▾'}
+              {agentSel.length ? `Senders: ${agentSel.length} selected ▾` : 'Senders: All ▾'}
             </button>
             {showAgents && (
               <div className="absolute z-20 mt-1 w-64 max-h-64 overflow-auto bg-white border rounded-xl shadow-lg p-2">
                 {agentOptions.length === 0 && (
-                  <div className="text-xs text-slate-400 px-2 py-1.5">No agents with sends in this view.</div>
+                  <div className="text-xs text-slate-400 px-2 py-1.5">No senders with sends in this view.</div>
                 )}
                 {agentOptions.map((a) => (
-                  <label key={a.agent_id} className="flex items-center gap-2 text-sm px-2 py-1.5 rounded hover:bg-slate-50 cursor-pointer">
+                  <label key={a.agent_name} className="flex items-center gap-2 text-sm px-2 py-1.5 rounded hover:bg-slate-50 cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={agentSel.includes(a.agent_id)}
-                      onChange={() => toggleAgent(a.agent_id)}
+                      checked={agentSel.includes(a.agent_name)}
+                      onChange={() => toggleAgent(a.agent_name)}
                     />
                     <span className="flex-1 truncate">{a.agent_name}</span>
                     <span className="text-xs text-slate-400 tabular-nums">{a.total.toLocaleString()}</span>
@@ -603,19 +605,19 @@ export default function Reporting({
             </div>
           </div>
 
-          {/* By agent — hidden in phase 1 (portal login, no in-app roster). */}
-          {AGENTS_ENABLED && (
+          {/* Breakdown by sender — actor-based: admins, portal agents and
+              legacy agents all record a display name on every send. */}
           <div className="bg-white border rounded-xl p-4">
             <div className="flex items-start gap-2 flex-wrap mb-2">
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-semibold flex items-center gap-1.5">
-                  <span aria-hidden="true">👤</span>Breakdown by agent
+                  <span aria-hidden="true">👤</span>Breakdown by sender
                 </div>
-                <p className="text-[11px] text-slate-400">Click any row to view that agent&apos;s message log</p>
+                <p className="text-[11px] text-slate-400">Click any row to view that sender&apos;s message log</p>
               </div>
               {sortedAgents.filter(agentVisible).length > 1 && (
                 <input value={agentQ} onChange={(e) => setAgentQ(e.target.value)}
-                  placeholder="🔍 Filter agents…" aria-label="Filter agents"
+                  placeholder="🔍 Filter senders…" aria-label="Filter senders"
                   className="text-xs border rounded-lg px-2.5 py-1.5 w-40 min-w-0 focus:outline-none focus:ring-2 focus:ring-brand-500" />
               )}
             </div>
@@ -623,7 +625,7 @@ export default function Reporting({
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-xs text-slate-500 border-b">
-                    {th('Agent', 'agent_name')}
+                    {th('Sender', 'agent_name')}
                     {th('Total', 'total')}
                     {th('New SMS', 'new_sms')}
                     {th('Regular reply', 'regular_reply')}
@@ -633,9 +635,9 @@ export default function Reporting({
                 <tbody>
                   {visibleAgents.map((a) => (
                     <tr
-                      key={a.agent_id === null ? 'admin' : a.agent_id}
-                      onClick={() => a.agent_id !== null && setDrill({ agent_id: a.agent_id, name: a.agent_name })}
-                      className={`border-b last:border-0 tabular-nums ${a.agent_id !== null ? 'hover:bg-slate-50 cursor-pointer' : ''} ${drill?.agent_id === a.agent_id ? 'bg-slate-50' : ''}`}
+                      key={a.agent_name}
+                      onClick={() => setDrill({ actor: a.agent_name, name: a.agent_name })}
+                      className={`border-b last:border-0 tabular-nums hover:bg-slate-50 cursor-pointer ${drill?.actor === a.agent_name ? 'bg-slate-50' : ''}`}
                     >
                       <td className="px-3 py-2">
                         <span className="flex items-center gap-2 min-w-0">
@@ -646,7 +648,7 @@ export default function Reporting({
                           <span className="min-w-0">
                             <span className="block truncate">{a.agent_name}</span>
                             <span className="block text-[10px] text-slate-400 truncate">
-                              {a.agent_id === null ? 'Unattributed / admin sends' : 'Agent'}
+                              {a.agent_name === '(unattended)' ? 'Auto-replies / system sends' : (a.agent_id === null ? 'Admin / portal sends' : 'Legacy agent')}
                             </span>
                           </span>
                         </span>
@@ -663,7 +665,7 @@ export default function Reporting({
                   ))}
                   {visibleAgents.length === 0 && (
                     <tr><td colSpan="5" className="px-3 py-4 text-center text-slate-400 text-sm">
-                      {agentQ.trim() ? `No agents match “${agentQ.trim()}”.` : 'No agent-attributed sends in this view.'}
+                      {agentQ.trim() ? `No senders match “${agentQ.trim()}”.` : 'No attributed sends in this view.'}
                     </td></tr>
                   )}
                 </tbody>
@@ -671,14 +673,13 @@ export default function Reporting({
             </div>
             <div className="flex items-center gap-2 flex-wrap mt-2 pt-2 border-t border-slate-100">
               <span className="text-[11px] text-slate-400 flex-1 min-w-0">
-                ⓘ Mass SMS and auto-replies without an attributed agent count toward totals only.
+                ⓘ Auto-replies and other unattended sends group under “(unattended)”.
               </span>
               <span className="text-[11px] text-slate-400 shrink-0">
-                Showing {visibleAgents.length} of {sortedAgents.filter(agentVisible).length} agent{sortedAgents.filter(agentVisible).length === 1 ? '' : 's'}
+                Showing {visibleAgents.length} of {sortedAgents.filter(agentVisible).length} sender{sortedAgents.filter(agentVisible).length === 1 ? '' : 's'}
               </span>
             </div>
           </div>
-          )}
 
           {/* By sending number */}
           <div className="bg-white border rounded-xl p-4">
@@ -779,8 +780,8 @@ export default function Reporting({
                   </div>
                 </div>
                 <span className="flex-1" />
-                <button onClick={() => exportCsv(drill.agent_id, `agent-${drill.agent_id}`)}
-                  className="text-xs font-medium text-brand-600 hover:underline py-1 shrink-0">⬇ Export this agent</button>
+                <button onClick={() => exportCsv(null, `sender-${String(drill.name || 'all').replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 40)}`, drill.actor)}
+                  className="text-xs font-medium text-brand-600 hover:underline py-1 shrink-0">⬇ Export this sender</button>
                 <button onClick={() => setDrill(null)} aria-label="Close message detail"
                   className="text-xs text-slate-400 hover:text-slate-700 py-1 px-1 shrink-0">✕ Close</button>
               </div>

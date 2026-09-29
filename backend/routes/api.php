@@ -102,6 +102,7 @@ Route::prefix('superadmin')->middleware([\App\Http\Middleware\EnsureSuperAdminIp
     Route::get('/webhook-ips', [SuperAdminController::class, 'webhookIpsIndex']);
     Route::post('/webhook-ips', [SuperAdminController::class, 'webhookIpsStore']);
     Route::delete('/webhook-ips/{ip}', [SuperAdminController::class, 'webhookIpsDestroy']);
+    Route::post('/webhooks/test', [SuperAdminController::class, 'webhookTest'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':10,1');
     Route::get('/tenants/{tenant}/delete-preview', [SuperAdminController::class, 'tenantsDeletePreview']);
     Route::delete('/tenants/{tenant}', [SuperAdminController::class, 'tenantsDestroy']);
     Route::get('/tenants/{tenant}/admins/{admin}/delete-preview', [SuperAdminController::class, 'adminsDeletePreview']);

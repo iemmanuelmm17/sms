@@ -148,6 +148,18 @@ class SmokeTestCommand extends Command
                 return $r->getStatusCode() === 403 ? null : 'got ' . $r->getStatusCode() . ', expected 403 (fail closed)';
             });
 
+            $this->check('webhook test-probe header acks 200 (superadmin Test button path)', function () {
+                $r = $this->req('POST', '/api/webhooks/dynalink', ['event' => 'test'], [
+                    'REMOTE_ADDR' => '203.0.113.9',
+                    'HTTP_X_DYNALINK_WEBHOOK_TEST' => '1',
+                ]);
+                if ($r->getStatusCode() !== 200) {
+                    return 'got ' . $r->getStatusCode() . ', expected the harmless test ack 200';
+                }
+                $b = json_decode($r->getContent(), true) ?: [];
+                return !empty($b['test']) ? null : 'ack missing test:true';
+            });
+
             // ---- Login brute-force lockout ----
             $this->check('tenant login locks out (423) after ' . LockoutService::MAX_FAILS . ' wrong passwords', function () {
                 $tenant = Tenant::create([

@@ -147,16 +147,29 @@ export function SocketProvider({ children }) {
   useEffect(() => {
     if (api.isDemo) return;
     const onVis = () => {
-      if (document.hidden) { hiddenAtRef.current = Date.now(); return; }
+      if (document.hidden) { if (!hiddenAtRef.current) hiddenAtRef.current = Date.now(); return; }
       const away = hiddenAtRef.current ? Date.now() - hiddenAtRef.current : 0;
       hiddenAtRef.current = 0;
       if (away > 60000 && user) resync('tab-focus');
     };
+    // Visible-but-unfocused windows (two browsers side by side) never fire
+    // visibilitychange — track window focus too, so a silently dead socket
+    // still gets a full resync when the user comes back to the window.
+    const onBlur = () => { if (!hiddenAtRef.current) hiddenAtRef.current = Date.now(); };
+    const onFocus = () => {
+      const away = hiddenAtRef.current ? Date.now() - hiddenAtRef.current : 0;
+      hiddenAtRef.current = 0;
+      if (away > 60000 && user) resync('window-focus');
+    };
     const onOnline = () => { if (user) resync('network-back'); };
     document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onFocus);
     window.addEventListener('online', onOnline);
     return () => {
       document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('focus', onFocus);
       window.removeEventListener('online', onOnline);
     };
   }, [user, resync]);

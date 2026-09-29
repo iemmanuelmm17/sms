@@ -487,7 +487,14 @@ class MessageSessionController extends Controller
                         'shared'       => $owner !== ($s['ext'] ?? $s['user']),
                     ], $request->ip());
             }
-            DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', $id, ['session_id' => $id]);
+            // text/type ride along so OTHER windows can pin the refetched
+            // twin as delivered immediately (the provider parks history at
+            // 'sending' — without this they'd show Sending for 5 minutes).
+            DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', $id, [
+                'session_id' => $id,
+                'text' => (string) $data['message'],
+                'type' => (string) ($payload['type'] ?? 'sms'),
+            ]);
             \App\Services\OnboardingService::markAgentStep($s, 'first_send');
             $toDigits = preg_replace('/\D/', '', (string) ($check[0] ?? ''));
             SentMessageLog::record([

@@ -104,6 +104,15 @@ class SendScheduledMessage implements ShouldQueue
             $text = ($company !== '' ? $company . ': ' : '') . $text . "\n" . $footer;
         }
 
+        // MMS whose media never made it onto the row (lost save, trimmed
+        // upload) must NOT silently degrade to a text-only send — fail it
+        // loudly so the Report modal shows why and Retry can re-queue it.
+        if ($m->type === 'mms' && trim((string) ($m->media_data ?? '')) === '') {
+            \Illuminate\Support\Facades\Cache::forget($idemKey);
+            $this->logResult($m, $recipient, false, 'mms media missing on the scheduled row — the image was lost at save time; re-create the schedule with the attachment');
+            return;
+        }
+
         $payload = [
             'type'        => $m->type,
             'message'     => $text,
@@ -124,6 +133,7 @@ class SendScheduledMessage implements ShouldQueue
                 $trigId = null;
                 if (preg_match('/^agent:(\d+)$/', (string) $m->created_by, $mm)) $trigId = (int) $mm[1];
                 $toDigits = preg_replace('/\D/', '', (string) ($recipient['phone'] ?? ''));
+                $newSid = is_array($body) ? ($body['messagesession-id'] ?? $body['messagesession_id'] ?? null) : null;
                 SentMessageLog::record([
                     'tenant_id' => SentMessageLog::tenantIdFor($m->domain, $m->user),
                     'domain' => $m->domain, 'user' => $m->user,
@@ -131,11 +141,25 @@ class SendScheduledMessage implements ShouldQueue
                     'actor_name' => $m->created_by_name,
                     'category' => SentMessageLog::MASS_SMS,
                     'scheduled_message_id' => $m->id,
-                    'session_id' => is_array($body) ? ($body['messagesession-id'] ?? $body['messagesession_id'] ?? null) : null,
+                    'session_id' => $newSid,
                     'from_number' => preg_replace('/\D/', '', (string) $m->from_number),
                     'to_number' => $toDigits !== '' ? $toDigits : null,
                     'type' => $m->type ?? 'sms',
                 ]);
+                // Live-update open Messages windows. Debounced per schedule:
+                // a 500-recipient blast must not fire 500 session refetches
+                // in every browser — the first send in each 20s window pulls
+                // the thread (which by then contains the earlier ones too).
+                try {
+                    if (\Illuminate\Support\Facades\Cache::add("sched:sess-bcast:{$m->id}", 1, now()->addSeconds(20))) {
+                        DataChanged::send($m->domain, $m->user, 'sessions', 'message-sent', $newSid, [
+                            'session_id' => $newSid,
+                            'remote' => (string) ($recipient['phone'] ?? ''),
+                            'text' => (string) $text,
+                            'type' => (string) ($m->type ?? 'sms'),
+                        ]);
+                    }
+                } catch (\Throwable $e) { /* sync must never break a send */ }
             }
             if (!$ok) \Illuminate\Support\Facades\Cache::forget($idemKey);
         } catch (\Throwable $e) {
@@ -145,6 +169,38 @@ class SendScheduledMessage implements ShouldQueue
         } catch (\Throwable $e) {
             \Illuminate\Support\Facades\Cache::forget($idemKey);
             $this->logResult($m, $recipient, false, 'send error: '.$e->getMessage());
+        }
+    }
+
+    /**
+     * The worker gave up (timeout, crash, exhausted --tries): leave a trace.
+     * Without this the recipient silently sat at "queued" forever with no
+     * log line anywhere — now it lands in laravel.log AND in send_log, so the
+     * Report modal shows the reason and Retry re-queues it.
+     */
+    public function failed(\Throwable $e): void
+    {
+        try {
+            \Illuminate\Support\Facades\Log::error('Scheduled send job failed permanently', [
+                'scheduled_id' => $this->scheduledId,
+                'recipient_index' => $this->recipientIndex,
+                'error' => $e->getMessage(),
+            ]);
+            $m = ScheduledMessage::find($this->scheduledId);
+            if (!$m || in_array($m->status, ['cancelled'], true)) return;
+            $recipient = $m->recipients[$this->recipientIndex] ?? null;
+            if (!$recipient) return;
+            $log = $m->send_log ?? [];
+            $log[] = [
+                'phone' => $recipient['phone'] ?? '', 'name' => $recipient['name'] ?? '',
+                'ok' => false, 'detail' => 'job failed: ' . $e->getMessage(),
+                'at' => now()->toISOString(),
+            ];
+            $m->send_log = $log;
+            $m->save();
+            DataChanged::send($m->domain, $m->user, 'scheduled', 'saved', $m->id);
+        } catch (\Throwable $inner) {
+            // failed() must never throw — the worker is already handling a crash.
         }
     }
 

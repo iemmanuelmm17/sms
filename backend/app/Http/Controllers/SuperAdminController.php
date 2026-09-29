@@ -797,6 +797,49 @@ class SuperAdminController extends Controller
         }
     }
 
+    /**
+     * POST /superadmin/webhooks/test — probe the effective webhook URL
+     * end-to-end from this server: DNS → tunnel/proxy → routing → app. The
+     * endpoint acks the X-Dynalink-Webhook-Test header before the IP
+     * allowlist (the server's own IP is normally not allowlisted), so a 200
+     * here proves reachability; inbound Dynalink events additionally need
+     * their IPs on the allowlist below.
+     */
+    public function webhookTest(Request $request)
+    {
+        $url = $this->webhookEffective();
+        if ($url === '') {
+            return response()->json(['ok' => false, 'url' => null, 'error' => 'No webhook URL configured.']);
+        }
+        AuditLog::record(null, 'superadmin', null, $this->sa($request)->username, 'webhook.test', ['url' => $url], $request->ip());
+        $t0 = microtime(true);
+        try {
+            $res = \Illuminate\Support\Facades\Http::timeout(10)->withHeaders([
+                'X-Dynalink-Webhook-Test' => '1',
+                'X-Correlation-ID' => 'test-' . bin2hex(random_bytes(8)),
+                'Accept' => 'application/json',
+            ])->asJson()->post($url, ['event' => 'test', 'test' => true]);
+            $ms = (int) round((microtime(true) - $t0) * 1000);
+            $body = (string) $res->body();
+            $decoded = json_decode($body, true);
+            $ok = $res->status() === 200 && is_array($decoded) && !empty($decoded['test']);
+            return response()->json([
+                'ok' => $ok, 'url' => $url, 'status' => $res->status(), 'ms' => $ms,
+                'body_excerpt' => mb_substr($body, 0, 200),
+                'hint' => $ok ? null : ($res->status() === 403
+                    ? 'Reached a server but got 403 — if this URL points at THIS app, a proxy/tunnel may be stripping the test header; otherwise something else answers at that URL.'
+                    : 'Something answered, but not this app\'s webhook test ack — check the URL path ends with /api/webhooks/dynalink and the tunnel targets THIS server.'),
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'ok' => false, 'url' => $url, 'status' => null,
+                'ms' => (int) round((microtime(true) - $t0) * 1000),
+                'error' => $e->getMessage(),
+                'hint' => 'Could not connect at all — DNS failure, tunnel down, or the URL is unreachable from this server.',
+            ]);
+        }
+    }
+
     /** Effective webhook/post-url with the current DB override applied. */
     protected function webhookEffective(): string
     {

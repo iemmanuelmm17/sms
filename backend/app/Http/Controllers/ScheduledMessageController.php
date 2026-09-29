@@ -275,25 +275,35 @@ class ScheduledMessageController extends Controller
     }
 
     /**
-     * POST /api/scheduled/{scheduled}/retry — re-queue the FAILED recipients
-     * of a partial send. Failed log entries are dropped so completion
-     * accounting restarts cleanly; successes are never re-sent.
+     * POST /api/scheduled/{scheduled}/retry — re-queue everything that did
+     * NOT confirm: recipients with a failed log entry AND recipients with no
+     * entry at all (their job never ran — worker was down, timed out, etc).
+     * Confirmed successes are never re-sent (send_log idempotency in the job
+     * is the second line of defense). Failed entries are dropped so
+     * completion accounting restarts cleanly.
      */
     public function retry(Request $request, ScheduledMessage $scheduled)
     {
         [$domain, $user] = $this->scope($request);
         abort_unless($scheduled->domain === $domain, 403);
         $this->assertOwn($request, $scheduled);
-        abort_if($scheduled->status !== 'partial', 422, 'Only partially-failed sends can be retried.');
+        abort_if(in_array($scheduled->status, ['sent', 'cancelled'], true), 422,
+            'This message is finished — nothing to retry.');
+        abort_if($scheduled->status === 'pending', 422,
+            'Still pending — use Send now (or wait for its scheduled time).');
 
         $log = $scheduled->send_log ?? [];
-        $failedPhones = collect($log)
-            ->where('ok', false)
-            ->pluck('phone')
-            ->map(fn($p) => preg_replace('/\D/', '', (string) $p))
-            ->filter()->unique()->values();
-        if ($failedPhones->isEmpty()) {
-            return response()->json(['message' => 'No failed recipients to retry.'], 422);
+        $digits = fn($p) => preg_replace('/\D/', '', (string) $p);
+        $failedPhones = collect($log)->where('ok', false)->pluck('phone')->map($digits)->filter()->unique()->values();
+        $confirmed = collect($log)->where('ok', true)->pluck('phone')->map($digits)->filter()->unique();
+        $logged = collect($log)->pluck('phone')->map($digits)->filter()->unique();
+        // Recipients whose job never produced ANY log entry (stuck in queue).
+        $missing = collect($scheduled->recipients ?? [])
+            ->map(fn($r) => $digits($r['phone'] ?? ''))->filter()
+            ->reject(fn($d) => $logged->contains($d))->unique()->values();
+        $targets = $failedPhones->merge($missing)->unique()->values();
+        if ($targets->isEmpty()) {
+            return response()->json(['message' => 'No failed or stuck recipients to retry.'], 422);
         }
 
         $scheduled->send_log = array_values(array_filter($log, fn($l) => !empty($l['ok'])));
@@ -302,15 +312,15 @@ class ScheduledMessageController extends Controller
 
         $n = 0;
         foreach ($scheduled->recipients as $i => $r) {
-            $digits = preg_replace('/\D/', '', (string) ($r['phone'] ?? ''));
-            if ($failedPhones->contains($digits)) {
+            $d = $digits($r['phone'] ?? '');
+            if ($d !== '' && $targets->contains($d) && !$confirmed->contains($d)) {
                 SendScheduledMessage::dispatch($scheduled->id, $i)->delay(now()->addSeconds($n * 2));
                 $n++;
             }
         }
 
         $fresh = $scheduled->fresh();
-        $this->audit($request, 'scheduled.retried', ['scheduled_id' => $scheduled->id, 'name' => $scheduled->name]);
+        $this->audit($request, 'scheduled.retried', ['scheduled_id' => $scheduled->id, 'name' => $scheduled->name, 'requeued' => $n]);
         DataChanged::send($domain, $user, 'scheduled', 'saved', $scheduled->id);
         return response()->json($fresh);
     }

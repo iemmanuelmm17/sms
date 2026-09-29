@@ -40,6 +40,8 @@ export default function SuperSettings() {
   const [webhook, setWebhook] = useState('');
   const [reqCorr, setReqCorr] = useState(false);
   const [whErr, setWhErr] = useState('');
+  const [whTest, setWhTest] = useState(null);   // last Test-webhook result
+  const [testing, setTesting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [appName, setAppName] = useState('');
@@ -198,6 +200,22 @@ export default function SuperSettings() {
       setSettings(s);
       toastSuccess('All servers returned to rotation.');
     } catch (ex) { toastError(ex?.response?.data?.message || 'Could not reset.'); }
+  };
+
+  // POST a harmless probe through the FULL inbound path (DNS → tunnel →
+  // routing → this app). The endpoint acks the test header before the IP
+  // allowlist, so 200 = reachable; Dynalink's own IPs still need allowlist
+  // entries for real events (Webhook IPs section below).
+  const testWebhook = async () => {
+    setTesting(true); setWhTest(null);
+    try {
+      const r = await api.superWebhookTest();
+      setWhTest(r);
+      if (r?.ok) toastSuccess(`Webhook reachable — ${r.status} in ${r.ms} ms.`);
+      else toastError('Webhook test failed — see details below.');
+    } catch (e) {
+      setWhTest({ ok: false, error: e?.response?.data?.message || e.message });
+    } finally { setTesting(false); }
   };
 
   const saveWebhook = async () => {
@@ -517,6 +535,20 @@ export default function SuperSettings() {
           </div>
         )}
         {whErr && <div className="text-xs text-red-600 mt-2">{whErr}</div>}
+        {whTest && (
+          <div className={`text-xs rounded-lg p-2.5 mt-2 border ${whTest.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-700'}`}>
+            {whTest.ok ? (
+              <>✓ Webhook reachable — HTTP {whTest.status} in {whTest.ms} ms. Inbound events will flow as long as Dynalink&apos;s IPs are on the allowlist below.</>
+            ) : (
+              <>
+                ✗ Test failed{whTest.status ? ` — HTTP ${whTest.status}` : ''}{whTest.ms != null ? ` after ${whTest.ms} ms` : ''}.
+                {whTest.error ? <div className="mt-1 font-mono break-all">{whTest.error}</div> : null}
+                {whTest.body_excerpt ? <div className="mt-1 font-mono break-all">{whTest.body_excerpt}</div> : null}
+                {whTest.hint ? <div className="mt-1">{whTest.hint}</div> : null}
+              </>
+            )}
+          </div>
+        )}
         <div className="border-t mt-4 pt-3">
           <div className="text-xs font-medium text-slate-700">Require correlation ID header</div>
           <p className="text-[11px] text-slate-400 mt-0.5">When on, webhook POSTs without <span className="font-mono">X-Correlation-ID</span> (or <span className="font-mono">X-Request-ID</span>) are rejected. Dynalink sends one on every event — safe to enable.</p>
@@ -525,7 +557,11 @@ export default function SuperSettings() {
             {reqCorr ? '✓ Required' : '○ Optional — click to require'}
           </button>
         </div>
-        <div className="flex justify-end mt-3">
+        <div className="flex justify-end gap-2 mt-3">
+          <button type="button" onClick={testWebhook} disabled={testing}
+            className="text-sm bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 border rounded-lg px-4 py-2 font-semibold">
+            {testing ? 'Testing…' : 'Test webhook'}
+          </button>
           <button type="button" onClick={saveWebhook} disabled={saving}
             className="text-sm bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg px-4 py-2 font-semibold">
             {saving ? 'Saving…' : 'Save webhook URL'}

@@ -26,6 +26,16 @@ class WebhookController extends Controller
      */
     public function dynalink(Request $request)
     {
+        // Superadmin "Test webhook" probe. Must short-circuit BEFORE the IP
+        // allowlist — the app server's own egress IP is normally not on it.
+        // Harmless by design: no writes, no broadcasts, no opt-out side
+        // effects; the same info the public GET route already gives anyone.
+        if ($request->header('X-Dynalink-Webhook-Test') === '1') {
+            return response()->json([
+                'ok' => true, 'test' => true, 'received_at' => now()->toIso8601String(),
+            ]);
+        }
+
         // Source auth: Dynalink IPs only (superadmin-managed allowlist).
         // Fail closed — unknown source, no DB write, no broadcast.
         // NOTE: behind a tunnel/proxy, trusted proxies must be configured
