@@ -110,9 +110,10 @@ const STATUS_META = [
 function StatusTag({ status, ts }) {
   const s = String(status || '');
   const ageMs = ts ? Date.now() - parseTs(ts) : 0;
-  // The provider leaves history parked at 'sending' — anything older than
-  // 5 minutes already went out, so call it delivered.
-  if (/sending|pending|queued/i.test(s) && ageMs > 5 * 60 * 1000) {
+  // The provider leaves history parked at 'sending'/'scheduled' — anything
+  // older than 5 minutes already went out, so call it delivered. (The server
+  // also normalizes this since 2026-09; this stays as the offline/demo fallback.)
+  if (/sending|pending|queued|scheduled/i.test(s) && ageMs > 5 * 60 * 1000) {
     return <span className="text-emerald-200 font-bold" title={s}>✓✓ Delivered</span>;
   }
   const hit = STATUS_META.find(([re]) => re.test(s));

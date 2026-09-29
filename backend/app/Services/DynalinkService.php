@@ -267,14 +267,29 @@ class DynalinkService
         // but rebuilding this on every session request costs a full re-parse
         // of the domain list on large accounts.
         return \Illuminate\Support\Facades\Cache::remember("dl:owners:{$domain}", 300, function () use ($token, $domain) {
-            $map = [];
-            foreach ($this->domainSmsNumbers($token, $domain) as $row) {
-                if (!is_array($row)) continue;
-                $d = preg_replace('/\D/', '', (string) ($row['number'] ?? ''));
-                $dest = isset($row['dest']) ? trim((string) $row['dest']) : '';
-                if ($d !== '' && $dest !== '') $map[$d] = $dest;
+            try {
+                $map = [];
+                foreach ($this->domainSmsNumbers($token, $domain) as $row) {
+                    if (!is_array($row)) continue;
+                    $d = preg_replace('/\D/', '', (string) ($row['number'] ?? ''));
+                    $dest = isset($row['dest']) ? trim((string) $row['dest']) : '';
+                    if ($d !== '' && $dest !== '') $map[$d] = $dest;
+                }
+                // Last-known-good copy: a provider hiccup must not empty the
+                // map and strip agents of their OWN numbers mid-session —
+                // that surfaced as spurious 403s opening conversations.
+                \Illuminate\Support\Facades\Cache::put("dl:owners:last:{$domain}", $map, now()->addDay());
+                return $map;
+            } catch (\Throwable $e) {
+                $last = \Illuminate\Support\Facades\Cache::get("dl:owners:last:{$domain}");
+                if (is_array($last)) {
+                    Log::warning('numberOwners: provider failed, serving last-known-good map', [
+                        'domain' => $domain, 'error' => $e->getMessage(),
+                    ]);
+                    return $last;
+                }
+                throw $e;
             }
-            return $map;
         }) ?? [];
     }
 

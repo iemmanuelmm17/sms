@@ -18,6 +18,8 @@ class CompanySettingsService
     public const VAR = '$CompanyName';
     public const AGENT_VAR = '$AgentName';
     public const COOLDOWN_DEFAULT = 5; // auto-reply sender cooldown, minutes (0 = off)
+    /** Bulk-send TCPA footer when the tenant hasn't set a custom one. */
+    public const DEFAULT_TCPA_FOOTER = 'Reply STOP or UNSUBSCRIBE to cancel.';
     // TCPA quiet hours: no one should be texted before 8am or after 9pm local.
     public const QUIET_START_DEFAULT = '21:00';
     public const QUIET_END_DEFAULT = '08:00';
@@ -213,28 +215,14 @@ class CompanySettingsService
      * Footer appended to scheduled sends when the per-message "Add TCPA
      * Script Footer" toggle is on (any recipient count).
      *
-     * Falls back to the opt-out auto-reply default, then to a safe literal, so
-     * an unset value never means "no footer".
+     * Default when unset is the short compliance line — NOT the opt-in
+     * auto-reply body (that long "Thanks for signing up…" text belongs to
+     * the keyword reply, and using it here made every bulk send verbose).
      */
     public function tcpaFooter(string $domain, ?string $user = null, string $agentName = ''): string
     {
         $raw = trim((string) ($this->get($domain)['tcpa_footer'] ?? ''));
-        if ($raw === '') {
-            try {
-                // The disclosure footer is the OPT-IN (Action B) text — the
-                // "Msg frequency varies… Reply STOP to cancel" language. It used
-                // to fall back to the opt_out (Action A) body, which told
-                // perfectly opted-in recipients "Notifications stopped. Reply
-                // START to subscribe."
-                $q = \App\Models\AutoReply::where('domain', $domain)->where('default_key', 'opt_in');
-                // Scope by user when we have one, but never let a mismatch (e.g. a
-                // portal agent's extension) silently drop the footer.
-                $row = (clone $q)->when($user, fn($w) => $w->where('user', $user))->value('message')
-                    ?: $q->value('message');
-                if ($row) $raw = trim((string) $row);
-            } catch (\Throwable $e) {}
-        }
-        if ($raw === '') $raw = 'Reply STOP to unsubscribe.';
+        if ($raw === '') $raw = self::DEFAULT_TCPA_FOOTER;
         // The send wrap already brands the body with "Company: " — drop a
         // leading $CompanyName from the footer so the name is not sent twice,
         // then resolve the placeholders that remain ($CompanyName mid-text,
@@ -307,6 +295,12 @@ class CompanySettingsService
      */
     public function resolve(string $domain, string $text, string $agentName = ''): string
     {
+        // Send-time entity decode: stored texts picked up HTML entities from
+        // old defaults/UI saves ("Msg&amp;Data rates may apply" went out over
+        // the wire verbatim). An SMS should never contain &amp;/&#39;/&quot;.
+        if (str_contains($text, '&')) {
+            $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        }
         if (!str_contains($text, '$')) return $text;
         $text = str_ireplace(self::VAR, $this->name($domain), $text);
         return str_ireplace(self::AGENT_VAR, $agentName, $text);

@@ -371,15 +371,20 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
   const estCount = selContacts.length + csvRows.length + manualRows.length
     + selGroups.reduce((n, gid) => n + (groups.find((g) => g.id === gid)?.members?.length || 0), 0);
   const [companyName, setCompanyName] = useState('');
-  const [footerText, setFooterText] = useState('Reply STOP to unsubscribe.');
+  // Mirrors the backend: TCPA-page footer when set, else the short compliance
+  // default (CompanySettingsService::DEFAULT_TCPA_FOOTER).
+  const [footerText, setFooterText] = useState('Reply STOP or UNSUBSCRIBE to cancel.');
   useEffect(() => {
     api.optEvents('opt_in').then((rows) => setOptInNumbers((rows || []).map((r) => String(r.phone_number || '').replace(/\D/g, '')))).catch(() => {});
   }, []);
   useEffect(() => {
-    api.companySettings().then((d) => { setCompanyName(d?.company_name || ''); setQuiet(quietFromSettings(d)); }).catch(() => {});
-    api.autoReplies().then((rs) => {
-      const a = (rs || []).find((r) => r.default_key === 'opt_out');
-      if (a?.message) setFooterText(a.message);
+    api.companySettings().then((d) => {
+      setCompanyName(d?.company_name || '');
+      setQuiet(quietFromSettings(d));
+      // Preview what the backend will actually append. (Used to prefill from
+      // the opt_out auto-reply body — wrong text, and not what tcpaFooter()
+      // resolves anymore.)
+      if (String(d?.tcpa_footer || '').trim()) setFooterText(String(d.tcpa_footer).trim());
     }).catch(() => {});
   }, []);
   const complianceOn = tcpaScript; // footer applies to every scheduled send when checked

@@ -361,12 +361,26 @@ class MessageSessionController extends Controller
             }
             // Not in the agent's own listing → not theirs to open.
             if ($num === '') {
+                \Illuminate\Support\Facades\Log::warning('session read 403: thread not in agent listing', [
+                    'domain' => $s['domain'], 'ext' => $s['ext'] ?? $s['user'], 'session' => $sessionId,
+                ]);
                 abort(response()->json(['message' => 'This conversation is not available to you.'], 403));
             }
         }
 
+        $ok = $access->canReadNumber($s['domain'], $s['ext'] ?? $s['user'], $num, $token);
+        if (!$ok) {
+            // Leave a trail: this fires either when a grant/assignment was
+            // revoked (correct) or when the provider owner map came back
+            // empty mid-hiccup (spurious) — the log tells them apart.
+            \Illuminate\Support\Facades\Log::warning('session read 403: number not readable by agent', [
+                'domain' => $s['domain'], 'ext' => $s['ext'] ?? $s['user'],
+                'session' => $sessionId, 'number' => $num,
+                'shared' => app(\App\Services\CompanySettingsService::class)->sharedNumbers($s['domain']),
+            ]);
+        }
         abort_unless(
-            $access->canReadNumber($s['domain'], $s['ext'] ?? $s['user'], $num, $token),
+            $ok,
             response()->json(['message' => 'This conversation is not available to you.'], 403)
         );
     }
@@ -376,10 +390,33 @@ class MessageSessionController extends Controller
     {
         $s = $this->sess($request);
         $this->assertSessionVisible($request, $id);
-        return response()->json(
+        return response()->json($this->normalizeStaleStatuses(
             $this->dynalink->sessionMessages($this->dtoken(request()), $s['domain'],
                 $this->ownerForSession($request, $id), $id)
-        );
+        ));
+    }
+
+    /**
+     * The provider parks outbound history at 'sending'/'scheduled' forever —
+     * delivery receipts only arrive by webhook, which a LAN box never gets.
+     * Anything outbound older than 5 minutes demonstrably went out (this is
+     * the same rule the web client applied locally); normalizing here fixes
+     * it once for every client instead of per-render.
+     */
+    protected function normalizeStaleStatuses(array $list): array
+    {
+        foreach ($list as &$m) {
+            if (!is_array($m) || ($m['direction'] ?? '') !== 'term') continue;
+            if (!preg_match('/^(sending|pending|queued|scheduled)$/i', (string) ($m['status'] ?? ''))) continue;
+            try {
+                $ts = \Illuminate\Support\Carbon::parse((string) ($m['timestamp'] ?? ''), 'UTC');
+            } catch (\Throwable $e) {
+                continue; // unparseable timestamp — leave the status alone
+            }
+            if ($ts->lt(now()->subMinutes(5))) $m['status'] = 'delivered';
+        }
+        unset($m);
+        return $list;
     }
 
     /**

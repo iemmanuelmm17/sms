@@ -242,6 +242,21 @@ class SmokeTestCommand extends Command
                     ->where('phone_cell', '15550002222')->first();
                 return $hit ? null : 'contact lookup by domain+phone failed';
             });
+
+            // ---- TCPA footer + send-text hygiene ----
+            $this->check('TCPA footer default is the short compliance line', function () {
+                $svc = app(\App\Services\CompanySettingsService::class);
+                $f = $svc->tcpaFooter('smoke.test');
+                return $f === \App\Services\CompanySettingsService::DEFAULT_TCPA_FOOTER
+                    ? null : 'got: ' . var_export($f, true);
+            });
+
+            $this->check('send-text resolver decodes HTML entities (Msg&amp;Data → Msg&Data)', function () {
+                $r = app(\App\Services\CompanySettingsService::class)
+                    ->resolve('smoke.test', 'Msg frequency varies. Msg&amp;Data rates may apply.');
+                return (str_contains($r, 'Msg&Data') && !str_contains($r, '&amp;'))
+                    ? null : 'got: ' . var_export($r, true);
+            });
         } catch (\Throwable $e) {
             $this->fail++;
             $this->error('  ✗ smoke run crashed: ' . $e->getMessage());

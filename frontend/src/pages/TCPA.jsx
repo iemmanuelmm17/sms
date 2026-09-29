@@ -123,7 +123,7 @@ export default function TCPA() {
             </p>
             <textarea
               value={footer} onChange={(e) => setFooter(e.target.value)} rows={2} maxLength={320}
-              placeholder="Reply STOP to unsubscribe."
+              placeholder="Reply STOP or UNSUBSCRIBE to cancel."
               className="w-full border rounded-lg px-3 py-2 text-sm mt-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
             />
             <div className="flex items-center gap-2 mt-2 flex-wrap">
@@ -136,7 +136,7 @@ export default function TCPA() {
               <span className="text-[11px] text-slate-400">{footer.length}/320</span>
               {footer.trim() === '' && (
                 <span className="text-[11px] text-amber-700">
-                  Empty — bulk sends fall back to “Reply STOP to unsubscribe.”
+                  Empty — bulk sends fall back to “Reply STOP or UNSUBSCRIBE to cancel.”
                 </span>
               )}
             </div>
