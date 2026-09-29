@@ -177,6 +177,11 @@ Route::get('/contacts/sync-status', [ContactController::class, 'status']);
 Route::post('/contacts/resync', [ContactController::class, 'resync']);
 Route::get('/contacts/template', [ContactController::class, 'template']);
 Route::post('/contacts/import', [ContactController::class, 'import'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':3,1');
+// Bulk selection actions (Set company / Delete). Each request walks up to
+// 200 provider calls — throttled like the import; the client chunks larger
+// selections into consecutive requests.
+Route::post('/contacts/bulk-company', [ContactController::class, 'bulkCompany'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':10,1');
+Route::post('/contacts/bulk-delete', [ContactController::class, 'bulkDelete'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':10,1');
 // No show(): these controllers never implemented GET /{id} — registering it
 // turned any direct hit into a 500 (BadMethodCallException) instead of a 404.
 Route::apiResource('/contacts', ContactController::class)->except(['create', 'edit', 'show']);

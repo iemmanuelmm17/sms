@@ -200,6 +200,109 @@ class ContactController extends Controller
     }
 
     /**
+     * POST /api/contacts/bulk-company — set one company on many contacts.
+     * Mirrors the import pattern: one synchronous Dynalink call per contact,
+     * 200 ids per request (the client chunks larger selections), per-id
+     * error feedback, a single broadcast at the end. Sends each contact's
+     * FULL local payload with the new company merged in — same shape the
+     * single-contact update sends — so provider-side partial-update
+     * semantics can never blank other fields.
+     */
+    public function bulkCompany(Request $request)
+    {
+        $s = $this->sess($request);
+        $data = $request->validate([
+            'ids'     => 'required|array|min:1|max:200',
+            'ids.*'   => 'required|string|max:120',
+            'company' => 'required|string|max:255',
+        ]);
+        $company = trim((string) $data['company']);
+        if ($company === '') {
+            abort(response()->json(['message' => 'Company name is required.'], 422));
+        }
+        if (function_exists('set_time_limit')) set_time_limit(300);
+
+        $ids = array_values(array_unique($data['ids']));
+        $local = Contact::where('domain', $s['domain'])->where('user', $s['user'])
+            ->whereIn('provider_id', $ids)->get()
+            ->keyBy(fn($c) => (string) $c->provider_id);
+
+        $updated = 0;
+        $errors = [];
+        foreach ($ids as $id) {
+            $payload = ['company' => $company];
+            if ($row = $local->get((string) $id)) {
+                // array_merge (not +): the new company must WIN over the
+                // mirror's old value.
+                $payload = array_merge(
+                    array_filter($row->toProviderPayload(), fn($v) => $v !== ''),
+                    ['company' => $company]
+                );
+            }
+            try {
+                [$status, $body] = $this->dynalink->updateContact($this->dtoken(request()), $s['domain'], $s['user'], $id, $payload);
+                if ($status >= 200 && $status < 300) {
+                    [$prow] = $this->providerRow($body);
+                    $this->sync->upsertFromWrite($s['domain'], $s['user'], array_merge($payload, $prow), $id);
+                    $updated++;
+                } else {
+                    $errors[] = ['id' => $id, 'error' => is_string($body) ? $body : json_encode($body)];
+                }
+            } catch (\Throwable $e) {
+                $errors[] = ['id' => $id, 'error' => $e->getMessage()];
+            }
+        }
+        if ($updated > 0) {
+            DataChanged::send($s['domain'], $s['user'], 'contacts', 'saved');
+            $this->audit($request, 'contacts.bulk-company', ['count' => $updated, 'company' => $company]);
+        }
+        return response()->json(['updated' => $updated, 'failed' => count($errors), 'errors' => array_slice($errors, 0, 20)]);
+    }
+
+    /**
+     * POST /api/contacts/bulk-delete — admin-only mass delete with a
+     * TWO-WAY confirmation: the UI walks the operator through a warning
+     * step and an explicit typed "DELETE", and the server re-checks the
+     * word so no client bug or stray call can ever mass-delete.
+     */
+    public function bulkDelete(Request $request)
+    {
+        $s = $this->sess($request);
+        $this->requireAdmin($s);
+        $data = $request->validate([
+            'ids'     => 'required|array|min:1|max:200',
+            'ids.*'   => 'required|string|max:120',
+            'confirm' => 'required|string|max:20',
+        ]);
+        if ((string) $data['confirm'] !== 'DELETE') {
+            abort(response()->json(['message' => 'Confirmation word missing — nothing was deleted.'], 422));
+        }
+        if (function_exists('set_time_limit')) set_time_limit(300);
+
+        $ids = array_values(array_unique($data['ids']));
+        $deleted = 0;
+        $errors = [];
+        foreach ($ids as $id) {
+            try {
+                [$status, $body] = $this->dynalink->deleteContact($this->dtoken(request()), $s['domain'], $s['user'], $id);
+                if ($status >= 200 && $status < 300) {
+                    $this->sync->forget($s['domain'], $s['user'], $id);
+                    $deleted++;
+                } else {
+                    $errors[] = ['id' => $id, 'error' => is_string($body) ? $body : json_encode($body)];
+                }
+            } catch (\Throwable $e) {
+                $errors[] = ['id' => $id, 'error' => $e->getMessage()];
+            }
+        }
+        if ($deleted > 0) {
+            DataChanged::send($s['domain'], $s['user'], 'contacts', 'deleted');
+            $this->audit($request, 'contacts.bulk-deleted', ['count' => $deleted, 'ids' => array_slice($ids, 0, 50)]);
+        }
+        return response()->json(['deleted' => $deleted, 'failed' => count($errors), 'errors' => array_slice($errors, 0, 20)]);
+    }
+
+    /**
      * POST /api/contacts/import — multipart `file` (.csv).
      * Robust to header case differences; row-level error feedback.
      * Requires first_name + last_name + phone_cell per row; every provided

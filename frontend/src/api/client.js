@@ -858,6 +858,15 @@ export const api = {
     if (DEMO_MODE) { await delay(150); demo.contacts = demo.contacts.filter((c) => cid(c) !== id); saveDemo(demo); return { ok: true }; }
     return (await http.delete(`/api/contacts/${encodeURIComponent(id)}`)).data;
   },
+  /** Bulk selection actions — server caps at 200 ids per call; the page chunks. */
+  async bulkContactsCompany(ids, company) {
+    if (DEMO_MODE) { await delay(250); demo.contacts = demo.contacts.map((c) => (ids.includes(cid(c)) ? { ...c, company } : c)); saveDemo(demo); return { updated: ids.length, failed: 0, errors: [] }; }
+    return (await http.post('/api/contacts/bulk-company', { ids, company })).data;
+  },
+  async bulkContactsDelete(ids, confirmWord) {
+    if (DEMO_MODE) { await delay(250); const n = demo.contacts.filter((c) => ids.includes(cid(c))).length; demo.contacts = demo.contacts.filter((c) => !ids.includes(cid(c))); saveDemo(demo); return { deleted: n, failed: 0, errors: [] }; }
+    return (await http.post('/api/contacts/bulk-delete', { ids, confirm: confirmWord })).data;
+  },
   // Two-way sync with the portal: portal wins, local-only rows get pushed up.
   async resyncContacts() {
     if (DEMO_MODE) { await delay(300); return { created: 0, updated: 0, removed: 0, pushed: 0, count: demo.contacts.length, last_synced_at: new Date().toISOString(), errors: [] }; }
