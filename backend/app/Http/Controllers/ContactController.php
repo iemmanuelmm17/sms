@@ -43,6 +43,9 @@ class ContactController extends Controller
      * The provider is only touched when the local table is still empty:
      * one backfill, then never again until someone presses Resync or the
      * nightly job runs. That keeps every page load local and fast.
+     *
+     * Merges BOTH address books: the actor's personal one and the domain's
+     * shared one (is_shared rows carry `shared: true` for the UI pill).
      */
     public function index(Request $request)
     {
@@ -51,7 +54,16 @@ class ContactController extends Controller
         if ($rows->isEmpty() && $this->maybeBackfill($s)) {
             $rows = $this->sync->localList($s['domain'], $s['user']);
         }
-        return response()->json($rows->map(fn($c) => $c->toProviderArray())->values());
+        $shared = $this->sync->sharedList($s['domain']);
+        if ($shared->isEmpty() && $this->maybeBackfillShared($s)) {
+            $shared = $this->sync->sharedList($s['domain']);
+        }
+        return response()->json(
+            $rows->concat($shared)
+                ->sortBy(fn($c) => mb_strtolower(trim(($c->last_name ?? '') . ' ' . ($c->first_name ?? ''))))
+                ->map(fn($c) => $c->toProviderArray())
+                ->values()
+        );
     }
 
     /**
@@ -78,12 +90,47 @@ class ContactController extends Controller
         return true;
     }
 
+    /**
+     * First-read backfill of the SHARED (domain-level) book — same guard
+     * pattern as the personal one: pull once, then never again until
+     * Resync or the nightly job. Domain-wide flag: one backfill serves
+     * every user on the domain.
+     */
+    protected function maybeBackfillShared(array $s): bool
+    {
+        $key  = "contacts:backfill:shared:{$s['domain']}";
+        if (Cache::has($key)) return false;
+        $lock = Cache::lock($key . ':lock', 60);
+        try {
+            $lock->get();
+            $this->sync->syncShared($this->dtoken(request()), $s['domain'], $s['user']);
+            Log::info('Contacts: initial shared-book backfill from provider', ['domain' => $s['domain']]);
+        } catch (\Throwable $e) {
+            Log::warning('Contacts: shared backfill failed — ' . $e->getMessage());
+        } finally {
+            Cache::put($key, now()->toISOString(), now()->addHours(12));
+            try { $lock->release(); } catch (\Throwable $e) {}
+        }
+        return true;
+    }
+
     /** POST /api/contacts/resync — two-way sync with the portal (admin only). */
     public function resync(Request $request)
     {
         $s = $this->sess($request);
         $this->requireAdmin($request);
         $res = $this->sync->sync($this->dtoken(request()), $s['domain'], $s['user']);
+        // The shared book rides along: one Resync refreshes everything the
+        // Contacts page shows. Shared failures degrade, never block.
+        try {
+            $sh = $this->sync->syncShared($this->dtoken(request()), $s['domain'], $s['user']);
+            foreach (['created', 'updated', 'removed', 'pushed'] as $k) $res[$k] += $sh[$k];
+            $res['shared_count'] = $sh['count'];
+            $res['errors'] = array_slice(array_merge($res['errors'], $sh['errors']), 0, 10);
+        } catch (\Throwable $e) {
+            Log::warning('Contacts: shared resync failed — ' . $e->getMessage());
+            $res['errors'] = array_slice(array_merge($res['errors'], ['Shared book: ' . $e->getMessage()]), 0, 10);
+        }
         $res['last_synced_at'] = $this->lastSyncedAt($s['domain'], $s['user']);
         if ($res['created'] || $res['updated'] || $res['removed'] || $res['pushed']) {
             DataChanged::send($s['domain'], $s['user'], 'contacts', 'saved');
@@ -95,11 +142,27 @@ class ContactController extends Controller
     public function status(Request $request)
     {
         $s = $this->sess($request);
-        $q = Contact::where('domain', $s['domain'])->where('user', $s['user']);
+        $q = Contact::where('domain', $s['domain'])->where('user', $s['user'])->where('is_shared', 0);
         return response()->json([
             'count'          => (int) (clone $q)->count(),
+            'shared_count'   => (int) Contact::where('domain', $s['domain'])->where('is_shared', 1)->count(),
             'last_synced_at' => $this->lastSyncedAt($s['domain'], $s['user']),
         ]);
+    }
+
+    /**
+     * Which book does a contact id belong to? The client sends `shared`
+     * when it knows (it renders the flag); the local mirror is the
+     * fallback for old clients — the domain's shared partition is
+     * checked by provider id.
+     */
+    protected function isSharedTarget(Request $request, array $s, string $id, array $data = []): bool
+    {
+        if (array_key_exists('shared', $data)) return (bool) $data['shared'];
+        $q = $request->query('shared');
+        if ($q !== null && $q !== '') return filter_var($q, FILTER_VALIDATE_BOOLEAN);
+        return Contact::where('domain', $s['domain'])->where('is_shared', 1)
+            ->where('provider_id', $id)->exists();
     }
 
     protected function lastSyncedAt(string $domain, string $user): ?string
@@ -139,12 +202,19 @@ class ContactController extends Controller
             'phonenumber-cell'  => 'required|string|max:30',
             'phonenumber-home'  => 'sometimes|nullable|string|max:30',
             'phonenumber-fax'   => 'sometimes|nullable|string|max:30',
+            'shared'            => 'sometimes|boolean',
         ]);
         $this->assertValidPhones($data);
-        [$status, $body] = $this->dynalink->createContact($this->dtoken(request()), $s['domain'], $s['user'], $data);
+        // `shared` routes the write to the domain-level book; it is an app
+        // concept and never part of the provider payload.
+        $shared = !empty($data['shared']);
+        $payload = collect($data)->except('shared')->all();
+        [$status, $body] = $shared
+            ? $this->dynalink->createDomainContact($this->dtoken(request()), $s['domain'], $payload)
+            : $this->dynalink->createContact($this->dtoken(request()), $s['domain'], $s['user'], $payload);
         if ($status >= 200 && $status < 300) {
             [$row, $pid] = $this->providerRow($body);
-            $this->sync->upsertFromWrite($s['domain'], $s['user'], array_merge($data, $row), $pid);
+            $this->sync->upsertFromWrite($s['domain'], $s['user'], array_merge($payload, $row), $pid, $shared);
             DataChanged::send($s['domain'], $s['user'], 'contacts', 'saved');
         }
         return response()->json($body, $status);
@@ -164,12 +234,17 @@ class ContactController extends Controller
             'phonenumber-cell'  => 'sometimes|nullable|string|max:30',
             'phonenumber-home'  => 'sometimes|nullable|string|max:30',
             'phonenumber-fax'   => 'sometimes|nullable|string|max:30',
+            'shared'            => 'sometimes|boolean',
         ]);
         $this->assertValidPhones($data);
-        [$status, $body] = $this->dynalink->updateContact($this->dtoken(request()), $s['domain'], $s['user'], $id, $data);
+        $shared = $this->isSharedTarget($request, $s, $id, $data);
+        $payload = collect($data)->except('shared')->all();
+        [$status, $body] = $shared
+            ? $this->dynalink->updateDomainContact($this->dtoken(request()), $s['domain'], $id, $payload)
+            : $this->dynalink->updateContact($this->dtoken(request()), $s['domain'], $s['user'], $id, $payload);
         if ($status >= 200 && $status < 300) {
             [$row] = $this->providerRow($body);
-            $this->sync->upsertFromWrite($s['domain'], $s['user'], array_merge($data, $row), $id);
+            $this->sync->upsertFromWrite($s['domain'], $s['user'], array_merge($payload, $row), $id, $shared);
             DataChanged::send($s['domain'], $s['user'], 'contacts', 'saved', $id);
         }
         return response()->json($body, $status);
@@ -180,9 +255,12 @@ class ContactController extends Controller
     {
         $s = $this->sess($request);
         $this->requireAdmin($s);
-        [$status, $body] = $this->dynalink->deleteContact($this->dtoken(request()), $s['domain'], $s['user'], $id);
+        $shared = $this->isSharedTarget($request, $s, $id);
+        [$status, $body] = $shared
+            ? $this->dynalink->deleteDomainContact($this->dtoken(request()), $s['domain'], $id)
+            : $this->dynalink->deleteContact($this->dtoken(request()), $s['domain'], $s['user'], $id);
         if ($status >= 200 && $status < 300) {
-            $this->sync->forget($s['domain'], $s['user'], $id);
+            $this->sync->forget($s['domain'], $s['user'], $id, $shared);
             DataChanged::send($s['domain'], $s['user'], 'contacts', 'deleted', $id);
         }
         return response()->json($body, $status);
@@ -212,26 +290,27 @@ class ContactController extends Controller
     {
         $s = $this->sess($request);
         $data = $request->validate([
-            'ids'     => 'required|array|min:1|max:200',
-            'ids.*'   => 'required|string|max:120',
-            'company' => 'required|string|max:255',
+            'ids'          => 'sometimes|array|max:200',
+            'ids.*'        => 'required|string|max:120',
+            'shared_ids'   => 'sometimes|array|max:200',
+            'shared_ids.*' => 'required|string|max:120',
+            'company'      => 'required|string|max:255',
         ]);
         $company = trim((string) $data['company']);
         if ($company === '') {
             abort(response()->json(['message' => 'Company name is required.'], 422));
         }
+        $items = $this->bulkItems($data);
         if (function_exists('set_time_limit')) set_time_limit(300);
 
-        $ids = array_values(array_unique($data['ids']));
-        $local = Contact::where('domain', $s['domain'])->where('user', $s['user'])
-            ->whereIn('provider_id', $ids)->get()
-            ->keyBy(fn($c) => (string) $c->provider_id);
+        [$localOwn, $localShared] = $this->bulkLocalMaps($s, $items);
 
         $updated = 0;
         $errors = [];
-        foreach ($ids as $id) {
+        foreach ($items as [$id, $shared]) {
+            $row = ($shared ? $localShared : $localOwn)->get((string) $id);
             $payload = ['company' => $company];
-            if ($row = $local->get((string) $id)) {
+            if ($row) {
                 // array_merge (not +): the new company must WIN over the
                 // mirror's old value.
                 $payload = array_merge(
@@ -240,10 +319,12 @@ class ContactController extends Controller
                 );
             }
             try {
-                [$status, $body] = $this->dynalink->updateContact($this->dtoken(request()), $s['domain'], $s['user'], $id, $payload);
+                [$status, $body] = $shared
+                    ? $this->dynalink->updateDomainContact($this->dtoken(request()), $s['domain'], $id, $payload)
+                    : $this->dynalink->updateContact($this->dtoken(request()), $s['domain'], $s['user'], $id, $payload);
                 if ($status >= 200 && $status < 300) {
                     [$prow] = $this->providerRow($body);
-                    $this->sync->upsertFromWrite($s['domain'], $s['user'], array_merge($payload, $prow), $id);
+                    $this->sync->upsertFromWrite($s['domain'], $s['user'], array_merge($payload, $prow), $id, $shared);
                     $updated++;
                 } else {
                     $errors[] = ['id' => $id, 'error' => is_string($body) ? $body : json_encode($body)];
@@ -259,6 +340,42 @@ class ContactController extends Controller
         return response()->json(['updated' => $updated, 'failed' => count($errors), 'errors' => array_slice($errors, 0, 20)]);
     }
 
+    /** Validated bulk payload → [[id, isShared], …], deduped, ≤200 total. */
+    protected function bulkItems(array $data): array
+    {
+        $items = [];
+        foreach (array_unique($data['ids'] ?? []) as $id) $items[(string) $id . '|0'] = [(string) $id, false];
+        foreach (array_unique($data['shared_ids'] ?? []) as $id) $items[(string) $id . '|1'] = [(string) $id, true];
+        $items = array_values($items);
+        if ($items === []) {
+            abort(response()->json(['message' => 'No contacts selected.'], 422));
+        }
+        if (count($items) > 200) {
+            abort(response()->json(['message' => 'Max 200 contacts per request.'], 422));
+        }
+        return $items;
+    }
+
+    /** Local-mirror lookup maps for both books, keyed by provider id. */
+    protected function bulkLocalMaps(array $s, array $items): array
+    {
+        $own = [];
+        $shared = [];
+        foreach ($items as [$id, $isShared]) {
+            if ($isShared) $shared[] = $id;
+            else $own[] = $id;
+        }
+        $localOwn = $own
+            ? Contact::where('domain', $s['domain'])->where('user', $s['user'])->where('is_shared', 0)
+                ->whereIn('provider_id', $own)->get()->keyBy(fn($c) => (string) $c->provider_id)
+            : collect();
+        $localShared = $shared
+            ? Contact::where('domain', $s['domain'])->where('is_shared', 1)
+                ->whereIn('provider_id', $shared)->get()->keyBy(fn($c) => (string) $c->provider_id)
+            : collect();
+        return [$localOwn, $localShared];
+    }
+
     /**
      * POST /api/contacts/bulk-delete — admin-only mass delete with a
      * TWO-WAY confirmation: the UI walks the operator through a warning
@@ -270,23 +387,27 @@ class ContactController extends Controller
         $s = $this->sess($request);
         $this->requireAdmin($s);
         $data = $request->validate([
-            'ids'     => 'required|array|min:1|max:200',
-            'ids.*'   => 'required|string|max:120',
-            'confirm' => 'required|string|max:20',
+            'ids'          => 'sometimes|array|max:200',
+            'ids.*'        => 'required|string|max:120',
+            'shared_ids'   => 'sometimes|array|max:200',
+            'shared_ids.*' => 'required|string|max:120',
+            'confirm'      => 'required|string|max:20',
         ]);
         if ((string) $data['confirm'] !== 'DELETE') {
             abort(response()->json(['message' => 'Confirmation word missing — nothing was deleted.'], 422));
         }
+        $items = $this->bulkItems($data);
         if (function_exists('set_time_limit')) set_time_limit(300);
 
-        $ids = array_values(array_unique($data['ids']));
         $deleted = 0;
         $errors = [];
-        foreach ($ids as $id) {
+        foreach ($items as [$id, $shared]) {
             try {
-                [$status, $body] = $this->dynalink->deleteContact($this->dtoken(request()), $s['domain'], $s['user'], $id);
+                [$status, $body] = $shared
+                    ? $this->dynalink->deleteDomainContact($this->dtoken(request()), $s['domain'], $id)
+                    : $this->dynalink->deleteContact($this->dtoken(request()), $s['domain'], $s['user'], $id);
                 if ($status >= 200 && $status < 300) {
-                    $this->sync->forget($s['domain'], $s['user'], $id);
+                    $this->sync->forget($s['domain'], $s['user'], $id, $shared);
                     $deleted++;
                 } else {
                     $errors[] = ['id' => $id, 'error' => is_string($body) ? $body : json_encode($body)];
@@ -297,7 +418,10 @@ class ContactController extends Controller
         }
         if ($deleted > 0) {
             DataChanged::send($s['domain'], $s['user'], 'contacts', 'deleted');
-            $this->audit($request, 'contacts.bulk-deleted', ['count' => $deleted, 'ids' => array_slice($ids, 0, 50)]);
+            $this->audit($request, 'contacts.bulk-deleted', [
+                'count' => $deleted,
+                'ids' => array_slice(array_map(fn($it) => ($it[1] ? 'shared:' : '') . $it[0], $items), 0, 50),
+            ]);
         }
         return response()->json(['deleted' => $deleted, 'failed' => count($errors), 'errors' => array_slice($errors, 0, 20)]);
     }

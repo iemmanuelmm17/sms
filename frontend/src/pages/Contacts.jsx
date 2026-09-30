@@ -27,6 +27,7 @@ export default function Contacts() {
   // Bulk selection: Set of selKeys. Actions = set company (all roles, like
   // the single update) and delete (admins only, two-way confirmation).
   const [sel, setSel] = useState(() => new Set());
+  const [scopeF, setScopeF] = useState('all');   // all | own | shared
   const [bulkCo, setBulkCo] = useState(false);   // company modal open
   const [bulkDel, setBulkDel] = useState(0);     // 0 closed | 1 warn step | 2 typed-confirm step
   const [delWord, setDelWord] = useState('');
@@ -81,10 +82,17 @@ export default function Contacts() {
   // Extension-only contacts (no 10+ digit number) are hidden by default —
   // short work extensions can't receive SMS/MMS.
   const hiddenCount = list.filter((c) => !hasSmsNumber(c)).length;
-  const filtered = list.filter((c) => {
+  const matches = list.filter((c) => {
     if (!showExtensions && !hasSmsNumber(c)) return false;
     return contactMatches(c, q);
   });
+  const ownCount = matches.filter((c) => !c.shared).length;
+  const sharedCountAll = matches.filter((c) => c.shared).length;
+  // Own/Shared filter: shared rows come from the DOMAIN address book and
+  // are the same for every user; own rows are the actor's personal book.
+  const filtered = scopeF === 'all' ? matches
+    : scopeF === 'shared' ? matches.filter((c) => c.shared)
+      : matches.filter((c) => !c.shared);
   const [listLimit, setListLimit] = useState(100);
   const shownContacts = filtered.length > listLimit ? filtered.slice(0, listLimit) : filtered;
   const active = list.find((c) => selKey(c) === activeId);
@@ -124,7 +132,12 @@ export default function Contacts() {
     const withId = selectedContacts.filter((c) => contactId(c));
     const skipped = selectedContacts.length - withId.length;
     if (!withId.length) { toastError('None of the selected contacts have a portal id — resync first.'); return; }
-    const { ok, failed } = await inBatches(withId.map((c) => contactId(c)), (chunk) => api.bulkContactsCompany(chunk, company), 'Updating');
+    const items = withId.map((c) => ({ id: contactId(c), shared: !!c.shared }));
+    const { ok, failed } = await inBatches(items, (chunk) => api.bulkContactsCompany(
+      chunk.filter((it) => !it.shared).map((it) => it.id),
+      company,
+      chunk.filter((it) => it.shared).map((it) => it.id),
+    ), 'Updating');
     setBulkBusy(null); setBulkCo(false); setSel(new Set()); reload();
     // Same auto-create as the single-contact save.
     if (ok > 0 && !companies.some((c) => (c.name || '').toLowerCase() === company.toLowerCase())) {
@@ -139,7 +152,12 @@ export default function Contacts() {
     const withId = selectedContacts.filter((c) => contactId(c));
     const skipped = selectedContacts.length - withId.length;
     if (!withId.length) { toastError('None of the selected contacts have a portal id — resync first.'); setBulkDel(0); return; }
-    const { ok, failed } = await inBatches(withId.map((c) => contactId(c)), (chunk) => api.bulkContactsDelete(chunk, 'DELETE'), 'Deleting');
+    const items = withId.map((c) => ({ id: contactId(c), shared: !!c.shared }));
+    const { ok, failed } = await inBatches(items, (chunk) => api.bulkContactsDelete(
+      chunk.filter((it) => !it.shared).map((it) => it.id),
+      'DELETE',
+      chunk.filter((it) => it.shared).map((it) => it.id),
+    ), 'Deleting');
     setBulkBusy(null); setBulkDel(0); setDelWord(''); setSel(new Set()); setActiveId(null); reload();
     const skipNote = skipped ? ` (${skipped} skipped — no portal id)` : '';
     if (failed) toastError(`Deleted ${ok}; ${failed} failed${skipNote}.`);
@@ -167,6 +185,14 @@ export default function Contacts() {
         <div className="p-3 border-b space-y-2">
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="🔍 Search contacts…"
             className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
+          <div className="flex rounded-lg border overflow-hidden text-[11px] font-semibold">
+            {[['all', `All (${matches.length})`], ['own', `Mine (${ownCount})`], ['shared', `Shared (${sharedCountAll})`]].map(([v, label]) => (
+              <button key={v} onClick={() => setScopeF(v)}
+                className={`flex-1 py-1.5 ${scopeF === v ? 'bg-brand-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
           <div className="flex gap-2">
             <button onClick={() => setEditing({ ...EMPTY_CONTACT })} className="flex-1 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-lg py-2">+ Add Contact</button>
             <button onClick={() => fileRef.current?.click()} title="Upload CSV" className="flex-1 border text-xs font-medium rounded-lg py-2 hover:bg-slate-50">⬆ Upload CSV</button>
@@ -180,7 +206,7 @@ export default function Contacts() {
           )}
           {syncInfo?.last_synced_at && (
             <p className="text-[11px] text-slate-400">
-              Synced {fmtDateTime(syncInfo.last_synced_at)}{syncInfo.count != null ? ` • ${syncInfo.count} in local database` : ''}
+              Synced {fmtDateTime(syncInfo.last_synced_at)}{syncInfo.count != null ? ` • ${syncInfo.count} mine${syncInfo.shared_count != null ? ` + ${syncInfo.shared_count} shared` : ''} in local database` : ''}
             </p>
           )}
           {!isAgent && (
@@ -245,12 +271,20 @@ export default function Contacts() {
                     <span className="block text-sm font-medium text-slate-800 truncate">{name}</span>
                     <span className="block text-xs text-slate-500 truncate">{fmtPhone(primaryPhone(c)) || '—'}</span>
                   </span>
-                  {c.company && (
-                    <span title={c.company}
-                      className="ml-auto shrink-0 max-w-[45%] truncate rounded-full bg-slate-100 border border-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
-                      {c.company}
-                    </span>
-                  )}
+                  <span className="ml-auto flex items-center gap-1 min-w-0 max-w-[55%]">
+                    {c.shared && (
+                      <span title="Shared contact — from the domain address book, visible to everyone"
+                        className="shrink-0 rounded-full bg-brand-100 border border-brand-200 px-1.5 py-0.5 text-[9px] font-bold tracking-wide text-brand-700">
+                        SHARED
+                      </span>
+                    )}
+                    {c.company && (
+                      <span title={c.company}
+                        className="truncate rounded-full bg-slate-100 border border-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
+                        {c.company}
+                      </span>
+                    )}
+                  </span>
                 </button>
               </div>
             );
@@ -275,7 +309,13 @@ export default function Contacts() {
               </span>
               <div>
                 <h2 className="text-xl font-bold text-slate-900">{contactName(active)}</h2>
-                <div className="text-sm text-slate-500">{active.company || 'No company'}</div>
+                <div className="text-sm text-slate-500 flex items-center gap-2">
+                  {active.company || 'No company'}
+                  {active.shared && (
+                    <span title="From the domain address book — visible to everyone"
+                      className="rounded-full bg-brand-100 border border-brand-200 px-2 py-0.5 text-[10px] font-bold text-brand-700">SHARED</span>
+                  )}
+                </div>
               </div>
             </div>
             <dl className="text-sm space-y-2">
@@ -288,7 +328,7 @@ export default function Contacts() {
             <div className="flex gap-2 mt-5">
               <button onClick={() => setEditing({ ...active })} className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-lg px-4 py-2">Update</button>
               {!isAgent && (
-                <button onClick={() => { if (confirm('Delete this contact?')) api.deleteContact(contactId(active)).then(() => { setActiveId(null); reload(); toastSuccess('Contact deleted'); }).catch((e) => toastError(e.message)); }}
+                <button onClick={() => { if (confirm('Delete this contact?')) api.deleteContact(contactId(active), !!active.shared).then(() => { setActiveId(null); reload(); toastSuccess('Contact deleted'); }).catch((e) => toastError(e.message)); }}
                   className="border border-red-200 text-red-600 text-sm rounded-lg px-4 py-2 hover:bg-red-50">Delete</button>
               )}
             </div>

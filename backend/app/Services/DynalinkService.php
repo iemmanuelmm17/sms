@@ -458,6 +458,57 @@ class DynalinkService
     }
 
     /* ------------------------------------------------------------------
+     | Shared (domain-level) contacts — /domains/{domain}/contacts
+     | The SECOND Dynalink address book: no user segment, visible to
+     | every user on the domain. Directory rows key their id as `uid`.
+     * ------------------------------------------------------------------ */
+
+    protected function domainContactsPath(string $domain): string
+    {
+        return "{$this->domainHost()}/domains/{$domain}/contacts";
+    }
+
+    public function domainContacts(string $token, string $domain): array
+    {
+        return \Illuminate\Support\Facades\Cache::remember("dl:dcontacts:{$domain}", 120, function () use ($token, $domain) {
+            $res = $this->api($token)->get($this->domainContactsPath($domain),
+                ['limit' => self::NUMBERS_LIMIT]);
+            $data = $res->json();
+            // API sometimes returns a single object instead of array
+            if (isset($data['uid']) || isset($data['unique-id'])) {
+                return [$data];
+            }
+            return $data ?? [];
+        });
+    }
+
+    public static function bustDomainContacts(string $domain): void
+    {
+        try { \Illuminate\Support\Facades\Cache::forget("dl:dcontacts:{$domain}"); } catch (\Throwable $e) {}
+    }
+
+    public function createDomainContact(string $token, string $domain, array $payload): array
+    {
+        $res = $this->api($token)->post($this->domainContactsPath($domain), $payload);
+        static::bustDomainContacts($domain);
+        return [$res->status(), $res->json() ?? $res->body()];
+    }
+
+    public function updateDomainContact(string $token, string $domain, string $contactId, array $payload): array
+    {
+        $res = $this->api($token)->put($this->domainContactsPath($domain) . "/{$contactId}", $payload);
+        static::bustDomainContacts($domain);
+        return [$res->status(), $res->json() ?? $res->body()];
+    }
+
+    public function deleteDomainContact(string $token, string $domain, string $contactId): array
+    {
+        $res = $this->api($token)->delete($this->domainContactsPath($domain) . "/{$contactId}");
+        static::bustDomainContacts($domain);
+        return [$res->status(), $res->json() ?? $res->body()];
+    }
+
+    /* ------------------------------------------------------------------
      | Event subscriptions / webhooks (eventsubscription.txt)
      * ------------------------------------------------------------------ */
 

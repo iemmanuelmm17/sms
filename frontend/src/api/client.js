@@ -854,18 +854,18 @@ export const api = {
     if (DEMO_MODE) { await delay(); demo.contacts = demo.contacts.map((c) => (cid(c) === id ? { ...c, ...payload } : c)); saveDemo(demo); return demo.contacts.find((c) => cid(c) === id); }
     return (await http.put(`/api/contacts/${encodeURIComponent(id)}`, payload)).data;
   },
-  async deleteContact(id) {
+  async deleteContact(id, shared = false) {
     if (DEMO_MODE) { await delay(150); demo.contacts = demo.contacts.filter((c) => cid(c) !== id); saveDemo(demo); return { ok: true }; }
-    return (await http.delete(`/api/contacts/${encodeURIComponent(id)}`)).data;
+    return (await http.delete(`/api/contacts/${encodeURIComponent(id)}${shared ? '?shared=1' : ''}`)).data;
   },
   /** Bulk selection actions — server caps at 200 ids per call; the page chunks. */
-  async bulkContactsCompany(ids, company) {
-    if (DEMO_MODE) { await delay(250); demo.contacts = demo.contacts.map((c) => (ids.includes(cid(c)) ? { ...c, company } : c)); saveDemo(demo); return { updated: ids.length, failed: 0, errors: [] }; }
-    return (await http.post('/api/contacts/bulk-company', { ids, company })).data;
+  async bulkContactsCompany(ids, company, sharedIds = []) {
+    if (DEMO_MODE) { await delay(250); const all = [...ids, ...sharedIds]; demo.contacts = demo.contacts.map((c) => (all.includes(cid(c)) ? { ...c, company } : c)); saveDemo(demo); return { updated: all.length, failed: 0, errors: [] }; }
+    return (await http.post('/api/contacts/bulk-company', { ids, shared_ids: sharedIds, company })).data;
   },
-  async bulkContactsDelete(ids, confirmWord) {
-    if (DEMO_MODE) { await delay(250); const n = demo.contacts.filter((c) => ids.includes(cid(c))).length; demo.contacts = demo.contacts.filter((c) => !ids.includes(cid(c))); saveDemo(demo); return { deleted: n, failed: 0, errors: [] }; }
-    return (await http.post('/api/contacts/bulk-delete', { ids, confirm: confirmWord })).data;
+  async bulkContactsDelete(ids, confirmWord, sharedIds = []) {
+    if (DEMO_MODE) { await delay(250); const all = [...ids, ...sharedIds]; const n = demo.contacts.filter((c) => all.includes(cid(c))).length; demo.contacts = demo.contacts.filter((c) => !all.includes(cid(c))); saveDemo(demo); return { deleted: n, failed: 0, errors: [] }; }
+    return (await http.post('/api/contacts/bulk-delete', { ids, shared_ids: sharedIds, confirm: confirmWord })).data;
   },
   // Two-way sync with the portal: portal wins, local-only rows get pushed up.
   async resyncContacts() {

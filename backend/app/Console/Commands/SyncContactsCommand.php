@@ -55,15 +55,25 @@ class SyncContactsCommand extends Command
             }
             try {
                 $res = $sync->sync($token, $domain, $user);
+                // The domain-level (shared) book rides along; its failure
+                // degrades the run, never blocks the personal sync.
+                $shared = null;
+                try {
+                    $shared = $sync->syncShared($token, $domain, $user);
+                } catch (\Throwable $e) {
+                    Log::warning("contacts:sync shared book failed for {$domain}: " . $e->getMessage());
+                }
                 $ok++;
                 Cache::put("contacts:last_sync:{$domain}:{$user}", [
                     'at'      => now()->toISOString(),
                     'created' => $res['created'], 'updated' => $res['updated'],
                     'removed' => $res['removed'], 'pushed'  => $res['pushed'],
+                    'shared'  => $shared['count'] ?? null,
                 ], now()->addDays(30));
                 $this->info(sprintf(
-                    '%s/%s: +%d created, %d updated, %d pushed, -%d removed (total %d)',
-                    $domain, $user, $res['created'], $res['updated'], $res['pushed'], $res['removed'], $res['count']
+                    '%s/%s: +%d created, %d updated, %d pushed, -%d removed (total %d, shared %s)',
+                    $domain, $user, $res['created'], $res['updated'], $res['pushed'], $res['removed'], $res['count'],
+                    $shared === null ? 'n/a' : (string) $shared['count']
                 ));
             } catch (\Throwable $e) {
                 $failed++;

@@ -296,6 +296,35 @@ class SmokeTestCommand extends Command
                 return $hit ? null : 'contact lookup by domain+phone failed';
             });
 
+            // ---- Shared contacts: two books, one mirror, no leakage ----
+            $this->check('shared contacts partition the mirror and flag the provider shape', function () {
+                Contact::create([
+                    'domain' => 'smoke.test', 'user' => '9999', 'provider_id' => 'smoke-p1',
+                    'first_name' => 'Per', 'last_name' => 'Son', 'phone_cell' => '15550003333',
+                    'is_shared' => 0,
+                ]);
+                Contact::create([
+                    'domain' => 'smoke.test', 'user' => '9999', 'provider_id' => 'smoke-s1',
+                    'first_name' => 'Sha', 'last_name' => 'Red', 'phone_cell' => '15550004444',
+                    'is_shared' => 1,
+                ]);
+                $svc = app(\App\Services\ContactSyncService::class);
+                $personal = $svc->localList('smoke.test', '9999');
+                $shared = $svc->sharedList('smoke.test');
+                $err = null;
+                if ($personal->pluck('provider_id')->contains('smoke-s1')) {
+                    $err = 'personal list leaked a shared row — the nightly sync would delete shared contacts';
+                } elseif (!$shared->pluck('provider_id')->contains('smoke-s1')) {
+                    $err = 'shared list is missing the shared row';
+                } elseif ($shared->pluck('provider_id')->contains('smoke-p1')) {
+                    $err = 'shared list leaked a personal row';
+                } elseif (empty($shared->firstWhere('provider_id', 'smoke-s1')->toProviderArray()['shared'])) {
+                    $err = 'toProviderArray() did not expose shared:true — the UI pill would never render';
+                }
+                Contact::whereIn('provider_id', ['smoke-p1', 'smoke-s1'])->delete();
+                return $err;
+            });
+
             // ---- TCPA footer + send-text hygiene ----
             $this->check('TCPA footer default is the short compliance line', function () {
                 $svc = app(\App\Services\CompanySettingsService::class);

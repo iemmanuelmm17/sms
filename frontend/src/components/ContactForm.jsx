@@ -7,6 +7,7 @@ export const EMPTY_CONTACT = {
   'name-first-name': '', 'name-middle-name': '', 'name-last-name': '',
   email: '', company: '',
   'phonenumber-work': '', 'phonenumber-cell': '', 'phonenumber-home': '', 'phonenumber-fax': '',
+  shared: false,
 };
 
 const digits = (v) => String(v ?? '').replace(/\D/g, '');
@@ -78,6 +79,23 @@ export default function ContactForm({ initial, companies = [], onClose, onSaved 
           {input('phonenumber-home', 'Home')}{input('phonenumber-fax', 'Fax')}
         </div>
         <p className="text-[11px] text-slate-400">Phone numbers need 10+ digits. Short work extensions can't receive SMS.</p>
+        {isNew ? (
+          <label className="flex items-start gap-2 text-xs text-slate-600 bg-slate-50 border rounded-lg px-3 py-2.5 cursor-pointer select-none">
+            <input type="checkbox" checked={!!f.shared} onChange={(e) => set('shared', e.target.checked)}
+              className="mt-0.5 accent-brand-600" />
+            <span>
+              <strong className="text-slate-800">Shared contact</strong>
+              <span className="block text-[11px] text-slate-500 mt-0.5">
+                Saves to the domain&apos;s shared address book — visible to every user (admin and agents).
+                Unchecked saves to your personal book only.
+              </span>
+            </span>
+          </label>
+        ) : initial.shared ? (
+          <p className="text-[11px] text-brand-700 bg-brand-50 border border-brand-200 rounded-lg px-3 py-2">
+            <strong>Shared contact</strong> — lives in the domain&apos;s shared address book; every user sees it.
+          </p>
+        ) : null}
       </div>
       <button onClick={save} disabled={busy} className="mt-4 w-full bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg py-2.5 text-sm font-semibold">
         {busy ? 'Saving…' : isNew ? 'Add Contact' : 'Save Changes'}

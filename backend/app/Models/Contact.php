@@ -14,7 +14,7 @@ use Illuminate\Database\Eloquent\Model;
 class Contact extends Model
 {
     protected $fillable = [
-        'domain', 'user', 'provider_id',
+        'domain', 'user', 'provider_id', 'is_shared',
         'first_name', 'middle_name', 'last_name', 'email', 'company',
         'phone_work', 'phone_cell', 'phone_home', 'phone_fax',
         'raw', 'synced_at', 'pushed_at',
@@ -22,6 +22,7 @@ class Contact extends Model
 
     protected $casts = [
         'raw'       => 'array',
+        'is_shared' => 'boolean',
         'synced_at' => 'datetime',
         'pushed_at' => 'datetime',
     ];
@@ -32,6 +33,7 @@ class Contact extends Model
         $raw = is_array($this->raw) ? $this->raw : [];
         return array_merge($raw, [
             'unique-id'         => $this->provider_id ?? '',
+            'shared'            => (bool) $this->is_shared,
             'name-first-name'   => (string) ($this->first_name ?? ''),
             'name-middle-name'  => (string) ($this->middle_name ?? ''),
             'name-last-name'    => (string) ($this->last_name ?? ''),
