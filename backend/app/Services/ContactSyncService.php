@@ -36,6 +36,19 @@ class ContactSyncService
         return preg_replace('/\D/', '', (string) $v) ?? '';
     }
 
+    /**
+     * Dynalink marks DIRECTORY (shared/domain-book) contacts with `uid`;
+     * personal-book rows carry `unique-id`. The personal GET returns both
+     * kinds mixed, so this is how a row's book of origin — and therefore
+     * which endpoint must update/delete it — is known.
+     */
+    public static function isDirectoryRow(array $row): bool
+    {
+        $uid  = trim((string) ($row['uid'] ?? ''));
+        $uniq = trim((string) ($row['unique-id'] ?? ''));
+        return $uid !== '' && $uniq === '';
+    }
+
     /** Raw provider row → local column values. */
     protected function mapRemote(array $row): array
     {
@@ -76,10 +89,10 @@ class ContactSyncService
         $remote = $this->remoteRows($this->dynalink->contacts($token, $domain, $user));
 
         /** @var \Illuminate\Support\Collection $locals */
-        // is_shared = 0 ONLY: shared-book rows live in the same table, and
-        // the personal book never returns them — without this guard pass 2
-        // would treat every shared contact as "deleted upstream" and wipe it.
-        $locals = Contact::where('domain', $domain)->where('user', $user)->where('is_shared', 0)->get();
+        // The personal endpoint returns BOTH books mixed, so this one
+        // partition is the complete list; directory rows are flagged via
+        // isDirectoryRow() and keep any flag they were created with.
+        $locals = Contact::where('domain', $domain)->where('user', $user)->get();
         $byPid  = [];   // provider id => Contact
         $noPid  = [];   // local-only rows, matched by cell digits
         foreach ($locals as $c) {
@@ -106,7 +119,8 @@ class ContactSyncService
             }
 
             $fill = $this->mapRemote($row)
-                + ['domain' => $domain, 'user' => $user, 'provider_id' => $pid !== '' ? $pid : null];
+                + ['domain' => $domain, 'user' => $user, 'provider_id' => $pid !== '' ? $pid : null,
+                   'is_shared' => (self::isDirectoryRow($row) || ($local && $local->is_shared)) ? 1 : 0];
 
             try {
                 if ($local) {
@@ -128,8 +142,11 @@ class ContactSyncService
             if (in_array($c->id, $touched, true)) continue;
 
             if ((string) $c->provider_id === '') {
-                // Local-only → push it up to the portal (rule 2).
-                $res = $this->pushUp($token, $domain, $user, $c);
+                // Local-only → push it up to the portal (rule 2), into the
+                // book it was created in.
+                $res = $c->is_shared
+                    ? $this->pushUpShared($token, $domain, $c)
+                    : $this->pushUp($token, $domain, $user, $c);
                 if ($res === true) $pushed++;
                 else $errors[] = $res;
                 continue;
@@ -148,119 +165,8 @@ class ContactSyncService
             'updated' => $updated,
             'removed' => $removed,
             'pushed'  => $pushed,
-            'count'   => Contact::where('domain', $domain)->where('user', $user)->where('is_shared', 0)->count(),
+            'count'   => Contact::where('domain', $domain)->where('user', $user)->count(),
             'errors'  => array_slice($errors, 0, 10),
-        ];
-    }
-
-    /**
-     * Two-way sync of the DOMAIN-LEVEL (shared) address book — same rules
-     * as sync(), but against /domains/{d}/contacts and the is_shared = 1
-     * partition (one per domain, not per user). $user is attribution only:
-     * it stamps who first pulled/created each shared row locally.
-     *
-     * @return array{created:int,updated:int,removed:int,pushed:int,count:int,errors:array}
-     */
-    public function syncShared(string $token, string $domain, string $user): array
-    {
-        $created = $updated = $removed = $pushed = 0;
-        $errors  = [];
-
-        DynalinkService::bustDomainContacts($domain);
-        $remote = $this->remoteRows($this->dynalink->domainContacts($token, $domain));
-        $providerError = $this->dynalink->lastDomainError;
-
-        // The provider call failed (auth, route, network): an empty list here
-        // means "we don't know", NOT "the book is empty" — reconciling would
-        // delete every local shared row and push phantom creates. Bail out
-        // loudly instead; the caller retries soon.
-        if ($providerError !== null) {
-            return [
-                'created' => 0, 'updated' => 0, 'removed' => 0, 'pushed' => 0,
-                'count'   => Contact::where('domain', $domain)->where('is_shared', 1)->count(),
-                'errors'  => ['Shared book unreachable: ' . $providerError],
-                'provider_ok' => false,
-            ];
-        }
-
-        $locals = Contact::where('domain', $domain)->where('is_shared', 1)->get();
-        $byPid  = [];
-        $noPid  = [];
-        foreach ($locals as $c) {
-            if ((string) $c->provider_id !== '') $byPid[(string) $c->provider_id] = $c;
-            else $noPid[] = $c;
-        }
-
-        $touched = [];
-
-        // ---- Pass 1: portal → local (provider wins) ----
-        foreach ($remote as $row) {
-            $pid  = self::providerIdOf($row);
-            $cell = self::digits($row['phonenumber-cell'] ?? '');
-            // Envelope debris (a wrapper object misparsed as one row) has no
-            // id, no cell and no name — never create a blank contact from it.
-            if ($pid === '' && $cell === ''
-                && trim((string) ($row['name-first-name'] ?? '')) === ''
-                && trim((string) ($row['name-last-name'] ?? '')) === '') {
-                continue;
-            }
-
-            $local = ($pid !== '' && isset($byPid[$pid])) ? $byPid[$pid] : null;
-            if (!$local && $cell !== '') {
-                foreach ($noPid as $i => $cand) {
-                    if ($cand->cellDigits() === $cell) {
-                        $local = $cand;
-                        unset($noPid[$i]);
-                        break;
-                    }
-                }
-            }
-
-            $fill = $this->mapRemote($row)
-                + ['domain' => $domain, 'user' => $local->user ?? $user, 'is_shared' => 1,
-                   'provider_id' => $pid !== '' ? $pid : null];
-
-            try {
-                if ($local) {
-                    $local->fill($fill)->save();
-                    $touched[] = $local->id;
-                    $updated++;
-                } else {
-                    $c = Contact::create($fill);
-                    $touched[] = $c->id;
-                    $created++;
-                }
-            } catch (\Throwable $e) {
-                $errors[] = 'Local save failed: ' . $e->getMessage();
-            }
-        }
-
-        // ---- Pass 2: reconcile what the portal no longer has ----
-        foreach ($locals as $c) {
-            if (in_array($c->id, $touched, true)) continue;
-
-            if ((string) $c->provider_id === '') {
-                $res = $this->pushUpShared($token, $domain, $c);
-                if ($res === true) $pushed++;
-                else $errors[] = $res;
-                continue;
-            }
-            try {
-                $c->delete();
-                $removed++;
-            } catch (\Throwable $e) {
-                $errors[] = 'Local delete failed: ' . $e->getMessage();
-            }
-        }
-
-        return [
-            'created' => $created,
-            'updated' => $updated,
-            'removed' => $removed,
-            'pushed'  => $pushed,
-            'count'   => Contact::where('domain', $domain)->where('is_shared', 1)->count(),
-            'errors'  => array_slice($errors, 0, 10),
-            'provider_ok' => true,
         ];
     }
 
@@ -289,13 +195,6 @@ class ContactSyncService
         $c->synced_at = now();
         $c->save();
         return true;
-    }
-
-    /** The domain's shared-book rows (every user sees the same list). */
-    public function sharedList(string $domain): \Illuminate\Support\Collection
-    {
-        return Contact::where('domain', $domain)->where('is_shared', 1)
-            ->orderBy('last_name')->orderBy('first_name')->get();
     }
 
     /** Create a local-only contact at the portal. True on success, else a message. */
@@ -328,15 +227,16 @@ class ContactSyncService
     /** Provider rows → local list, for the read path (GET /api/contacts). */
     public function localList(string $domain, string $user): \Illuminate\Support\Collection
     {
-        return Contact::where('domain', $domain)->where('user', $user)->where('is_shared', 0)
+        return Contact::where('domain', $domain)->where('user', $user)
             ->orderBy('last_name')->orderBy('first_name')->get();
     }
 
     /**
      * Record a local write that already succeeded at the portal.
      * Matches by provider id, else by cell digits — never duplicates.
-     * $shared routes the write into the domain-wide shared partition
-     * (keeping the row's original creator for attribution).
+     * $shared marks rows created through the DOMAIN-level endpoint; the
+     * flag also sticks from the existing row or the provider's directory
+     * marker so later syncs keep routing updates/deletes correctly.
      */
     public function upsertFromWrite(string $domain, string $user, array $providerRow, ?string $providerId = null, bool $shared = false): ?Contact
     {
@@ -344,9 +244,7 @@ class ContactSyncService
             $pid  = $providerId !== null && $providerId !== '' ? $providerId : self::providerIdOf($providerRow);
             $cell = self::digits($providerRow['phonenumber-cell'] ?? '');
 
-            $q = Contact::where('domain', $domain);
-            if ($shared) $q->where('is_shared', 1);
-            else $q->where('user', $user)->where('is_shared', 0);
+            $q = Contact::where('domain', $domain)->where('user', $user);
             $local = null;
             if ($pid !== '') $local = (clone $q)->where('provider_id', $pid)->first();
             if (!$local && $cell !== '') {
@@ -362,10 +260,8 @@ class ContactSyncService
             $mapped = array_filter($this->mapRemote($providerRow), fn($v) => $v !== null && $v !== '');
             $fill = array_merge($known, $mapped, [
                 'domain'      => $domain,
-                // Shared rows keep their original creator; personal rows
-                // always belong to the acting user's partition.
-                'user'        => ($shared && $local) ? $local->user : $user,
-                'is_shared'   => $shared ? 1 : 0,
+                'user'        => $user,
+                'is_shared'   => ($shared || ($local && $local->is_shared) || self::isDirectoryRow($providerRow)) ? 1 : 0,
                 'provider_id' => $pid !== '' ? $pid : null,
                 'raw'         => $providerRow ?: ($local->raw ?? null),
                 'synced_at'   => now(),
@@ -383,14 +279,12 @@ class ContactSyncService
     }
 
     /** Remove the local copy of a portal delete. */
-    public function forget(string $domain, string $user, ?string $providerId, bool $shared = false): void
+    public function forget(string $domain, string $user, ?string $providerId): void
     {
         if (!$providerId) return;
         try {
-            $q = Contact::where('domain', $domain)->where('provider_id', $providerId);
-            if ($shared) $q->where('is_shared', 1);
-            else $q->where('user', $user)->where('is_shared', 0);
-            $q->delete();
+            Contact::where('domain', $domain)->where('user', $user)
+                ->where('provider_id', $providerId)->delete();
         } catch (\Throwable $e) {
             Log::warning('Contact local delete failed: ' . $e->getMessage());
         }

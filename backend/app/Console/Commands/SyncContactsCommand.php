@@ -6,6 +6,7 @@ use App\Models\Tenant;
 use App\Services\AutoReplyService;
 use App\Services\ContactSyncService;
 use App\Services\DynalinkService;
+use App\Services\Settings;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -13,8 +14,9 @@ use Illuminate\Support\Facades\Log;
 /**
  * Nightly contacts sync (also run on demand): `php artisan contacts:sync`.
  *
- * Scheduled in routes/console.php at 03:10 local. Each tenant syncs with its
- * own credential; a tenant without a usable token is skipped, never fatal.
+ * Scheduled in routes/console.php at 03:10 local. Each tenant syncs with the
+ * best token available (stored login → tenant token → service credential);
+ * a tenant with none of the three is skipped, never fatal.
  */
 class SyncContactsCommand extends Command
 {
@@ -43,40 +45,27 @@ class SyncContactsCommand extends Command
         foreach ($pairs as [$domain, $user]) {
             $token = null;
             try {
-                $token = app(AutoReplyService::class)->userToken($domain, $user);
+                $token = $this->resolveToken($domain, $user);
             } catch (\Throwable $e) {
-                // fall through
+                Log::warning("contacts:sync token resolution failed for {$user}@{$domain}: " . $e->getMessage());
             }
             if (!$token) {
                 $skipped++;
-                Log::info("contacts:sync skipped {$user}@{$domain} — no stored provider token (log in once to enable).");
+                Log::info("contacts:sync skipped {$user}@{$domain} — no usable provider token (stored login, tenant, or service credential).");
                 $this->warn("skip {$domain}/{$user}: no token");
                 continue;
             }
             try {
                 $res = $sync->sync($token, $domain, $user);
-                // The domain-level (shared) book rides along; its failure
-                // degrades the run, never blocks the personal sync.
-                $shared = null;
-                try {
-                    $shared = $sync->syncShared($token, $domain, $user);
-                    if (empty($shared['provider_ok'])) {
-                        $this->warn("  shared book: " . ($shared['errors'][0] ?? 'unreachable'));
-                    }
-                } catch (\Throwable $e) {
-                    Log::warning("contacts:sync shared book failed for {$domain}: " . $e->getMessage());
-                }
                 $ok++;
                 Cache::put("contacts:last_sync:{$domain}:{$user}", [
                     'at'      => now()->toISOString(),
                     'created' => $res['created'], 'updated' => $res['updated'],
                     'removed' => $res['removed'], 'pushed'  => $res['pushed'],
-                    'shared'  => $shared['count'] ?? null,
                 ], now()->addDays(30));
                 $this->info(sprintf(
-                    '%s/%s: +%d created, %d updated, %d pushed, -%d removed (total %d, shared %s)',
-                    $domain, $user, $res['created'], $res['updated'], $res['pushed'], $res['removed'], $res['count'],
-                    $shared === null ? 'n/a' : (string) $shared['count']
+                    '%s/%s: +%d created, %d updated, %d pushed, -%d removed (total %d)',
+                    $domain, $user, $res['created'], $res['updated'], $res['pushed'], $res['removed'], $res['count']
                 ));
             } catch (\Throwable $e) {
                 $failed++;
@@ -87,5 +76,47 @@ class SyncContactsCommand extends Command
 
         $this->info("contacts:sync done — {$ok} synced, {$skipped} skipped, {$failed} failed.");
         return $failed > 0 ? self::FAILURE : self::SUCCESS;
+    }
+
+    /**
+     * Best available provider token for a nightly (unattended) sync.
+     *
+     * 1. Stored refresh token from a portal login (what the UI resync uses).
+     * 2. Tenant access token — portal-only tenants never log in through
+     *    this app, so without this step their nightly sync silently
+     *    skipped forever and the "Synced" date froze.
+     * 3. Dynalink service credential (Super → Settings or .env), minted
+     *    and cached exactly like ResolvesActor does for agents.
+     */
+    protected function resolveToken(string $domain, string $user): ?string
+    {
+        try {
+            $t = app(AutoReplyService::class)->userToken($domain, $user);
+            if ($t) return $t;
+        } catch (\Throwable $e) {
+            // fall through to the tenant token
+        }
+
+        $tenant = Tenant::where('domain', $domain)->where('dynalink_user', $user)->first()
+            ?? Tenant::where('domain', $domain)->first();
+        if ($tenant && (!method_exists($tenant, 'isActive') || $tenant->isActive())) {
+            try {
+                $t = $tenant->accessToken();
+                if ($t) return $t;
+            } catch (\Throwable $e) {
+                Log::warning("contacts:sync tenant token failed for {$domain}: " . $e->getMessage());
+            }
+        }
+
+        $su = Settings::dynalinkServiceCredential('user');
+        $sp = Settings::dynalinkServiceCredential('pass');
+        if ($su && $sp) {
+            return Cache::remember(
+                "dynalink:service_token:{$domain}:{$user}", 3000,
+                fn() => app(DynalinkService::class)->login($su, $sp)['access_token']
+            );
+        }
+
+        return null;
     }
 }

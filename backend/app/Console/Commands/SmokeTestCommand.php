@@ -296,8 +296,8 @@ class SmokeTestCommand extends Command
                 return $hit ? null : 'contact lookup by domain+phone failed';
             });
 
-            // ---- Shared contacts: two books, one mirror, no leakage ----
-            $this->check('shared contacts partition the mirror and flag the provider shape', function () {
+            // ---- Shared contacts: one mixed list, per-row flag, directory marker ----
+            $this->check('shared contacts ride the personal list, flagged end to end', function () {
                 Contact::create([
                     'domain' => 'smoke.test', 'user' => '9999', 'provider_id' => 'smoke-p1',
                     'first_name' => 'Per', 'last_name' => 'Son', 'phone_cell' => '15550003333',
@@ -309,17 +309,20 @@ class SmokeTestCommand extends Command
                     'is_shared' => 1,
                 ]);
                 $svc = app(\App\Services\ContactSyncService::class);
-                $personal = $svc->localList('smoke.test', '9999');
-                $shared = $svc->sharedList('smoke.test');
+                // The personal endpoint returns BOTH books mixed, so the
+                // local mirror must too — the flag only routes writes.
+                $list = $svc->localList('smoke.test', '9999');
                 $err = null;
-                if ($personal->pluck('provider_id')->contains('smoke-s1')) {
-                    $err = 'personal list leaked a shared row — the nightly sync would delete shared contacts';
-                } elseif (!$shared->pluck('provider_id')->contains('smoke-s1')) {
-                    $err = 'shared list is missing the shared row';
-                } elseif ($shared->pluck('provider_id')->contains('smoke-p1')) {
-                    $err = 'shared list leaked a personal row';
-                } elseif (empty($shared->firstWhere('provider_id', 'smoke-s1')->toProviderArray()['shared'])) {
+                if (!$list->pluck('provider_id')->contains('smoke-p1') || !$list->pluck('provider_id')->contains('smoke-s1')) {
+                    $err = 'local list is missing a row — the personal GET returns both books mixed';
+                } elseif (empty($list->firstWhere('provider_id', 'smoke-s1')->toProviderArray()['shared'])) {
                     $err = 'toProviderArray() did not expose shared:true — the UI pill would never render';
+                } elseif (!empty($list->firstWhere('provider_id', 'smoke-p1')->toProviderArray()['shared'])) {
+                    $err = 'a personal row was flagged shared:true';
+                } elseif (!\App\Services\ContactSyncService::isDirectoryRow(['uid' => 'abc123'])) {
+                    $err = 'isDirectoryRow() missed a uid-only row — sync would drop SHARED pills';
+                } elseif (\App\Services\ContactSyncService::isDirectoryRow(['unique-id' => 'xyz789'])) {
+                    $err = 'isDirectoryRow() flagged a personal row as directory';
                 }
                 Contact::whereIn('provider_id', ['smoke-p1', 'smoke-s1'])->delete();
                 return $err;

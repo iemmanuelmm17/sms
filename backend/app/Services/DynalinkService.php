@@ -459,8 +459,9 @@ class DynalinkService
 
     /* ------------------------------------------------------------------
      | Shared (domain-level) contacts — /domains/{domain}/contacts
-     | The SECOND Dynalink address book: no user segment, visible to
-     | every user on the domain. Directory rows key their id as `uid`.
+     | The SECOND Dynalink address book: no user segment. WRITES only —
+     | reads come back mixed into the personal contacts GET (directory
+     | rows key their id as `uid` instead of `unique-id`).
      * ------------------------------------------------------------------ */
 
     protected function domainContactsPath(string $domain): string
@@ -468,64 +469,21 @@ class DynalinkService
         return "{$this->domainHost()}/domains/{$domain}/contacts";
     }
 
-    /** Last domain-book fetch error ('HTTP 404 …'), null when clean. */
-    public ?string $lastDomainError = null;
-
-    public function domainContacts(string $token, string $domain): array
-    {
-        $this->lastDomainError = null;
-        $key = "dl:dcontacts:{$domain}";
-        $cached = \Illuminate\Support\Facades\Cache::get($key);
-        if (is_array($cached)) return $cached;
-
-        $res = $this->api($token)->get($this->domainContactsPath($domain),
-            ['limit' => self::NUMBERS_LIMIT]);
-        if ($res->failed()) {
-            // NEVER cache a failure: syncShared must see provider_ok=false so
-            // it skips reconciliation (an empty list from a dead call would
-            // otherwise look like 'the portal deleted everything').
-            $this->lastDomainError = 'HTTP ' . $res->status() . ' ' . mb_substr((string) $res->body(), 0, 200);
-            \Illuminate\Support\Facades\Log::warning("Shared contacts fetch failed for {$domain}: " . $this->lastDomainError);
-            return [];
-        }
-        $data = $res->json();
-        // Unwrap common envelope shapes, then the lone-object quirk.
-        if (is_array($data)) {
-            foreach (['contacts', 'data', 'results'] as $k) {
-                if (isset($data[$k]) && is_array($data[$k])) { $data = $data[$k]; break; }
-            }
-        }
-        if (isset($data['uid']) || isset($data['unique-id'])) {
-            $data = [$data];
-        }
-        $data = is_array($data) ? array_values($data) : [];
-        \Illuminate\Support\Facades\Cache::put($key, $data, 120);
-        return $data;
-    }
-
-    public static function bustDomainContacts(string $domain): void
-    {
-        try { \Illuminate\Support\Facades\Cache::forget("dl:dcontacts:{$domain}"); } catch (\Throwable $e) {}
-    }
-
     public function createDomainContact(string $token, string $domain, array $payload): array
     {
         $res = $this->api($token)->post($this->domainContactsPath($domain), $payload);
-        static::bustDomainContacts($domain);
         return [$res->status(), $res->json() ?? $res->body()];
     }
 
     public function updateDomainContact(string $token, string $domain, string $contactId, array $payload): array
     {
         $res = $this->api($token)->put($this->domainContactsPath($domain) . "/{$contactId}", $payload);
-        static::bustDomainContacts($domain);
         return [$res->status(), $res->json() ?? $res->body()];
     }
 
     public function deleteDomainContact(string $token, string $domain, string $contactId): array
     {
         $res = $this->api($token)->delete($this->domainContactsPath($domain) . "/{$contactId}");
-        static::bustDomainContacts($domain);
         return [$res->status(), $res->json() ?? $res->body()];
     }
 

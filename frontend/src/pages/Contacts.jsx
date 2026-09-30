@@ -24,10 +24,9 @@ export default function Contacts() {
   const fileRef = useRef(null);
   const { lastSync } = useSocket();
 
-  // Bulk selection: Set of selKeys. Actions = set company (all roles, like
-  // the single update) and delete (admins only, two-way confirmation).
+  // Bulk selection: Set of selKeys. Actions = set company and delete —
+  // both available to every role (delete keeps the two-way confirmation).
   const [sel, setSel] = useState(() => new Set());
-  const [scopeF, setScopeF] = useState('all');   // all | own | shared
   const [bulkCo, setBulkCo] = useState(false);   // company modal open
   const [bulkDel, setBulkDel] = useState(0);     // 0 closed | 1 warn step | 2 typed-confirm step
   const [delWord, setDelWord] = useState('');
@@ -86,13 +85,10 @@ export default function Contacts() {
     if (!showExtensions && !hasSmsNumber(c)) return false;
     return contactMatches(c, q);
   });
-  const ownCount = matches.filter((c) => !c.shared).length;
-  const sharedCountAll = matches.filter((c) => c.shared).length;
-  // Own/Shared filter: shared rows come from the DOMAIN address book and
-  // are the same for every user; own rows are the actor's personal book.
-  const filtered = scopeF === 'all' ? matches
-    : scopeF === 'shared' ? matches.filter((c) => c.shared)
-      : matches.filter((c) => !c.shared);
+  // The portal's personal-contacts endpoint returns BOTH books mixed, so
+  // there is nothing to filter — shared rows just carry the SHARED pill
+  // and route their writes to the domain-level endpoint.
+  const filtered = matches;
   const [listLimit, setListLimit] = useState(100);
   const shownContacts = filtered.length > listLimit ? filtered.slice(0, listLimit) : filtered;
   const active = list.find((c) => selKey(c) === activeId);
@@ -185,14 +181,6 @@ export default function Contacts() {
         <div className="p-3 border-b space-y-2">
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="🔍 Search contacts…"
             className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" />
-          <div className="flex rounded-lg border overflow-hidden text-[11px] font-semibold">
-            {[['all', `All (${matches.length})`], ['own', `Mine (${ownCount})`], ['shared', `Shared (${sharedCountAll})`]].map(([v, label]) => (
-              <button key={v} onClick={() => setScopeF(v)}
-                className={`flex-1 py-1.5 ${scopeF === v ? 'bg-brand-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
-                {label}
-              </button>
-            ))}
-          </div>
           <div className="flex gap-2">
             <button onClick={() => setEditing({ ...EMPTY_CONTACT })} className="flex-1 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-lg py-2">+ Add Contact</button>
             <button onClick={() => fileRef.current?.click()} title="Upload CSV" className="flex-1 border text-xs font-medium rounded-lg py-2 hover:bg-slate-50">⬆ Upload CSV</button>
@@ -204,11 +192,18 @@ export default function Contacts() {
               {syncing ? '⟳ Resyncing…' : '⟳ Resync from portal'}
             </button>
           )}
-          {syncInfo?.last_synced_at && (
-            <p className="text-[11px] text-slate-400">
-              Synced {fmtDateTime(syncInfo.last_synced_at)}{syncInfo.count != null ? ` • ${syncInfo.count} mine${syncInfo.shared_count != null ? ` + ${syncInfo.shared_count} shared` : ''} in local database` : ''}
-            </p>
-          )}
+          {syncInfo?.last_synced_at && (() => {
+            // The nightly sync should touch every account daily — a stale
+            // stamp means it is being skipped, so surface that instead of
+            // quietly showing a frozen date.
+            const stale = (Date.now() - new Date(syncInfo.last_synced_at).getTime()) > 24 * 3600 * 1000;
+            return (
+              <p className={`text-[11px] ${stale ? 'text-amber-600 font-medium' : 'text-slate-400'}`}>
+                Synced {fmtDateTime(syncInfo.last_synced_at)}{syncInfo.count != null ? ` • ${syncInfo.count} contacts${syncInfo.shared_count ? ` (${syncInfo.shared_count} shared)` : ''} in local database` : ''}
+                {stale ? ' — over 24h old; run Resync from portal' : ''}
+              </p>
+            );
+          })()}
           {!isAgent && (
             <p className="text-[11px] text-slate-400">
               Contacts load from the local database. Resync pulls edits made directly in the portal and pushes contacts added here back up.
@@ -247,12 +242,10 @@ export default function Contacts() {
               className="flex-1 bg-brand-600 hover:bg-brand-700 text-white text-[11px] font-semibold rounded-lg py-1.5 disabled:opacity-50">
               Set company
             </button>
-            {!isAgent && (
-              <button onClick={() => { setDelWord(''); setBulkDel(1); }} disabled={!!bulkBusy}
-                className="flex-1 border border-red-300 text-red-600 hover:bg-red-50 text-[11px] font-semibold rounded-lg py-1.5 disabled:opacity-50">
-                Delete
-              </button>
-            )}
+            <button onClick={() => { setDelWord(''); setBulkDel(1); }} disabled={!!bulkBusy}
+              className="flex-1 border border-red-300 text-red-600 hover:bg-red-50 text-[11px] font-semibold rounded-lg py-1.5 disabled:opacity-50">
+              Delete
+            </button>
           </div>
         )}
         {bulkBusy && <div className="px-3 py-1.5 border-b text-[11px] text-amber-700 bg-amber-50">{bulkBusy}</div>}
@@ -327,10 +320,8 @@ export default function Contacts() {
             </dl>
             <div className="flex gap-2 mt-5">
               <button onClick={() => setEditing({ ...active })} className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-lg px-4 py-2">Update</button>
-              {!isAgent && (
-                <button onClick={() => { if (confirm('Delete this contact?')) api.deleteContact(contactId(active), !!active.shared).then(() => { setActiveId(null); reload(); toastSuccess('Contact deleted'); }).catch((e) => toastError(e.message)); }}
-                  className="border border-red-200 text-red-600 text-sm rounded-lg px-4 py-2 hover:bg-red-50">Delete</button>
-              )}
+              <button onClick={() => { if (confirm('Delete this contact?')) api.deleteContact(contactId(active), !!active.shared).then(() => { setActiveId(null); reload(); toastSuccess('Contact deleted'); }).catch((e) => toastError(e.message)); }}
+                className="border border-red-200 text-red-600 text-sm rounded-lg px-4 py-2 hover:bg-red-50">Delete</button>
             </div>
           </div>
         )}
