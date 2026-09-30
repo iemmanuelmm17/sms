@@ -60,6 +60,9 @@ class SyncContactsCommand extends Command
                 $shared = null;
                 try {
                     $shared = $sync->syncShared($token, $domain, $user);
+                    if (empty($shared['provider_ok'])) {
+                        $this->warn("  shared book: " . ($shared['errors'][0] ?? 'unreachable'));
+                    }
                 } catch (\Throwable $e) {
                     Log::warning("contacts:sync shared book failed for {$domain}: " . $e->getMessage());
                 }

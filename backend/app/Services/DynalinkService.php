@@ -468,18 +468,39 @@ class DynalinkService
         return "{$this->domainHost()}/domains/{$domain}/contacts";
     }
 
+    /** Last domain-book fetch error ('HTTP 404 …'), null when clean. */
+    public ?string $lastDomainError = null;
+
     public function domainContacts(string $token, string $domain): array
     {
-        return \Illuminate\Support\Facades\Cache::remember("dl:dcontacts:{$domain}", 120, function () use ($token, $domain) {
-            $res = $this->api($token)->get($this->domainContactsPath($domain),
-                ['limit' => self::NUMBERS_LIMIT]);
-            $data = $res->json();
-            // API sometimes returns a single object instead of array
-            if (isset($data['uid']) || isset($data['unique-id'])) {
-                return [$data];
+        $this->lastDomainError = null;
+        $key = "dl:dcontacts:{$domain}";
+        $cached = \Illuminate\Support\Facades\Cache::get($key);
+        if (is_array($cached)) return $cached;
+
+        $res = $this->api($token)->get($this->domainContactsPath($domain),
+            ['limit' => self::NUMBERS_LIMIT]);
+        if ($res->failed()) {
+            // NEVER cache a failure: syncShared must see provider_ok=false so
+            // it skips reconciliation (an empty list from a dead call would
+            // otherwise look like 'the portal deleted everything').
+            $this->lastDomainError = 'HTTP ' . $res->status() . ' ' . mb_substr((string) $res->body(), 0, 200);
+            \Illuminate\Support\Facades\Log::warning("Shared contacts fetch failed for {$domain}: " . $this->lastDomainError);
+            return [];
+        }
+        $data = $res->json();
+        // Unwrap common envelope shapes, then the lone-object quirk.
+        if (is_array($data)) {
+            foreach (['contacts', 'data', 'results'] as $k) {
+                if (isset($data[$k]) && is_array($data[$k])) { $data = $data[$k]; break; }
             }
-            return $data ?? [];
-        });
+        }
+        if (isset($data['uid']) || isset($data['unique-id'])) {
+            $data = [$data];
+        }
+        $data = is_array($data) ? array_values($data) : [];
+        \Illuminate\Support\Facades\Cache::put($key, $data, 120);
+        return $data;
     }
 
     public static function bustDomainContacts(string $domain): void

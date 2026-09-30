@@ -168,6 +168,20 @@ class ContactSyncService
 
         DynalinkService::bustDomainContacts($domain);
         $remote = $this->remoteRows($this->dynalink->domainContacts($token, $domain));
+        $providerError = $this->dynalink->lastDomainError;
+
+        // The provider call failed (auth, route, network): an empty list here
+        // means "we don't know", NOT "the book is empty" — reconciling would
+        // delete every local shared row and push phantom creates. Bail out
+        // loudly instead; the caller retries soon.
+        if ($providerError !== null) {
+            return [
+                'created' => 0, 'updated' => 0, 'removed' => 0, 'pushed' => 0,
+                'count'   => Contact::where('domain', $domain)->where('is_shared', 1)->count(),
+                'errors'  => ['Shared book unreachable: ' . $providerError],
+                'provider_ok' => false,
+            ];
+        }
 
         $locals = Contact::where('domain', $domain)->where('is_shared', 1)->get();
         $byPid  = [];
@@ -183,6 +197,13 @@ class ContactSyncService
         foreach ($remote as $row) {
             $pid  = self::providerIdOf($row);
             $cell = self::digits($row['phonenumber-cell'] ?? '');
+            // Envelope debris (a wrapper object misparsed as one row) has no
+            // id, no cell and no name — never create a blank contact from it.
+            if ($pid === '' && $cell === ''
+                && trim((string) ($row['name-first-name'] ?? '')) === ''
+                && trim((string) ($row['name-last-name'] ?? '')) === '') {
+                continue;
+            }
 
             $local = ($pid !== '' && isset($byPid[$pid])) ? $byPid[$pid] : null;
             if (!$local && $cell !== '') {
@@ -239,6 +260,7 @@ class ContactSyncService
             'pushed'  => $pushed,
             'count'   => Contact::where('domain', $domain)->where('is_shared', 1)->count(),
             'errors'  => array_slice($errors, 0, 10),
+            'provider_ok' => true,
         ];
     }
 

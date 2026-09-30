@@ -878,14 +878,14 @@ export const api = {
   },
   contactsTemplateUrl() { return DEMO_MODE ? null : '/api/contacts/template'; },
   demoCsvTemplate() {
-    return 'first_name,middle_name,last_name,email,company,phone_work,phone_cell,phone_home,phone_fax\nJohn,,Doe,john@example.com,Acme Inc,,19175551212,,\n';
+    return 'first_name,middle_name,last_name,email,company,phone_work,phone_cell,phone_home,phone_fax,shared\nJohn,,Doe,john@example.com,Acme Inc,,19175551212,,,,\nJane,,Smith,jane@example.com,Acme Inc,,19175552222,,,yes\n';
   },
   async importContacts(file) {
     if (DEMO_MODE) {
       const text = await file.text();
       const lines = text.trim().split(/\r?\n/);
-      const headers = lines.shift().split(',').map((h) => h.trim().toLowerCase());
-      let created = 0; const errors = [];
+      const headers = lines.shift().split(',').map((h) => h.trim().toLowerCase().replace(/[\s-]+/g, '_'));
+      let created = 0; let sharedCreated = 0; const errors = [];
       lines.forEach((ln, i) => {
         if (!ln.trim()) return;
         const vals = ln.split(',');
@@ -893,11 +893,13 @@ export const api = {
         if (!rec.first_name) { errors.push({ row: i + 2, error: 'First name is required' }); return; }
         if (!rec.last_name) { errors.push({ row: i + 2, error: 'Last name is required' }); return; }
         if (!rec.phone_cell) { errors.push({ row: i + 2, error: 'Cellphone (phone_cell) is required' }); return; }
-        demo.contacts.push({ 'unique-id': uid('c'), 'name-first-name': rec.first_name || '', 'name-middle-name': rec.middle_name || '', 'name-last-name': rec.last_name || '', email: rec.email || '', company: rec.company || '', 'phonenumber-work': rec.phone_work || '', 'phonenumber-cell': rec.phone_cell || '', 'phonenumber-home': rec.phone_home || '', 'phonenumber-fax': rec.phone_fax || '' });
+        const rowShared = /^(1|true|yes|y|shared|x)$/i.test(String(rec.shared || '').trim());
+        demo.contacts.push({ 'unique-id': uid('c'), shared: rowShared, 'name-first-name': rec.first_name || '', 'name-middle-name': rec.middle_name || '', 'name-last-name': rec.last_name || '', email: rec.email || '', company: rec.company || '', 'phonenumber-work': rec.phone_work || '', 'phonenumber-cell': rec.phone_cell || '', 'phonenumber-home': rec.phone_home || '', 'phonenumber-fax': rec.phone_fax || '' });
         created++;
+        if (rowShared) sharedCreated++;
       });
       saveDemo(demo);
-      return { created, failed: errors.length, errors };
+      return { created, shared_created: sharedCreated, failed: errors.length, errors };
     }
     const form = new FormData();
     form.append('file', file);

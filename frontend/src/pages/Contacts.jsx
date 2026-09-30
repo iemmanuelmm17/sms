@@ -223,7 +223,7 @@ export default function Contacts() {
           )}
           {importRes && (
             <div className="text-[11px] bg-slate-50 border rounded-lg p-2">
-              Imported <strong>{importRes.created}</strong>, failed <strong>{importRes.failed}</strong>
+              Imported <strong>{importRes.created}</strong>{importRes.shared_created ? ` (${importRes.shared_created} shared)` : ''}, failed <strong>{importRes.failed}</strong>
               {importRes.errors?.slice(0, 5).map((e, i) => <div key={i} className="text-red-600">Row {e.row}: {e.error}</div>)}
               <button onClick={() => setImportRes(null)} className="text-slate-400 hover:underline">dismiss</button>
             </div>

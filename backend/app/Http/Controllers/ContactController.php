@@ -101,14 +101,22 @@ class ContactController extends Controller
         $key  = "contacts:backfill:shared:{$s['domain']}";
         if (Cache::has($key)) return false;
         $lock = Cache::lock($key . ':lock', 60);
+        $providerOk = false;
         try {
             $lock->get();
-            $this->sync->syncShared($this->dtoken(request()), $s['domain'], $s['user']);
-            Log::info('Contacts: initial shared-book backfill from provider', ['domain' => $s['domain']]);
+            $res = $this->sync->syncShared($this->dtoken(request()), $s['domain'], $s['user']);
+            $providerOk = !empty($res['provider_ok']);
+            Log::info('Contacts: initial shared-book backfill from provider', [
+                'domain' => $s['domain'], 'provider_ok' => $providerOk,
+                'created' => $res['created'] ?? 0, 'errors' => $res['errors'] ?? [],
+            ]);
         } catch (\Throwable $e) {
             Log::warning('Contacts: shared backfill failed — ' . $e->getMessage());
         } finally {
-            Cache::put($key, now()->toISOString(), now()->addHours(12));
+            // A failed provider call only parks the retry for 5 minutes — a
+            // 12h flag here is what made a transient failure look like "shared
+            // contacts never show up".
+            Cache::put($key, now()->toISOString(), $providerOk ? now()->addHours(12) : now()->addMinutes(5));
             try { $lock->release(); } catch (\Throwable $e) {}
         }
         return true;
@@ -269,8 +277,9 @@ class ContactController extends Controller
     /** GET /api/contacts/template — downloadable CSV template. */
     public function template()
     {
-        $csv = "first_name,middle_name,last_name,email,company,phone_work,phone_cell,phone_home,phone_fax\n" .
-               "John,,Doe,john@example.com,Acme Inc,,19175551212,,\n";
+        $csv = "first_name,middle_name,last_name,email,company,phone_work,phone_cell,phone_home,phone_fax,shared\n" .
+               "John,,Doe,john@example.com,Acme Inc,,19175551212,,,,\n" .
+               "Jane,,Smith,jane@example.com,Acme Inc,,19175552222,,,yes\n";
         return response($csv, 200, [
             'Content-Type'        => 'text/csv',
             'Content-Disposition' => 'attachment; filename="contacts_template.csv"',
@@ -452,6 +461,7 @@ class ContactController extends Controller
             'phone' => 'phone_cell', 'cell' => 'phone_cell', 'mobile' => 'phone_cell', 'cellphone' => 'phone_cell',
             'phonenumber-cell' => 'phone_cell', 'phonenumber-work' => 'phone_work',
             'phonenumber-home' => 'phone_home', 'phonenumber-fax' => 'phone_fax',
+            'is_shared' => 'shared', 'shared contact' => 'shared', 'shared_contact' => 'shared',
         ];
         $headers = array_map(fn($h) => $alias[$h] ?? str_replace([' ', '-'], '_', $h), $headers);
 
@@ -466,7 +476,9 @@ class ContactController extends Controller
         }
         if (function_exists('set_time_limit')) set_time_limit(300);
 
-        $created = 0; $errors = [];
+        $created = 0; $sharedCreated = 0; $errors = [];
+        // Truthy words for the `shared` CSV column (blank = personal book).
+        $truthy = fn($v) => in_array(strtolower(trim((string) $v)), ['1', 'true', 'yes', 'y', 'shared', 'x'], true);
         foreach ($rows as $i => $row) {
             $line = $i + 2;
             if (count(array_filter($row, fn($v) => trim((string) $v) !== '')) === 0) continue;
@@ -497,17 +509,24 @@ class ContactController extends Controller
                 'phonenumber-fax'   => $rec['phone_fax']   ?? '',
             ], fn($v) => $v !== '');
 
-            [$status, $body] = $this->dynalink->createContact($this->dtoken(request()), $s['domain'], $s['user'], $payload);
+            // `shared` column routes the row to the domain-level book
+            // (/domains/{d}/contacts); blank/anything else = the actor's
+            // personal book (/domains/{d}/users/{u}/contacts).
+            $rowShared = $truthy($rec['shared'] ?? '');
+            [$status, $body] = $rowShared
+                ? $this->dynalink->createDomainContact($this->dtoken(request()), $s['domain'], $payload)
+                : $this->dynalink->createContact($this->dtoken(request()), $s['domain'], $s['user'], $payload);
             if ($status >= 200 && $status < 300) {
                 [$row, $pid] = $this->providerRow($body);
-                $this->sync->upsertFromWrite($s['domain'], $s['user'], array_merge($payload, $row), $pid);
+                $this->sync->upsertFromWrite($s['domain'], $s['user'], array_merge($payload, $row), $pid, $rowShared);
                 $created++;
+                if ($rowShared) $sharedCreated++;
             } else {
-                $errors[] = ['row' => $line, 'error' => is_string($body) ? $body : json_encode($body)];
+                $errors[] = ['row' => $line, 'error' => ($rowShared ? 'Shared: ' : '') . (is_string($body) ? $body : json_encode($body))];
             }
         }
 
         if ($created > 0) DataChanged::send($s['domain'], $s['user'], 'contacts', 'saved');
-        return response()->json(['created' => $created, 'failed' => count($errors), 'errors' => $errors]);
+        return response()->json(['created' => $created, 'shared_created' => $sharedCreated, 'failed' => count($errors), 'errors' => $errors]);
     }
 }
