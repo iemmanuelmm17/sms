@@ -27,7 +27,7 @@ class PollEmailSmsCommand extends Command
             Cache::put('emailsms:last_poll', ['at' => now()->toISOString(), 'ok' => true,
                 'ready' => false], now()->addDays(7));
             $this->info('Email inbox not configured — skipping.');
-            return self::OK;
+            return self::SUCCESS;
         }
         Cache::put('emailsms:last_poll', ['at' => now()->toISOString(), 'ok' => true, 'ready' => true,
             'folders' => count($stats['folders'] ?? []), 'fetched' => $stats['fetched'] ?? 0,
@@ -37,6 +37,6 @@ class PollEmailSmsCommand extends Command
         $this->info('EmailSms poll: folders=' . count($stats['folders'] ?? [])
             . " fetched={$stats['fetched']} sent={$stats['sent']}"
             . " replies={$stats['replies']} skipped={$stats['skipped']} purged={$stats['purged']} errors={$stats['errors']}");
-        return self::OK;
+        return self::SUCCESS;
     }
 }

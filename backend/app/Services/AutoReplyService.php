@@ -105,17 +105,24 @@ class AutoReplyService
             // Type matters: only SMS legs trigger an SMS auto-reply.
             if (isset($event['last_mesg_type']) && strtolower((string) $event['last_mesg_type']) !== 'sms') return;
 
-            // Both subscriptions fire per SMS (message + session event) — after
-            // a successful reply, ignore the twin. Failures don't consume the
-            // dedupe so the twin event still gets its chance to deliver.
+            // Both subscriptions fire per SMS (message + session event) — the
+            // twin arrives within about a second, so a short claim window is
+            // all the arbitration that needs. (It used to double as a SILENT
+            // 5-minute duplicate guard: identical sender+text was blocked for
+            // 300s even with the cooldown at 0 — "worked once, then stopped".
+            // Per-sender throttling is the cooldown setting's job alone.)
             $dedupeKey = self::dedupeKey($domain, $user, $from, $text);
-            // Atomic twin-claim: both subscriptions fire per SMS, so exactly
-            // one handler must win. The claim doubles as the 5-minute
-            // duplicate guard (same TTL the fired-key always had).
+            $fromHash = substr(hash('sha256', (string) $from), 0, 12);
             try {
-                if (!Cache::lock($dedupeKey . ':claim', 300)->get()) return;
+                if (!Cache::lock($dedupeKey . ':claim', 60)->get()) {
+                    Log::info('AutoReply: skipped (duplicate of the same text from the same sender within 60s — twin event or rapid re-test)', ['from_hash' => $fromHash]);
+                    return;
+                }
             } catch (\Throwable $e) {
-                if (Cache::has($dedupeKey)) return; // lock driver unavailable
+                if (Cache::has($dedupeKey)) {
+                    Log::info('AutoReply: skipped (duplicate of the same text from the same sender within 60s — twin event or rapid re-test)', ['from_hash' => $fromHash]);
+                    return; // lock driver unavailable
+                }
             }
             // Per-sender cooldown (tenant setting, default 5 min): at most one
             // auto-reply per window no matter how the text varies. Gates the
@@ -123,7 +130,7 @@ class AutoReplyService
             $cooldownMin = app(\App\Services\CompanySettingsService::class)->cooldown($domain);
             $cdKey = "autoreply:cooldown:{$domain}:{$user}:{$from}";
             $inCooldown = $cooldownMin > 0 && Cache::has($cdKey);
-            Log::info('AutoReply: guards passed', ['from_hash' => substr(hash('sha256', (string) $from), 0, 12), 'text_len' => strlen($text)]);
+            Log::info('AutoReply: guards passed', ['from_hash' => $fromHash, 'text_len' => strlen($text)]);
 
             // TCPA STOP/START: exact keyword match does the bookkeeping here
             // (opt-out/in + history event). The reply itself comes from the two
@@ -210,7 +217,7 @@ class AutoReplyService
             // Sender cooldown: suppress the reply, but the FIRST opt-out/in
             // confirmation always goes out (compliance beats cooldown).
             if ($inCooldown && !($optKeyword && $stateChanged)) {
-                Log::info('AutoReply: skipped (sender cooldown)', ['domain' => $domain, 'user' => $user]);
+                Log::info('AutoReply: skipped (sender cooldown)', ['domain' => $domain, 'user' => $user, 'from_hash' => $fromHash, 'cooldown_min' => $cooldownMin]);
                 return;
             }
 
@@ -261,6 +268,12 @@ class AutoReplyService
                         [$status, $body] = $this->dynalink->sendNew($token, $domain, $user, $payload);
                     }
                     $ok = $status >= 200 && $status < 300;
+                    if ($ok) {
+                        Log::info('AutoReply: reply sent', ['rule' => $rule->id, 'status' => $status, 'from_hash' => $fromHash, 'in_session' => $sessionId !== '']);
+                    } else {
+                        Log::warning('AutoReply: reply FAILED', ['rule' => $rule->id, 'status' => $status, 'from_hash' => $fromHash,
+                            'body' => mb_substr(is_string($body) ? $body : json_encode($body), 0, 300)]);
+                    }
                     AutoReplyLog::create([
                         'auto_reply_id' => $rule->id, 'domain' => $domain, 'user' => $ruleUser,
                         'from_number' => $from, 'matched_keyword' => $m['keyword'],
@@ -289,6 +302,7 @@ class AutoReplyService
                         ]);
                     }
                 } catch (\Throwable $e) {
+                    Log::warning('AutoReply: reply threw', ['rule' => $rule->id, 'from_hash' => $fromHash, 'error' => $e->getMessage()]);
                     AutoReplyLog::create([
                         'auto_reply_id' => $rule->id, 'domain' => $domain, 'user' => $ruleUser,
                         'from_number' => $from, 'matched_keyword' => $m['keyword'],
@@ -301,7 +315,7 @@ class AutoReplyService
             // a failed send must not paint phantom updates.
             DataChanged::send($domain, $user, 'auto-replies', 'saved');
             if ($anySent) {
-                Cache::put($dedupeKey, 1, now()->addMinutes(5));
+                Cache::put($dedupeKey, 1, now()->addSeconds(60));
                 if ($cooldownMin > 0) Cache::put($cdKey, 1, now()->addMinutes($cooldownMin));
                 DataChanged::send($domain, $user, 'sessions', 'message-sent', null, ['remote' => $from]);
             }
