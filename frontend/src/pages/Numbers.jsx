@@ -78,7 +78,10 @@ function EmailTags({ id, values, value, onChange, onAdd, onRemove, disabled, pla
   );
 }
 
-/** One per-number admin page: agent assignment + shared + notify emails + email senders. */
+/**
+ * Per-number page: agent assignment + shared + notify emails (admins) and
+ * authorized email→SMS senders (every user — tenant decision 2026-09-30).
+ */
 export default function Numbers() {
   const { user, setUser } = useAuth();
   const isAgent = user?.role === 'agent';
@@ -469,8 +472,12 @@ export default function Numbers() {
       try { await api.saveNumberMeta(d, String(m.label || '').trim(), m.tags || [], !!m.signature); }
       catch (e) { metaOk = false; failed.push(`description/tags (${e?.response?.data?.message || e.message})`); }
     }
-    try { await api.saveNumberEmail(d, notify, numEmail[d]?.enabled); }
-    catch (e) { mailOk = false; failed.push(`notify list (${e?.response?.data?.message || e.message})`); }
+    if (!isAgent) {
+      // Notify list lives on the admin-only company-settings endpoint;
+      // agents only persist their authorized-sender edits below.
+      try { await api.saveNumberEmail(d, notify, numEmail[d]?.enabled); }
+      catch (e) { mailOk = false; failed.push(`notify list (${e?.response?.data?.message || e.message})`); }
+    }
     try { await syncSenders(d, send); }
     catch (e) { sendOk = false; failed.push(`authorized senders (${e?.response?.data?.message || e.message})`); }
 
@@ -891,7 +898,6 @@ export default function Numbers() {
                   onChange={(v) => setSendInput((p) => ({ ...p, [d]: v }))}
                   onAdd={() => addSender(d)}
                   onRemove={(em) => removeSender(d, em)}
-                  disabled={isAgent}
                   placeholder="user@company.com"
                   emptyText="No authorized senders."
                 />
@@ -906,20 +912,18 @@ export default function Numbers() {
                     Only authorized senders can reply.
                   </p>
                 </div>
-                {!isAgent && (
-                  <div className="mt-2 flex items-center gap-2 flex-wrap">
-                    <button onClick={() => save(d)} disabled={!!busy[d] || !rowDirty}
-                      title={rowDirty ? 'Save agent assignments, description, tags and email settings' : 'No changes to save'}
-                      className="text-sm bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-lg px-4 py-2 disabled:opacity-50 disabled:cursor-not-allowed">
-                      {busy[d] ? 'Saving…' : rowDirty ? 'Save settings' : 'Saved'}
-                    </button>
-                    {rowDirty && (
-                      <button onClick={() => discardNumber(d)}
-                        className="text-sm text-slate-500 hover:text-slate-700 font-medium px-2 py-2">Discard</button>
-                    )}
-                    {rowDirty && <span className="text-[11px] text-amber-700">You have unsaved changes</span>}
-                  </div>
-                )}
+                <div className="mt-2 flex items-center gap-2 flex-wrap">
+                  <button onClick={() => save(d)} disabled={!!busy[d] || !rowDirty}
+                    title={rowDirty ? (isAgent ? 'Save authorized senders' : 'Save agent assignments, description, tags and email settings') : 'No changes to save'}
+                    className="text-sm bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-lg px-4 py-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                    {busy[d] ? 'Saving…' : rowDirty ? 'Save settings' : 'Saved'}
+                  </button>
+                  {rowDirty && (
+                    <button onClick={() => discardNumber(d)}
+                      className="text-sm text-slate-500 hover:text-slate-700 font-medium px-2 py-2">Discard</button>
+                  )}
+                  {rowDirty && <span className="text-[11px] text-amber-700">You have unsaved changes</span>}
+                </div>
                 {rows.length > 0 && (
                   <div className="mt-3 border-t border-slate-100 pt-3">
                     <p className="text-xs font-medium text-slate-600">
@@ -937,7 +941,7 @@ export default function Numbers() {
                             {(r.numbers || []).length} number{(r.numbers || []).length === 1 ? '' : 's'}
                             {def ? ' • default' : ''}
                           </span>
-                          {!isAgent && !def && multi && (
+                          {!def && multi && (
                             <button onClick={() => makeDefault(r, d)} disabled={!!busy[`def-${r.id}`]}
                               className="text-[11px] font-medium text-brand-600 hover:underline disabled:opacity-50 shrink-0">
                               {busy[`def-${r.id}`] ? 'Saving…' : 'Make default'}

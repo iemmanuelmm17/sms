@@ -441,7 +441,9 @@ class ScheduledMessageController extends Controller
 
     /**
      * Expand { contacts, group_ids, company, csv } into a flat recipient list.
-     * Company expansion uses Dynalink contacts filtered by company name.
+     * Company expansion = contacts tagged with the company name (local mirror
+     * first, provider fetch as fallback) PLUS members of groups linked to the
+     * company via company_id.
      * CSV rows: [{phone, name?, col1?, col2?, col3?}] → vars for personalization.
      */
     protected function expandTargets(string $domain, array $targets): array
@@ -494,21 +496,80 @@ class ScheduledMessageController extends Controller
         }
 
         if (!empty($targets['company'])) {
+            $cname  = trim((string) $targets['company']);
+            $before = count($out);
             $ar = null;
             try { $ar = $this->actor(request()); } catch (\Throwable $e) {}
-            if ($ar) {
+
+            // 1) Local contact mirror — the canonical mixed personal+shared
+            //    list, so no provider round-trip (and no token) is needed.
+            if ($ar && !empty($ar['user'])) {
+                try {
+                    $rows = \App\Models\Contact::where('domain', $domain)
+                        ->where('user', $ar['user'])->get();
+                    foreach ($rows as $c) {
+                        if (strcasecmp(trim((string) $c->company), $cname) !== 0) continue;
+                        $phone = $c->phone_cell ?: ($c->phone_work ?: ($c->phone_home ?: null));
+                        if ($phone) {
+                            $push($phone, trim((string) $c->first_name . ' ' . (string) $c->last_name),
+                                [], (string) $c->first_name, (string) $c->last_name);
+                        }
+                    }
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::warning('Scheduled company expansion (mirror) failed: ' . $e->getMessage());
+                }
+            }
+
+            // 2) Groups linked to the company (company_id) — a company
+            //    "contains" its tagged contacts AND its linked groups, the
+            //    same convention the Companies page shows. Member snapshots
+            //    carry their own resolved phone.
+            try {
+                $companyId = '';
+                $cdir = 'companies/' . preg_replace('/[^A-Za-z0-9._-]/', '_', $domain);
+                if (\Illuminate\Support\Facades\Storage::exists($cdir)) {
+                    foreach (\Illuminate\Support\Facades\Storage::files($cdir) as $file) {
+                        if (pathinfo($file, PATHINFO_EXTENSION) !== 'json') continue;
+                        $co = \App\Services\JsonFileStore::read($file);
+                        if (is_array($co) && strcasecmp(trim((string) ($co['name'] ?? '')), $cname) === 0) {
+                            $companyId = (string) ($co['id'] ?? '');
+                            break;
+                        }
+                    }
+                }
+                if ($companyId !== '') {
+                    $gdir = 'groups/' . preg_replace('/[^A-Za-z0-9._-]/', '_', $domain);
+                    if (\Illuminate\Support\Facades\Storage::exists($gdir)) {
+                        foreach (\Illuminate\Support\Facades\Storage::files($gdir) as $file) {
+                            if (pathinfo($file, PATHINFO_EXTENSION) !== 'json') continue;
+                            $g = \App\Services\JsonFileStore::read($file);
+                            if (!is_array($g) || (string) ($g['company_id'] ?? '') !== $companyId) continue;
+                            foreach ($g['members'] ?? [] as $m) {
+                                $mf = $m['name-first-name'] ?? ''; $ml = $m['name-last-name'] ?? '';
+                                if (!empty($m['phone'])) $push($m['phone'], trim($mf . ' ' . $ml), [], $mf, $ml);
+                            }
+                        }
+                    }
+                }
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::warning('Scheduled company expansion (groups) failed: ' . $e->getMessage());
+            }
+
+            // 3) Fallback: live provider fetch when the mirror contributed
+            //    nothing (fresh install whose contacts page was never opened).
+            if (count($out) === $before && $ar) {
                 try {
                     $tok = $ar['token'] ?? $this->dtoken(request());
                     $contacts = app(\App\Services\DynalinkService::class)
                         ->contacts($tok, $ar['domain'], $ar['user']);
                     foreach ($contacts as $c) {
-                        if (strcasecmp(trim($c['company'] ?? ''), trim($targets['company'])) !== 0) continue;
+                        if (strcasecmp(trim($c['company'] ?? ''), $cname) !== 0) continue;
                         $phone = $c['phonenumber-cell'] ?? $c['phonenumber-work'] ?? $c['phonenumber-home'] ?? null;
                         $nm = trim(($c['name-first-name'] ?? '') . ' ' . ($c['name-last-name'] ?? ''));
                         if ($phone) $push($phone, $nm);
                     }
                 } catch (\Throwable $e) {
-                    // fall through with whatever we have
+                    \Illuminate\Support\Facades\Log::warning('Scheduled company expansion (provider) failed: ' . $e->getMessage());
                 }
             }
         }

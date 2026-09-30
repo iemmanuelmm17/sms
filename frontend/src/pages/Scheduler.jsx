@@ -316,10 +316,29 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
   const [recurCount, setRecurCount] = useState(5);
   const [recurDate, setRecurDate] = useState('');
   const [optInNumbers, setOptInNumbers] = useState([]);    // every number whose latest action was START
+  const [companyList, setCompanyList] = useState([]);      // stored companies (id ↔ name) for group links
   const fileRef = useRef(null);
   const csvRef = useRef(null);
 
-  const companies = [...new Set(contacts.map((c) => c.company).filter(Boolean))];
+  useEffect(() => {
+    api.companies().then((c) => setCompanyList(Array.isArray(c) ? c : [])).catch(() => {});
+  }, []);
+
+  // Dropdown = every stored company plus any name typed onto a contact, so
+  // a company whose people only arrive via a linked group is still pickable.
+  const companies = [...new Set([...companyList.map((c) => c.name), ...contacts.map((c) => c.company)].filter(Boolean))];
+
+  // What "Entire Company" will actually hit: contacts whose company field
+  // matches the name PLUS members of groups linked to that company — the
+  // same convention the Companies page and the backend expansion use.
+  const companyKey = String(company || '').trim().toLowerCase();
+  const companyRow = companyList.find((c) => String(c.name || '').trim().toLowerCase() === companyKey);
+  const companyDigits = new Set(!company ? [] : [
+    ...contacts.filter((c) => String(c.company || '').trim().toLowerCase() === companyKey)
+      .map((c) => key10(primaryPhone(c))),
+    ...groups.filter((g) => companyRow && String(g.company_id || '') === String(companyRow.id))
+      .flatMap((g) => (g.members || []).map((m) => key10(m.phone))),
+  ].filter(Boolean));
   const toggle = (arr, set, v) => set(arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
 
   // ⌨ Enter Numbers: split on comma / newline / semicolon / space, drop dupes,
@@ -378,7 +397,7 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
     setCsvInfo(`${rows.length} valid number(s)${bad.length ? `, ${bad.length} row(s) skipped: ${bad.slice(0, 8).join(', ')}` : ''}`);
   };
 
-  const estCount = selContacts.length + csvRows.length + manualRows.length
+  const estCount = selContacts.length + csvRows.length + manualRows.length + companyDigits.size
     + selGroups.reduce((n, gid) => n + (groups.find((g) => g.id === gid)?.members?.length || 0), 0);
   const [companyName, setCompanyName] = useState('');
   // Mirrors the backend: TCPA-page footer when set, else the short compliance
@@ -414,6 +433,7 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
     ...selContacts.map((id) => key10(primaryPhone(contacts.find((x) => contactId(x) === id) || {}))),
     ...csvRows.map((r) => key10(r.phone)),
     ...manualRows.map((p) => key10(p)),
+    ...companyDigits,
     ...selGroups.flatMap((gid) => (groups.find((g) => g.id === gid)?.members || []).map((m) => key10(m.phone))),
   ].filter(Boolean));
   const optInAdded = includeOptin ? optInNumbers.filter((d) => d && !selectedDigits.has(key10(d))).length : 0;
@@ -754,7 +774,11 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
               <option value="">— none —</option>
               {companies.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
-            <p className="text-[11px] text-slate-400 mt-1">Sends to every contact on this company.</p>
+            <p className="text-[11px] text-slate-400 mt-1">
+              {company
+                ? `Sends to every contact on “${company}” plus members of its linked groups — ${companyDigits.size} number${companyDigits.size === 1 ? '' : 's'} matched.`
+                : 'Sends to every contact on this company, plus members of groups linked to it.'}
+            </p>
           </div>
         )}
       </div>
@@ -806,7 +830,7 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
         <div>
           <p className={section}>Total Recipients</p>
           <p className="text-lg font-bold text-slate-800">
-            {totalRecipients}{company || (includeOptin && !optInNumbers.length) ? '+' : ''}
+            {totalRecipients}{includeOptin && !optInNumbers.length ? '+' : ''}
             {includeOptin && optInAdded > 0 && <span className="text-[11px] font-normal text-slate-400 ml-1">({selectedDigits.size} unique + {optInAdded} opt-in)</span>}
           </p>
           {dupeCount > 0 && (

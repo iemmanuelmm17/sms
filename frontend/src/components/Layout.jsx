@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { PwaBanner } from './PwaInstall';
 import {
-  BarChart3, Bot, Building2, CalendarClock, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight,
+  BarChart3, Bot, CalendarClock, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight,
   Ellipsis, Hash, Headset, Hourglass, Inbox, KeyRound, LayoutTemplate, LogOut, MessageSquarePlus,
   Plug, ScrollText, Search, Settings as SettingsIcon, Share2, ShieldOff, UserX, Users, UsersRound, X,
 } from 'lucide-react';
@@ -29,7 +29,8 @@ const NAV = [
   { title: 'Shared Inboxes', dynamic: 'shared', items: [], agentOnly: true },
   { title: 'Contacts', items: [
     { id: 'people', path: '/app/contacts', label: 'People', icon: Users },
-    { id: 'companies', path: '/app/companies', label: 'Companies', icon: Building2, noParams: ['tab'] },
+    // Companies stays routable (/app/companies — the Groups tab lives on that
+    // page and Contacts auto-creates companies), it is just off the nav.
     { id: 'groups', path: '/app/companies', params: { tab: 'groups' }, label: 'Groups', icon: UsersRound },
   ] },
   { title: 'Templates & Automation', items: [

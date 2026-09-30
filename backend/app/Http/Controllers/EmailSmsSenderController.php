@@ -7,12 +7,16 @@ use App\Models\EmailSmsSender;
 use App\Http\Controllers\Concerns\ResolvesActor;
 use Illuminate\Http\Request;
 
-/** Per-domain authorized email→SMS senders (tenant admin only). */
+/**
+ * Per-domain authorized email→SMS senders. Every user on the domain may
+ * manage them (tenant decision 2026-09-30): the addresses govern who may
+ * send SMS by email and reply to SMS notification emails, per number.
+ */
 class EmailSmsSenderController extends Controller
 {
     use ResolvesActor;
 
-    /** GET /api/email-sms-senders (agents read; writes stay admin-only). */
+    /** GET /api/email-sms-senders */
     public function index(Request $request)
     {
         $a = $this->actor($request);
@@ -24,7 +28,6 @@ class EmailSmsSenderController extends Controller
     public function store(Request $request)
     {
         $a = $this->actor($request);
-        $this->requireAdmin($a);
         $data = $request->validate([
             'email' => 'required|email|max:190',
             'numbers' => 'required|array|min:1|max:20',
@@ -61,7 +64,6 @@ class EmailSmsSenderController extends Controller
     public function update(Request $request, int $id)
     {
         $a = $this->actor($request);
-        $this->requireAdmin($a);
         $sender = EmailSmsSender::where('domain', $a['domain'])->findOrFail($id);
         $data = $request->validate([
             'numbers' => 'sometimes|array|min:1|max:20',
@@ -94,7 +96,6 @@ class EmailSmsSenderController extends Controller
     public function destroy(Request $request, int $id)
     {
         $a = $this->actor($request);
-        $this->requireAdmin($a);
         $sender = EmailSmsSender::where('domain', $a['domain'])->findOrFail($id);
         $sender->delete();
         $this->audit($request, 'email-sms-sender.deleted', ['email' => $sender->email]);
