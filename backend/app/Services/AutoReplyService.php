@@ -81,29 +81,52 @@ class AutoReplyService
             Log::info('AutoReply: webhook received', ['keys' => array_keys($event)]);
 
             [$domain, $user] = $this->resolveUser($event);
-            if (!$domain || !$user) return;
+            if (!$domain || !$user) {
+                Log::info('AutoReply: ignored (event carries no domain/user to act for)');
+                return;
+            }
             // Accept field-name variants — Dynalink delivers TWO event shapes
-            // per SMS. Message events carry direction/text/from-number; session
+            // per SMS. Message events carry direction/text/from_num; session
             // events carry last_mesg/remote/session_id/smsani instead.
             $from = preg_replace('/\\D/', '', (string) (
-                $event['from-number'] ?? $event['from_number'] ?? $event['from'] ?? $event['caller'] ?? $event['remote'] ?? $event['last_sender'] ?? ''
+                $event['from-number'] ?? $event['from_number'] ?? $event['from'] ?? $event['caller'] ?? $event['from_num'] ?? $event['remote'] ?? $event['last_sender'] ?? ''
             ));
             $rawText = $event['text'] ?? $event['message'] ?? $event['body'] ?? $event['last_mesg'] ?? '';
             $text = is_string($rawText) ? trim($rawText) : (is_numeric($rawText) ? (string) $rawText : '');
-            if ($text === '' || $from === '') return;
-
-            // Inbound only. Message events say so via direction; session events
-            // (no direction field) via last_sender — our own reply arrives with
-            // last_sender == smsani and must never re-trigger (self-loop).
-            $direction = strtolower((string) ($event['direction'] ?? $event['dir'] ?? ''));
-            if ($direction !== '') {
-                if ($direction !== 'orig') return;
-            } elseif (($ls = (string) ($event['last_sender'] ?? '')) !== '' && preg_replace('/\\D/', '', $ls) !== $from) {
+            if ($text === '' || $from === '') {
+                Log::info('AutoReply: ignored (' . ($text === '' ? 'no text' : 'no sender number') . ')', ['domain' => $domain, 'user' => $user]);
                 return;
             }
 
-            // Type matters: only SMS legs trigger an SMS auto-reply.
-            if (isset($event['last_mesg_type']) && strtolower((string) $event['last_mesg_type']) !== 'sms') return;
+            // Inbound only. Message events say so via Dynalink's own direction;
+            // session events carry a direction SYNTHESIZED by the webhook
+            // controller (last_sender vs remote) — our own reply arrives with
+            // last_sender == smsani and must never re-trigger (self-loop).
+            $direction = strtolower((string) ($event['direction'] ?? $event['dir'] ?? ''));
+            $isMessageShape = isset($event['type']) || isset($event['term_uid']);
+            if ($direction !== '') {
+                if ($direction !== 'orig') {
+                    // Outbound echoes are routine — only log the session-shaped
+                    // ones, where 'term' means the synthesized guess classified
+                    // an inbound as outbound (the misfire that kills replies).
+                    if (!$isMessageShape) {
+                        Log::info('AutoReply: ignored (session event classified direction=term — last_sender differs from remote; the message twin should handle this SMS)', ['domain' => $domain, 'user' => $user]);
+                    }
+                    return;
+                }
+            } elseif (($ls = (string) ($event['last_sender'] ?? '')) !== '' && preg_replace('/\\D/', '', $ls) !== $from) {
+                Log::info('AutoReply: ignored (self-loop: last_sender is not the remote party)', ['domain' => $domain, 'user' => $user]);
+                return;
+            }
+
+            // Type matters: only SMS legs trigger an SMS auto-reply. An EMPTY
+            // type is unknown, not MMS — don't drop on it. Session events
+            // carry last_mesg_type, message events media_type.
+            $mesgType = strtolower(trim((string) ($event['last_mesg_type'] ?? $event['media_type'] ?? '')));
+            if ($mesgType !== '' && $mesgType !== 'sms') {
+                Log::info('AutoReply: ignored (last_mesg_type=' . $mesgType . ')', ['domain' => $domain, 'user' => $user]);
+                return;
+            }
 
             // Both subscriptions fire per SMS (message + session event) — the
             // twin arrives within about a second, so a short claim window is
@@ -199,7 +222,12 @@ class AutoReplyService
                 if ($inboundDigits === '') return true; // event has no number → don't block
                 return in_array($inboundDigits, $scope, true);
             }));
-            if (empty($matches)) return;
+            if (empty($matches)) {
+                Log::info('AutoReply: no eligible rule (no keyword matched, or the matching rules are paused / outside their number scope or schedule)', [
+                    'domain' => $domain, 'user' => $ruleUser, 'rules' => $rules->count(), 'text_len' => strlen($text),
+                ]);
+                return;
+            }
 
             // Priority: the top-ranked eligible rule wins — exactly ONE reply
             // per inbound message. Everything below it stays silent for this
@@ -352,10 +380,24 @@ class AutoReplyService
 
     protected function resolveUser(array $event): array
     {
-        $term = $event['terminating-user-id'] ?? null;
-        if (is_string($term) && str_contains($term, '@')) {
-            [$u, $d] = explode('@', $term, 2);
-            return [$d, $u];
+        // 'terminating-user-id' is the documented name; live message events
+        // actually carry 'term_uid'. Without this the message twin of every
+        // SMS was dropped and only the session twin (with its GUESSED
+        // direction) could ever trigger a reply.
+        foreach (['terminating-user-id', 'term_uid'] as $k) {
+            $term = $event[$k] ?? null;
+            if (!is_string($term) || $term === '') continue;
+            if (str_contains($term, '@')) {
+                [$u, $d] = explode('@', $term, 2);
+                if ($u !== '' && $d !== '') return [$d, $u];
+            }
+            if (!empty($event['domain'])) return [(string) $event['domain'], $term];
+        }
+        if (!empty($event['user']) && !empty($event['domain'])) {
+            return [(string) $event['domain'], (string) $event['user']];
+        }
+        if (!empty($event['ses_user']) && !empty($event['ses_domain'])) {
+            return [(string) $event['ses_domain'], (string) $event['ses_user']];
         }
         return [$event['domain'] ?? null, isset($event['user']) ? (string) $event['user'] : null];
     }

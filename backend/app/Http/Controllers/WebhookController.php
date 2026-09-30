@@ -214,7 +214,14 @@ class WebhookController extends Controller
             $ls = (string) ($event['last_sender'] ?? '');
             $rm = (string) ($event['remote'] ?? '');
             if ($ls !== '' && $rm !== '') {
-                $event['direction'] = $ls === $rm ? 'orig' : 'term';
+                // Compare DIGITS: providers format the same line differently
+                // across fields (+1 (555) 000-0000 vs 15550000000) — a raw
+                // string compare misclassified genuine inbound messages as
+                // outbound ('term') and the auto-reply never fired.
+                $lsD = preg_replace('/\D/', '', $ls);
+                $rmD = preg_replace('/\D/', '', $rm);
+                $event['direction'] = (($lsD !== '' && $lsD === $rmD) || ($lsD === '' && $ls === $rm))
+                    ? 'orig' : 'term';
             }
         }
         if (isset($event['text']) && !is_string($event['text'])) {
