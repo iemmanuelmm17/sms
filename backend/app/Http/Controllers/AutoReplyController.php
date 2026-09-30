@@ -16,7 +16,12 @@ class AutoReplyController extends Controller
     protected function scope(Request $r): array
     {
         $a = $this->actor($r);
-        return [$a['domain'], $a['user']];
+        // ONE domain-wide rule partition (the tenant's dynalink_user).
+        // Portal agents' rules used to be stored under their own extension:
+        // admins never saw them, agents never saw the admin's, and the
+        // webhook could miss them entirely. created_by keeps attribution
+        // and agentRuleContext still filters what each agent may see/edit.
+        return [$a['domain'], AutoReplyService::rulePartitionUser($a['domain'], (string) $a['user'])];
     }
 
     /**

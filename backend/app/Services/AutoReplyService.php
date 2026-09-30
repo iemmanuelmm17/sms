@@ -152,7 +152,11 @@ class AutoReplyService
             if (!$optKeyword && app(\App\Services\IntegrationRouterService::class)->maybeHandle($event, $domain, $user, $from, $text)) {
                 return;
             }
-            $rules = AutoReply::where('domain', $domain)->where('user', $user)
+            // Rules live in ONE per-domain partition (the tenant user) — the
+            // event's user can be a portal extension when the SMS lands on an
+            // extension-owned line, and its rules sit in the same partition.
+            $ruleUser = self::rulePartitionUser($domain, $user);
+            $rules = AutoReply::where('domain', $domain)->where('user', $ruleUser)
                 ->where('active', true)->orderBy('priority')->orderBy('id')->get();
             Log::info('AutoReply: rules loaded', ['count' => $rules->count()]);
             if ($rules->isEmpty()) return;
@@ -214,7 +218,7 @@ class AutoReplyService
 
             $token = $this->userToken($domain, $user);
             if (!$token) {
-                Log::warning("AutoReply: no stored token for {$user}@{$domain}");
+                Log::warning("AutoReply: no usable provider token for {$user}@{$domain} (stored login, tenant and service credential all failed)");
                 return;
             }
 
@@ -234,7 +238,7 @@ class AutoReplyService
                     if (!$rule->is_default && $this->optouts->isOptedOut($domain, $from, $sender !== '' ? $sender : null)) {
                         Log::info('AutoReply: blocked (opted out)', ['from_hash' => substr(hash('sha256', (string) $from), 0, 12), 'rule' => $rule->id]);
                         AutoReplyLog::create([
-                            'auto_reply_id' => $rule->id, 'domain' => $domain, 'user' => $user,
+                            'auto_reply_id' => $rule->id, 'domain' => $domain, 'user' => $ruleUser,
                             'from_number' => $from, 'matched_keyword' => $m['keyword'],
                             'status' => 'blocked',
                             'detail' => 'Number opted out (do-not-contact).',
@@ -258,7 +262,7 @@ class AutoReplyService
                     }
                     $ok = $status >= 200 && $status < 300;
                     AutoReplyLog::create([
-                        'auto_reply_id' => $rule->id, 'domain' => $domain, 'user' => $user,
+                        'auto_reply_id' => $rule->id, 'domain' => $domain, 'user' => $ruleUser,
                         'from_number' => $from, 'matched_keyword' => $m['keyword'],
                         'status' => $ok ? 'sent' : 'failed',
                         'detail' => $ok ? null : (is_string($body) ? $body : json_encode($body)),
@@ -286,7 +290,7 @@ class AutoReplyService
                     }
                 } catch (\Throwable $e) {
                     AutoReplyLog::create([
-                        'auto_reply_id' => $rule->id, 'domain' => $domain, 'user' => $user,
+                        'auto_reply_id' => $rule->id, 'domain' => $domain, 'user' => $ruleUser,
                         'from_number' => $from, 'matched_keyword' => $m['keyword'],
                         'status' => 'failed', 'detail' => $e->getMessage(),
                     ]);
@@ -343,22 +347,76 @@ class AutoReplyService
     }
 
     /**
+     * The single per-domain partition where auto-reply rules live.
+     *
+     * Rules used to be stored under the creating actor's Dynalink user, so
+     * portal agents (user = their extension) and the admin (user = the
+     * tenant's dynalink_user) each had an invisible silo — and the webhook,
+     * which resolves the event's terminating user, could miss rules stored
+     * under the other one. Everything now lives under the tenant partition;
+     * created_by keeps attribution and drives agent visibility.
+     */
+    public static function rulePartitionUser(string $domain, string $user): string
+    {
+        try {
+            // The actor/event user IS a tenant user → keep their own partition
+            // (domains can have more than one tenant row).
+            if (\App\Models\Tenant::where('domain', $domain)->where('dynalink_user', $user)->exists()) {
+                return $user;
+            }
+            $tu = \App\Models\Tenant::where('domain', $domain)->value('dynalink_user');
+            if ($tu) return (string) $tu;
+        } catch (\Throwable $e) {
+            // DB hiccup — fall back to the caller's scope, never fatal.
+        }
+        return $user;
+    }
+
+    /**
      * Access token for webhook context (no session available).
-     * Uses the refresh token stored at login, then rotates it.
+     *
+     * Chain: the refresh token stored at login (rotated on use) → the
+     * tenant's access token → the Dynalink service credential. Portal
+     * tenants never log in through this app, so nothing is stored for
+     * them — the webhook used to give up at step one and auto-replies
+     * silently never sent. The tenant token also RE-SEEDS the stored
+     * refresh token, so step one works again afterwards.
      */
     public function userToken(string $domain, string $user): ?string
     {
         $key = "dynalink:rt:{$domain}:{$user}";
         $enc = Cache::get($key);
-        if (!$enc) return null;
+        if ($enc) {
+            try {
+                $tokens = $this->dynalink->refreshToken(decrypt($enc));
+                if (!empty($tokens['refresh_token'])) {
+                    Cache::put($key, encrypt($tokens['refresh_token']), now()->addDays(30));
+                }
+                if (!empty($tokens['access_token'])) return $tokens['access_token'];
+            } catch (\Throwable $e) {
+                Log::info("AutoReply: stored refresh token unusable for {$user}@{$domain} — trying tenant/service token");
+            }
+        }
         try {
-            $tokens = $this->dynalink->refreshToken(decrypt($enc));
+            $tenant = \App\Models\Tenant::where('domain', $domain)->where('dynalink_user', $user)->first()
+                ?? \App\Models\Tenant::where('domain', $domain)->first();
+            if ($tenant && (!method_exists($tenant, 'isActive') || $tenant->isActive())) {
+                $t = $tenant->accessToken();
+                if ($t) return $t;
+            }
         } catch (\Throwable $e) {
-            return null;
+            Log::warning("AutoReply: tenant token failed for {$domain}: " . $e->getMessage());
         }
-        if (!empty($tokens['refresh_token'])) {
-            Cache::put($key, encrypt($tokens['refresh_token']), now()->addDays(30));
+        try {
+            $su = Settings::dynalinkServiceCredential('user');
+            $sp = Settings::dynalinkServiceCredential('pass');
+            if ($su && $sp) {
+                return Cache::remember("dynalink:service_token:{$domain}:{$user}", 3000,
+                    fn() => $this->dynalink->login($su, $sp)['access_token']);
+            }
+        } catch (\Throwable $e) {
+            Log::warning("AutoReply: service token failed for {$domain}: " . $e->getMessage());
         }
-        return $tokens['access_token'] ?? null;
+        return null;
     }
 }

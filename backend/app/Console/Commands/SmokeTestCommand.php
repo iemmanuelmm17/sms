@@ -189,6 +189,34 @@ class SmokeTestCommand extends Command
                 return null;
             });
 
+            // ---- Auto-reply partition (the "admin and agent rules don't reflect" bug) ----
+            $this->check('auto-reply rules share one per-domain partition (admin + portal agent)', function () {
+                $t = Tenant::create([
+                    'name' => 'arule', 'domain' => 'arule.test', 'dynalink_user' => '8888',
+                    'dynalink_pass' => 'x', 'main_number' => '15550005555', 'status' => 'active',
+                ]);
+                $err = null;
+                try {
+                    // The admin scope IS the tenant user; a portal agent's
+                    // extension must remap into the SAME partition, so each
+                    // side sees the other's rules and the webhook fires them
+                    // whichever extension's line the SMS lands on.
+                    $admin = \App\Services\AutoReplyService::rulePartitionUser('arule.test', '8888');
+                    $agent = \App\Services\AutoReplyService::rulePartitionUser('arule.test', '102');
+                    $none  = \App\Services\AutoReplyService::rulePartitionUser('no-such.test', '1');
+                    if ($admin !== '8888') {
+                        $err = "admin scope resolved to {$admin}, expected 8888";
+                    } elseif ($agent !== '8888') {
+                        $err = "portal-agent scope resolved to {$agent} — rules would sit in an invisible silo (expected 8888)";
+                    } elseif ($none !== '1') {
+                        $err = 'a domain with NO tenant was remapped — must fall back to the caller';
+                    }
+                } finally {
+                    $t->delete();
+                }
+                return $err;
+            });
+
             // ---- Login brute-force lockout ----
             $this->check('tenant login locks out (423) after ' . LockoutService::MAX_FAILS . ' wrong passwords', function () {
                 $tenant = Tenant::create([
