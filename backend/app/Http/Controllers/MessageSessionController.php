@@ -427,8 +427,12 @@ class MessageSessionController extends Controller
     public function send(Request $request, string $id)
     {
         $s = $this->sess($request);
+        // Image-only MMS (the composer fires the picture the moment it is
+        // attached): Dynalink cannot carry text + media in one MMS, so the
+        // body is optional exactly when media rides along.
+        $mmsMedia = $request->input('type') === 'mms' && (string) $request->input('data', '') !== '';
         $data = $request->validate([
-            'message'      => 'required|string|max:5000',
+            'message'      => ($mmsMedia ? 'sometimes|nullable|string|max:5000' : 'required|string|max:5000'),
             'from-number'  => 'required|string',
             'destination'  => 'sometimes',
             'type'         => 'sometimes|in:sms,mms',
@@ -436,6 +440,7 @@ class MessageSessionController extends Controller
             'mime-type'    => 'sometimes|string',       // image/png|jpg|gif...
             'size'         => 'sometimes',
         ]);
+        $data['message'] = (string) ($data['message'] ?? '');
 
         $this->assertAgentNumber($request, (string) ($data['from-number'] ?? ''), 'reply'); // in-session reply
         $data['message'] = app(\App\Services\CompanySettingsService::class)->resolve($s['domain'], $data['message'], (string) ($this->actor($request)['display_name'] ?? ''));
@@ -471,9 +476,21 @@ class MessageSessionController extends Controller
             if (isset($data[$k])) $payload[$k] = $data[$k];
         }
 
-        [$status, $body] = $this->dynalink->sendInSession(
-            $this->dtoken(request()), $s['domain'], $this->ownerForSession($request, $id), $id, $payload
-        );
+        // Netsapiens/Dynalink cannot send a picture and text in ONE MMS —
+        // mmsLegs() splits such a payload into ordered legs (image-only MMS,
+        // then the text as its own SMS). A failed media leg aborts the text.
+        $legs = \App\Services\DynalinkService::mmsLegs($payload);
+        $firstBody = null;
+        $status = 0;
+        $body = null;
+        foreach ($legs as $leg) {
+            [$status, $body] = $this->dynalink->sendInSession(
+                $this->dtoken(request()), $s['domain'], $this->ownerForSession($request, $id), $id, $leg
+            );
+            if ($firstBody === null) $firstBody = $body;
+            if ($status < 200 || $status >= 300) break;
+        }
+        if ($status >= 200 && $status < 300) $body = $firstBody;
 
         if ($status >= 200 && $status < 300) {
             if (!empty($s['portal_auth'])) {
@@ -493,7 +510,8 @@ class MessageSessionController extends Controller
             DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', $id, [
                 'session_id' => $id,
                 'text' => (string) $data['message'],
-                'type' => (string) ($payload['type'] ?? 'sms'),
+                // Split MMS: the text rides its own SMS leg — pin THAT twin.
+                'type' => count($legs) > 1 ? 'sms' : (string) ($payload['type'] ?? 'sms'),
             ]);
             \App\Services\OnboardingService::markAgentStep($s, 'first_send');
             $toDigits = preg_replace('/\D/', '', (string) ($check[0] ?? ''));
@@ -511,6 +529,16 @@ class MessageSessionController extends Controller
                 'type' => $data['type'] ?? 'sms',
             ]);
         }
+        // Echo the FINAL body (variables resolved, agent signature appended)
+        // so the sending window can fingerprint what the provider actually
+        // received — otherwise the refetched twin of a rewritten message
+        // never matches and parks at 'sending' for up to 5 minutes.
+        if ($status >= 200 && $status < 300 && is_array($body)) {
+            $body += [
+                'sent-text' => (string) $data['message'],
+                'sent-type' => count($legs) > 1 ? 'sms' : (string) ($payload['type'] ?? 'sms'),
+            ];
+        }
         return response()->json($body, $status);
     }
 
@@ -525,6 +553,9 @@ class MessageSessionController extends Controller
     protected function appendAgentSignature(array $s, string $fromNumber, string $message): string
     {
         if (empty($s['portal_auth'])) return $message;
+        // Never sign an image-only MMS — the signature would ride out as a
+        // text-only SMS leg nobody asked for.
+        if (trim($message) === '') return $message;
 
         $digits = preg_replace('/\D/', '', $fromNumber);
         if ($digits === '') return $message;

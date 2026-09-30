@@ -94,7 +94,9 @@ class SendScheduledMessage implements ShouldQueue
         $text = $companySvc->resolve($m->domain, $text, (string) ($m->created_by_name ?? ''));
         // TCPA wrap — on whenever the composer's "Add TCPA Script Footer" is
         // checked, regardless of recipient count.
-        if ($m->tcpa_script !== false) {
+        // An image-only MMS has no body to wrap — a footer here would go out
+        // as its own SMS leg after the picture.
+        if ($m->tcpa_script !== false && trim($text) !== '') {
             $company = $companySvc->name($m->domain);
             // One resolver: TCPA page setting → short compliance default,
             // with $CompanyName/$AgentName substituted. The old
@@ -126,7 +128,19 @@ class SendScheduledMessage implements ShouldQueue
         }
 
         try {
-            [$status, $body] = $dynalink->sendNew($token, $m->domain, $m->user, $payload);
+            // Netsapiens/Dynalink cannot send picture and text in ONE MMS —
+            // mmsLegs() splits into ordered legs (image-only MMS, then the
+            // text as its own SMS). A failed media leg aborts the text leg.
+            $legs = DynalinkService::mmsLegs($payload);
+            $firstBody = null;
+            $status = 0;
+            $body = null;
+            foreach ($legs as $leg) {
+                [$status, $body] = $dynalink->sendNew($token, $m->domain, $m->user, $leg);
+                if ($firstBody === null) $firstBody = $body;
+                if ($status < 200 || $status >= 300) break;
+            }
+            if ($status >= 200 && $status < 300) $body = $firstBody;
             $ok = $status >= 200 && $status < 300;
             $this->logResult($m, $recipient, $ok, $ok ? 'sent' : json_encode($body));
             if ($ok) {

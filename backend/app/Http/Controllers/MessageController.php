@@ -55,8 +55,11 @@ class MessageController extends Controller
     {
         $s = $this->sess($request);
         $actor = $this->actor($request);
+        // Image-only MMS: Dynalink cannot carry text + media in one MMS, so
+        // the body is optional exactly when media rides along.
+        $mmsMedia = $request->input('type') === 'mms' && (string) $request->input('data', '') !== '';
         $data = $request->validate([
-            'message'     => 'required|string|max:5000',
+            'message'     => ($mmsMedia ? 'sometimes|nullable|string|max:5000' : 'required|string|max:5000'),
             'destination' => 'required|string',
             'from-number' => 'required|string',
             'type'        => 'sometimes|in:sms,mms',
@@ -64,6 +67,7 @@ class MessageController extends Controller
             'mime-type'   => 'sometimes|string',
             'size'        => 'sometimes|nullable|integer|min:0|max:1048576',
         ]);
+        $data['message'] = (string) ($data['message'] ?? '');
 
         $this->assertMediaSize($data['data'] ?? null);
         $this->assertAgentNumber($request, (string) ($data['from-number'] ?? ''), 'new'); // new conversation
@@ -84,16 +88,29 @@ class MessageController extends Controller
             if (isset($data[$k])) $payload[$k] = $data[$k];
         }
 
-        [$status, $body] = $this->dynalink->sendNew(
-            $this->dtoken(request()), $s['domain'],
-            $this->senderFor($request, $s, $payload['from-number'] ?? null), $payload
-        );
+        // Netsapiens/Dynalink cannot send picture and text in ONE MMS —
+        // mmsLegs() splits into ordered legs (image-only MMS, then text as
+        // its own SMS). A failed media leg aborts the text leg.
+        $legs = DynalinkService::mmsLegs($payload);
+        $firstBody = null;
+        $status = 0;
+        $body = null;
+        foreach ($legs as $leg) {
+            [$status, $body] = $this->dynalink->sendNew(
+                $this->dtoken(request()), $s['domain'],
+                $this->senderFor($request, $s, $leg['from-number'] ?? null), $leg
+            );
+            if ($firstBody === null) $firstBody = $body;
+            if ($status < 200 || $status >= 300) break;
+        }
+        if ($status >= 200 && $status < 300) $body = $firstBody;
 
         if ($status >= 200 && $status < 300) {
             DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', null, [
                 'remote' => preg_replace('/\D/', '', (string) $data['destination']),
                 'text' => (string) $data['message'],
-                'type' => (string) ($data['type'] ?? 'sms'),
+                // Split MMS: the text rides its own SMS leg — pin THAT twin.
+                'type' => count($legs) > 1 ? 'sms' : (string) ($data['type'] ?? 'sms'),
             ]);
             \App\Services\OnboardingService::markAgentStep($s, 'first_send');
             SentMessageLog::record([
@@ -108,6 +125,14 @@ class MessageController extends Controller
                 'type' => $data['type'] ?? 'sms',
             ]);
         }
+        // Echo the FINAL body so the sending window can fingerprint what the
+        // provider actually received (variables may have been resolved).
+        if ($status >= 200 && $status < 300 && is_array($body)) {
+            $body += [
+                'sent-text' => (string) $data['message'],
+                'sent-type' => count($legs) > 1 ? 'sms' : (string) ($payload['type'] ?? 'sms'),
+            ];
+        }
         return response()->json($body, $status);
     }
 
@@ -121,8 +146,9 @@ class MessageController extends Controller
     {
         $s = $this->sess($request);
         $actor = $this->actor($request);
+        $mmsMedia = $request->input('type') === 'mms' && (string) $request->input('data', '') !== '';
         $data = $request->validate([
-            'message'      => 'required|string|max:5000',
+            'message'      => ($mmsMedia ? 'sometimes|nullable|string|max:5000' : 'required|string|max:5000'),
             'destinations' => 'required|array|min:1|max:500',
             'destinations.*' => 'required|string',
             'from-number'  => 'required|string',
@@ -132,13 +158,16 @@ class MessageController extends Controller
             'mime-type'    => 'sometimes|string',
             'size'         => 'sometimes|nullable|integer|min:0|max:1048576',
         ]);
+        $data['message'] = (string) ($data['message'] ?? '');
 
         $this->assertMediaSize($data['data'] ?? null);
         $this->assertAgentNumber($request, (string) ($data['from-number'] ?? ''), 'new'); // new conversation
         $data['message'] = app(\App\Services\CompanySettingsService::class)->resolve($s['domain'], $data['message'], (string) ($this->actor($request)['display_name'] ?? ''));
         // TCPA wrap — on only when the composer's footer toggle is checked
         // (default OFF), any recipient count. Same wrap as scheduled sends.
-        if (array_key_exists('tcpa_script', $data) && (bool) $data['tcpa_script']) {
+        // An image-only MMS has no body to wrap — a footer here would go out
+        // as its own SMS leg after the picture.
+        if (array_key_exists('tcpa_script', $data) && (bool) $data['tcpa_script'] && trim($data['message']) !== '') {
             $companySvc = app(\App\Services\CompanySettingsService::class);
             $company = $companySvc->name($s['domain']);
             $footer = $companySvc->tcpaFooter($s['domain'], $s['user'] ?? null, (string) ($actor['display_name'] ?? ''));
@@ -175,18 +204,29 @@ class MessageController extends Controller
 
         // Single destination → plain new-message call.
         if (count($dests) === 1) {
-            [$status, $body] = $this->dynalink->sendNew($this->dtoken(request()), $s['domain'],
-                $this->senderFor($request, $s, $data['from-number'] ?? null), [
+            // Picture + text cannot share ONE MMS on Dynalink — split into
+            // ordered legs (image-only MMS, then text as its own SMS).
+            $legs = DynalinkService::mmsLegs([
                 'type'        => $data['type'] ?? 'sms',
                 'message'     => $data['message'],
                 'destination' => $dests[0],
                 'from-number' => $data['from-number'],
             ] + $mms);
+            $firstBody = null;
+            $status = 0;
+            $body = null;
+            foreach ($legs as $leg) {
+                [$status, $body] = $this->dynalink->sendNew($this->dtoken(request()), $s['domain'],
+                    $this->senderFor($request, $s, $leg['from-number'] ?? null), $leg);
+                if ($firstBody === null) $firstBody = $body;
+                if ($status < 200 || $status >= 300) break;
+            }
+            if ($status >= 200 && $status < 300) $body = $firstBody;
             if ($status >= 200 && $status < 300) {
                 DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', null, [
                     'remote' => $dests[0],
                     'text' => (string) $data['message'],
-                    'type' => (string) ($data['type'] ?? 'sms'),
+                    'type' => count($legs) > 1 ? 'sms' : (string) ($data['type'] ?? 'sms'),
                 ]);
                 \App\Services\OnboardingService::markAgentStep($s, 'first_send');
                 SentMessageLog::record([
@@ -214,21 +254,31 @@ class MessageController extends Controller
 
         // Multiple destinations → ONE call with a destination array on a fresh session.
         $sessionId = DynalinkService::randomSessionId();
-        [$status, $body] = $this->dynalink->sendInSession(
-            $this->dtoken(request()), $s['domain'], $s['user'], $sessionId,
-            [
-                'type'        => $data['type'] ?? 'sms',
-                'message'     => $data['message'],
-                'from-number' => $data['from-number'],
-                'destination' => $dests,
-            ] + $mms
-        );
+        // Picture + text cannot share ONE MMS on Dynalink — split into
+        // ordered legs (image-only MMS, then text as its own SMS).
+        $legs = DynalinkService::mmsLegs([
+            'type'        => $data['type'] ?? 'sms',
+            'message'     => $data['message'],
+            'from-number' => $data['from-number'],
+            'destination' => $dests,
+        ] + $mms);
+        $firstBody = null;
+        $status = 0;
+        $body = null;
+        foreach ($legs as $leg) {
+            [$status, $body] = $this->dynalink->sendInSession(
+                $this->dtoken(request()), $s['domain'], $s['user'], $sessionId, $leg
+            );
+            if ($firstBody === null) $firstBody = $body;
+            if ($status < 200 || $status >= 300) break;
+        }
+        if ($status >= 200 && $status < 300) $body = $firstBody;
 
         if ($status >= 200 && $status < 300) {
             DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', null, [
                 'remotes' => $dests,
                 'text' => (string) $data['message'],
-                'type' => (string) ($data['type'] ?? 'sms'),
+                'type' => count($legs) > 1 ? 'sms' : (string) ($data['type'] ?? 'sms'),
             ]);
             \App\Services\OnboardingService::markAgentStep($s, 'first_send');
             foreach ($dests as $d) {

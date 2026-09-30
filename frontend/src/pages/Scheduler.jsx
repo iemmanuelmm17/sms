@@ -460,7 +460,7 @@ function ScheduleForm({ user, contacts, groups, numbers, templates, onClose, onS
     try {
       await api.createScheduled({
         name: name || null,
-        message: message || `[Image: ${attach.name}]`,
+        message,   // image-only MMS keeps an empty body — the dispatch splits picture and text into separate legs (Dynalink can't combine them)
         'from-number': from,
         type: attach ? 'mms' : 'sms',
         ...(attach ? { data: attach.base64, 'mime-type': attach.mime, size: attach.size } : {}),

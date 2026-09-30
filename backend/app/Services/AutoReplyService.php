@@ -69,6 +69,14 @@ class AutoReplyService
         return $out;
     }
 
+    /**
+     * Fallback de-dupe window when the cooldown setting is OFF: Dynalink
+     * delivers every inbound twice (session copy + message copy, ~1s apart)
+     * and both must never answer. With a cooldown configured, that setting
+     * drives the window instead.
+     */
+    public const TWIN_WINDOW_SEC = 15;
+
     /** Evaluate one webhook event and auto-reply on match. Never throws. */
     public static function dedupeKey(string $domain, string $user, string $from, string $text): string
     {
@@ -128,29 +136,33 @@ class AutoReplyService
                 return;
             }
 
-            // Both subscriptions fire per SMS (message + session event) — the
-            // twin arrives within about a second, so a short claim window is
-            // all the arbitration that needs. (It used to double as a SILENT
-            // 5-minute duplicate guard: identical sender+text was blocked for
-            // 300s even with the cooldown at 0 — "worked once, then stopped".
-            // Per-sender throttling is the cooldown setting's job alone.)
+            // De-dupe window FOLLOWS THE COOLDOWN SETTING: an identical
+            // (sender,text) pair inside it is a provider re-delivery or a
+            // rapid re-test and gets skipped. With the cooldown off, a short
+            // twin window still arbitrates Dynalink's double delivery (the
+            // message + session copies arrive ~1s apart). (This claim used to
+            // be a SILENT hard-coded 5-minute guard — "worked once, then
+            // stopped"; every skip is logged.)
+            $cooldownMin = app(\App\Services\CompanySettingsService::class)->cooldown($domain);
+            $dedupeSec = $cooldownMin > 0
+                ? max(60, (int) round(((float) $cooldownMin) * 60))
+                : self::TWIN_WINDOW_SEC;
             $dedupeKey = self::dedupeKey($domain, $user, $from, $text);
             $fromHash = substr(hash('sha256', (string) $from), 0, 12);
             try {
-                if (!Cache::lock($dedupeKey . ':claim', 60)->get()) {
-                    Log::info('AutoReply: skipped (duplicate of the same text from the same sender within 60s — twin event or rapid re-test)', ['from_hash' => $fromHash]);
+                if (!Cache::lock($dedupeKey . ':claim', $dedupeSec)->get()) {
+                    Log::info("AutoReply: skipped (duplicate of the same text from the same sender within {$dedupeSec}s — twin event or rapid re-test)", ['from_hash' => $fromHash]);
                     return;
                 }
             } catch (\Throwable $e) {
                 if (Cache::has($dedupeKey)) {
-                    Log::info('AutoReply: skipped (duplicate of the same text from the same sender within 60s — twin event or rapid re-test)', ['from_hash' => $fromHash]);
+                    Log::info("AutoReply: skipped (duplicate of the same text from the same sender within {$dedupeSec}s — twin event or rapid re-test)", ['from_hash' => $fromHash]);
                     return; // lock driver unavailable
                 }
             }
             // Per-sender cooldown (tenant setting, default 5 min): at most one
             // auto-reply per window no matter how the text varies. Gates the
             // REPLY only — STOP/START bookkeeping below always runs.
-            $cooldownMin = app(\App\Services\CompanySettingsService::class)->cooldown($domain);
             $cdKey = "autoreply:cooldown:{$domain}:{$user}:{$from}";
             $inCooldown = $cooldownMin > 0 && Cache::has($cdKey);
             Log::info('AutoReply: guards passed', ['from_hash' => $fromHash, 'text_len' => strlen($text)]);
@@ -343,7 +355,7 @@ class AutoReplyService
             // a failed send must not paint phantom updates.
             DataChanged::send($domain, $user, 'auto-replies', 'saved');
             if ($anySent) {
-                Cache::put($dedupeKey, 1, now()->addSeconds(60));
+                Cache::put($dedupeKey, 1, now()->addSeconds($dedupeSec));
                 if ($cooldownMin > 0) Cache::put($cdKey, 1, now()->addMinutes($cooldownMin));
                 DataChanged::send($domain, $user, 'sessions', 'message-sent', null, ['remote' => $from]);
             }

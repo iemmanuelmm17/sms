@@ -402,6 +402,35 @@ class DynalinkService
         return $id;
     }
 
+    /**
+     * Netsapiens/Dynalink cannot carry a picture AND text in ONE MMS — the
+     * media is only accepted when no message rides along. Split such payloads
+     * into ordered legs: the image-only MMS first, then the text as its own
+     * SMS. Anything else (plain SMS, media with no body) comes back as a
+     * single unchanged leg, so every caller can simply loop the result and
+     * stop on the first failing leg.
+     *
+     * @param  array<string, mixed> $payload
+     * @return array<int, array<string, mixed>>
+     */
+    public static function mmsLegs(array $payload): array
+    {
+        if (($payload['type'] ?? '') !== 'mms' || empty($payload['data'])) {
+            return [$payload];
+        }
+        $media = $payload;
+        unset($media['message']);           // image-only: no text may ride along
+        $text = trim((string) ($payload['message'] ?? ''));
+        if ($text === '') return [$media];
+        $sms = [
+            'type'        => 'sms',
+            'message'     => $text,
+            'from-number' => $payload['from-number'] ?? '',
+        ];
+        if (isset($payload['destination'])) $sms['destination'] = $payload['destination'];
+        return [$media, $sms];
+    }
+
     /* ------------------------------------------------------------------
      | Contacts (contact.txt)
      * ------------------------------------------------------------------ */

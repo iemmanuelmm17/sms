@@ -358,8 +358,16 @@ export default function Messages() {
     if (!msg || msg.direction !== 'term') return false;
     const ts = parseTs(msg.timestamp);
     const p = printOf(msg.text, msg.type);
-    return sentPrintsRef.current.some((x) =>
-      x.p === p && Math.abs(x.at - ts) < 10 * 60 * 1000);
+    return sentPrintsRef.current.some((x) => {
+      if (Math.abs(x.at - ts) >= 10 * 60 * 1000) return false;
+      if (x.p === p) return true;
+      // The server REWRITES outbound bodies (agent signature, TCPA footer,
+      // resolved variables), so what we fingerprinted is a PREFIX of the
+      // provider twin. Exact-only matching left such twins parked at the
+      // provider's 'sending' — the stuck 🕐 bubble. The >5 guard keeps an
+      // empty fingerprint ('mms|') from matching every media message.
+      return x.p.length > 5 && p.startsWith(x.p);
+    });
   };
   /**
    * Does a server message correspond to our locally-echoed one?
@@ -1044,7 +1052,7 @@ export default function Messages() {
       const tz = getTimezone();
       await api.createScheduled({
         name: `Reply to ${active['messagesession-remote']}`,
-        message: draft || (attach ? `[Attachment: ${attach.name}]` : ''),
+        message: draft,   // image-only MMS: no fake caption — it would go out as a separate SMS
         'from-number': fromNumber,
         ...(attach ? { type: 'mms', data: attach.base64, 'mime-type': attach.mime, size: attach.size } : { type: 'sms' }),
         send_at: zonedTimeToUtc(schedAt, tz).toISOString(),
@@ -1107,7 +1115,7 @@ export default function Messages() {
         : 'No SMS number assigned — ask your admin.');
     }
     if ((!draft.trim() && !attach) || !activeId || sending || pending) return;
-    const base = draft || (attach ? `[Attachment: ${attach.name}]` : '');
+    const base = draft;   // combined sends are split server-side; no fake caption
     const payload = {
       message: withSender(resolveVars(base, activeContact, companyName, myName), senderName),
       'from-number': fromNumber,
@@ -1190,13 +1198,24 @@ export default function Messages() {
       // what it echoed back.
       confirmSent(payload.message, payload.type);
       if (sent && sent.text) confirmSent(sent.text, sent.type || payload.type);
+      // The backend echoes the FINAL body it handed the provider (variables
+      // resolved, agent signature appended) — fingerprint that too, or the
+      // refetched twin of a rewritten message never matches and parks at
+      // 'sending' for up to 5 minutes.
+      if (sent && typeof sent['sent-text'] === 'string') {
+        confirmSent(sent['sent-text'], sent['sent-type'] || payload.type);
+      }
 
       if (crossNumber) {
         // The reply lives in a different thread now — clear the optimistic
         // bubble here, refresh, and follow the user to the new conversation
         // so the message isn't "lost" from their point of view.
         setMsgs((p) => p.filter((m) => m.id !== tmpId));
-        setDraft(''); setAttach(null);
+        // Image-only MMS fires the moment a file is attached — anything the
+        // user had typed is a SEPARATE SMS still in progress, so the draft
+        // survives. Regular sends clear it as before.
+        if (String(payload.message || '').trim() !== '') setDraft('');
+        setAttach(null);
         markStep('first_send');
         const newId = final['messagesession-id'];
         try {
@@ -1210,7 +1229,10 @@ export default function Messages() {
 
       setMsgs((p) => sortOldestFirst([...p.filter((m) => m.id !== tmpId), final]));
       setSessions((p) => p.map((s) => s['messagesession-id'] === activeId ? { ...s, 'messagesession-last-message': payload.message, 'messagesession-last-datetime': new Date().toISOString(), 'messagesession-last-status': 'read' } : s));
-      setDraft(''); setAttach(null);
+      // Image-only MMS fires on attach — keep whatever text is still being
+      // typed; it goes out as its own SMS when the user hits Send.
+      if (String(payload.message || '').trim() !== '') setDraft('');
+      setAttach(null);
       markStep('first_send');     // "Send your first reply" — no-op once done
       clearQueueAfterReply(String(activeId));
     } catch (e) {
@@ -1220,13 +1242,45 @@ export default function Messages() {
     finally { setSending(false); }
   };
 
+  /**
+   * Netsapiens/Dynalink cannot send a picture and text in ONE MMS — so the
+   * image goes out the moment it is attached, as its own media message.
+   * Anything already typed stays in the draft and sends as a separate SMS
+   * when the user hits Send. (Undo-send and the quiet-hours prompt still
+   * apply; when a send is already in flight the file falls back to being
+   * staged, and the backend splits that combined send into the same two
+   * legs server-side.)
+   */
+  const sendMedia = (media) => {
+    if (!activeId || !active || sending || pending
+      || (isAgent && !agentAllowed.includes(digits(fromNumber)))) {
+      setAttach(media);   // can't fire right now — stage it instead
+      return;
+    }
+    const payload = {
+      message: '',
+      'from-number': fromNumber,
+      destination: String(active['messagesession-remote']),
+      type: 'mms', data: media.base64, 'mime-type': media.mime, size: media.size,
+    };
+    const undo = getUndoSend();
+    const go = () => {
+      if (!undo.enabled) { doSend(payload); return; }
+      setPending({ payload, draft, attach: media, secs: undo.secs });
+    };
+    if (inQuietHours(new Date(), quiet, getTimezone()) && !isQuietSnoozed()) {
+      setQuietWarn({ go, to: activeContact ? contactName(activeContact) : fmtPhone(active['messagesession-remote']) });
+      return;
+    }
+    go();
+  };
   const onFile = (f) => {
     if (!f) return;
     if (f.size > MMS_MAX_BYTES) { toastError(`File too large — MMS media must be under ${MMS_MAX_LABEL}.`); return; }
     const reader = new FileReader();
     reader.onload = () => {
       const base64 = String(reader.result).split(',')[1] || '';
-      setAttach({ name: f.name, mime: f.type || 'image/png', size: f.size, base64 });
+      sendMedia({ name: f.name, mime: f.type || 'image/png', size: f.size, base64 });
     };
     reader.readAsDataURL(f);
   };
@@ -2139,7 +2193,7 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
       const tz = getTimezone();
       await api.createScheduled({
         name: destinations.length > 1 ? `Bulk to ${destinations.length} numbers` : `Message to ${destinations[0]}`,
-        message: msg || (attach ? `[Attachment: ${attach.name}]` : ''),
+        message: msg,   // image-only MMS: no fake caption — it would go out as a separate SMS
         'from-number': from,
         tcpa_script: tcpaFooter,
         ...(attach ? { type: 'mms', data: attach.base64, 'mime-type': attach.mime, size: attach.size } : { type: 'sms' }),
@@ -2158,9 +2212,11 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
     setBusy(true);
     try {
       // ONE message with a destination array (single Dynalink call).
-      const resolved = resolveVars(msg || (attach ? `[Attachment: ${attach.name}]` : ''), firstContact, companyName, myName);
+      const resolved = resolveVars(msg, firstContact, companyName, myName);
         const res = await api.sendBulk({
-          message: withSender(resolved, senderName) || `[Attachment: ${attach.name}]`,
+          // Image-only MMS sends an empty body — the backend splits picture
+          // and text into separate legs (Dynalink can't combine them).
+          message: withSender(resolved, senderName),
           destinations,
           'from-number': from,
           tcpa_script: tcpaFooter,

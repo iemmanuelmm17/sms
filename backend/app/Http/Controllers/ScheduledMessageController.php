@@ -126,9 +126,12 @@ class ScheduledMessageController extends Controller
         $actor = $this->actor($request);
         $cbKey = $actor['role'] === 'agent' ? 'agent:' . $actor['agent_id'] : $user;
         $cbName = $actor['display_name'] ?? null;
+        // Image-only MMS schedules: Dynalink cannot carry text + media in
+        // one MMS, so the body is optional exactly when media rides along.
+        $mmsMedia = $request->input('type') === 'mms' && (string) $request->input('data', '') !== '';
         $data = $request->validate([
             'name'         => 'sometimes|nullable|string|max:120',
-            'message'      => 'required|string|max:5000',
+            'message'      => ($mmsMedia ? 'sometimes|nullable|string|max:5000' : 'required|string|max:5000'),
             'from-number'  => 'required|string',
             'type'         => 'sometimes|in:sms,mms',
             'data'         => 'sometimes|nullable|string',
@@ -167,7 +170,7 @@ class ScheduledMessageController extends Controller
         $m = ScheduledMessage::create([
             'domain' => $domain, 'user' => $user,
             'name' => $data['name'] ?? null,
-            'message' => $data['message'], 'from_number' => $data['from-number'],
+            'message' => (string) ($data['message'] ?? ''), 'from_number' => $data['from-number'],
             'type' => $data['type'] ?? 'sms',
             'media_data' => $data['data'] ?? null,
             'media_mime' => $data['mime-type'] ?? null,

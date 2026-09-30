@@ -58,7 +58,19 @@ class MessageController extends Controller
             return response()->json(['message' => 'Provider unavailable.'], 503);
         }
         try {
-            [$status, $body] = $this->dynalink->sendNew($token, $domain, $user, $payload);
+            // Netsapiens/Dynalink cannot send picture and text in ONE MMS —
+            // mmsLegs() splits into ordered legs (image-only MMS, then the
+            // text as its own SMS). A failed media leg aborts the text leg.
+            $legs = \App\Services\DynalinkService::mmsLegs($payload);
+            $firstBody = null;
+            $status = 0;
+            $body = null;
+            foreach ($legs as $leg) {
+                [$status, $body] = $this->dynalink->sendNew($token, $domain, $user, $leg);
+                if ($firstBody === null) $firstBody = $body;
+                if ($status < 200 || $status >= 300) break;
+            }
+            if ($status >= 200 && $status < 300) $body = $firstBody;
         } catch (\Throwable $e) {
             return response()->json(['accepted' => false, 'message' => 'Provider error.'], 502);
         }
