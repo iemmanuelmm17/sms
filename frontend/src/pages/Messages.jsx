@@ -113,17 +113,17 @@ function StatusTag({ status, ts }) {
   const parsed = ts ? parseTs(ts) : 0;
   const ageMs = ts ? Date.now() - parsed : 0;
   // The provider leaves history parked at 'sending'/'scheduled' — anything
-  // older than 5 minutes already went out, so call it delivered. (The server
-  // also normalizes this since 2026-09; this stays as the offline/demo fallback.)
-  const waiting = parsed > 0 && /sending|pending|queued|scheduled/i.test(s) && ageMs <= 5 * 60 * 1000;
+  // older than 2 minutes already went out, so call it delivered (same rule
+  // the server normalizes with; this stays as the offline/demo fallback).
+  const waiting = parsed > 0 && /sending|pending|queued|scheduled/i.test(s) && ageMs <= 2 * 60 * 1000;
   // Self-timer: re-render once the boundary passes so an idle window flips
   // Sending → Delivered on its own — no manual refresh.
   useEffect(() => {
     if (!waiting) return undefined;
-    const t = setTimeout(() => flip((x) => x + 1), 5 * 60 * 1000 - ageMs + 500);
+    const t = setTimeout(() => flip((x) => x + 1), 2 * 60 * 1000 - ageMs + 500);
     return () => clearTimeout(t);
   });
-  if (/sending|pending|queued|scheduled/i.test(s) && ageMs > 5 * 60 * 1000) {
+  if (/sending|pending|queued|scheduled/i.test(s) && ageMs > 2 * 60 * 1000) {
     return <span className="text-emerald-200 font-bold" title={s}>✓✓ Delivered</span>;
   }
   const hit = STATUS_META.find(([re]) => re.test(s));
@@ -291,6 +291,10 @@ export default function Messages() {
     try { return localStorage.getItem('sms-folders-open') !== '0'; } catch { return true; }
   });
   const [activeId, setActiveId] = useState(null);
+  // Latest activeId for asynchronous pulls: a delayed refetch must never pour
+  // messages into a conversation the user has already navigated away from.
+  const activeIdRef = useRef(activeId);
+  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
   const [msgs, setMsgs] = useState([]);
   const [q, setQ] = useState('');
   const [showUnreadOnly, setShowUnreadOnly] = useState(false);
@@ -637,9 +641,16 @@ export default function Messages() {
       // thread in case inbound messages were missed.
       syncSessions();
       if (activeId) {
-        api.sessionMessages(activeId, numOfSession(active))
-          .then((m) => setMsgs((p) => mergeServerMsgs(p, m, activeId)))
+        // Provider history can lag the webhook by a beat — a twin missed on
+        // the first pull would not appear until a manual refresh, so pull
+        // once more shortly after. The merge is idempotent and the ref guard
+        // drops the late pull if the user navigated away.
+        const pullSid = activeId;
+        const pull = () => api.sessionMessages(pullSid, numOfSession(active))
+          .then((m) => setMsgs((p) => (activeIdRef.current === pullSid ? mergeServerMsgs(p, m, pullSid) : p)))
           .catch(() => {});
+        pull();
+        setTimeout(pull, 2500);
       }
       return;
     }
@@ -656,7 +667,15 @@ export default function Messages() {
       syncSessions(remotes);
       const openRemote = active ? digits(active['messagesession-remote']) : '';
       if (activeId && (String(sid) === String(activeId) || (openRemote && remotes.includes(openRemote)))) {
-        api.sessionMessages(activeId, numOfSession(active)).then((m) => setMsgs((p) => mergeServerMsgs(p, m, activeId))).catch(() => {});
+        // The broadcaster fires the instant its send returns 2xx — provider
+        // history can lag that (typical for auto-replies), so a twin missed
+        // on the first pull is caught by a second pull moments later.
+        const pullSid = activeId;
+        const pull = () => api.sessionMessages(pullSid, numOfSession(active))
+          .then((m) => setMsgs((p) => (activeIdRef.current === pullSid ? mergeServerMsgs(p, m, pullSid) : p)))
+          .catch(() => {});
+        pull();
+        setTimeout(pull, 2500);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

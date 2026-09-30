@@ -399,9 +399,11 @@ class MessageSessionController extends Controller
     /**
      * The provider parks outbound history at 'sending'/'scheduled' forever —
      * delivery receipts only arrive by webhook, which a LAN box never gets.
-     * Anything outbound older than 5 minutes demonstrably went out (this is
-     * the same rule the web client applied locally); normalizing here fixes
-     * it once for every client instead of per-render.
+     * Anything outbound older than 2 minutes demonstrably went out (sends are
+     * synchronous 2xx; this is the same rule the web client applied locally);
+     * normalizing here fixes it once for every client instead of per-render.
+     * Windows that were OPEN at send time pin the twin instantly via the
+     * message-sent broadcast — this covers windows opened afterwards.
      */
     protected function normalizeStaleStatuses(array $list): array
     {
@@ -413,7 +415,7 @@ class MessageSessionController extends Controller
             } catch (\Throwable $e) {
                 continue; // unparseable timestamp — leave the status alone
             }
-            if ($ts->lt(now()->subMinutes(5))) $m['status'] = 'delivered';
+            if ($ts->lt(now()->subMinutes(2))) $m['status'] = 'delivered';
         }
         unset($m);
         return $list;

@@ -324,6 +324,21 @@ class AutoReplyService
                         $rule->increment('trigger_count');
                         $rule->update(['last_triggered_at' => now()]);
                         $anySent = true;
+                        // Live-sync every window THE MOMENT the reply is out.
+                        // text+type let the Messages page pin the provider
+                        // twin as Delivered (its history parks at 'sending'),
+                        // and session id + remote aim the refetch at the open
+                        // conversation — the old text-less broadcast could
+                        // neither pin the twin nor show it without a manual
+                        // refresh.
+                        DataChanged::send($domain, $user, 'sessions', 'message-sent',
+                            $sessionId !== '' ? $sessionId : null, [
+                                'session_id' => $sessionId !== '' ? $sessionId : null,
+                                'remote'     => $from,
+                                'text'       => (string) $replyText,
+                                'type'       => 'sms',
+                                'auto_reply' => true,
+                            ]);
                         $toDigits = preg_replace('/\D/', '', (string) $from);
                         SentMessageLog::record([
                             // tenantFor: rules created by portal agents carry the
@@ -357,7 +372,8 @@ class AutoReplyService
             if ($anySent) {
                 Cache::put($dedupeKey, 1, now()->addSeconds($dedupeSec));
                 if ($cooldownMin > 0) Cache::put($cdKey, 1, now()->addMinutes($cooldownMin));
-                DataChanged::send($domain, $user, 'sessions', 'message-sent', null, ['remote' => $from]);
+                // The message-sent broadcasts went out per reply (with the
+                // text, so windows can pin the twin) inside the loop above.
             }
         } catch (\Throwable $e) {
             Log::warning('AutoReply failed: ' . $e->getMessage());
