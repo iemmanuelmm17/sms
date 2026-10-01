@@ -1436,7 +1436,7 @@ export default function Messages() {
                 </span>
                 <span className="flex-1 min-w-0">
                   <span className="flex items-baseline justify-between gap-2">
-                    <span className={`text-sm truncate ${unread ? 'font-bold text-slate-900' : 'font-medium text-slate-800'}`}>{name}</span>
+                    <span className={`text-sm truncate ${unread ? 'font-bold text-blue-700' : 'font-medium text-slate-800'}`}>{name}</span>
                     {isOptedOut(s['messagesession-remote']) && <span className="text-[10px] text-red-600 font-semibold shrink-0">Opt-out</span>}
                     <span className="flex items-center gap-1 shrink-0">
                       <span onClick={(e) => { e.stopPropagation(); togglePin(sid); }}
@@ -1454,7 +1454,7 @@ export default function Messages() {
                   <span className="flex items-center gap-1.5">
                     <span ref={(el) => { if (el) prevEls.current.set(sid, el); else prevEls.current.delete(sid); }}
                       onMouseEnter={() => onPrevEnter(sid, s)} onMouseLeave={hideTip}
-                      className={`text-xs truncate flex-1 ${unread ? 'font-semibold text-slate-700' : 'text-slate-500'}`}>
+                      className={`text-xs truncate flex-1 ${unread ? 'font-bold text-blue-600' : 'text-slate-500'}`}>
                       {s['messagesession-last-message'] || <em className="text-slate-400">[media]</em>}
                     </span>
                     {/* Which of your numbers this thread came in on. Only

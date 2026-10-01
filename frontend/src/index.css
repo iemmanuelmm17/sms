@@ -37,6 +37,7 @@ button, a, input, select, textarea, [role="button"] {
 .dark .bg-amber-50 { background-color: rgba(217, 119, 6, 0.14) !important; }
 .dark .bg-amber-100 { background-color: rgba(217, 119, 6, 0.25) !important; }
 .dark .bg-blue-100 { background-color: rgba(59, 130, 246, 0.25) !important; }
+.dark .bg-blue-50 { background-color: rgba(59, 130, 246, 0.16) !important; }
 .dark .bg-emerald-100 { background-color: rgba(16, 185, 129, 0.22) !important; }
 .dark .bg-orange-100 { background-color: rgba(249, 115, 22, 0.25) !important; }
 .dark .bg-red-50 { background-color: rgba(220, 38, 38, 0.14) !important; }
@@ -60,7 +61,8 @@ button, a, input, select, textarea, [role="button"] {
 .dark .text-red-600 { color: #fca5a5 !important; }
 .dark .text-amber-800, .dark .text-amber-700 { color: #fcd34d !important; }
 .dark .text-emerald-600, .dark .text-emerald-800, .dark .text-emerald-700 { color: #6ee7b7 !important; }
-.dark .text-blue-800 { color: #93c5fd !important; }
+/* Unread-message blue (Outlook-style) — light blues stay legible on dark surfaces. */
+.dark .text-blue-800, .dark .text-blue-700, .dark .text-blue-600 { color: #93c5fd !important; }
 .dark .text-orange-800 { color: #fdba74 !important; }
 .dark .text-violet-800 { color: #c4b5fd !important; }
 

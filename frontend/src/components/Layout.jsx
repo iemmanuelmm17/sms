@@ -352,7 +352,7 @@ export default function Layout({ children }) {
     if (n.badge === 'pending') return pending > 0 ? { text: fmt99(pending), cls: 'bg-amber-500' } : null;
     if (n.badge === 'queue') return queueTotal > 0 ? { text: fmt99(queueTotal), cls: 'bg-amber-500' } : null;
     if (n.badge === 'unassigned') return unassignedTotal > 0 ? { text: fmt99(unassignedTotal), cls: 'bg-slate-400' } : null;
-    if (n.badge === 'kalerts') return kalerts > 0 ? { text: fmt99(kalerts), cls: 'bg-violet-500' } : null;
+    if (n.badge === 'kalerts') return kalerts > 0 ? { text: fmt99(kalerts), cls: 'bg-blue-600' } : null;
     return null;
   };
 

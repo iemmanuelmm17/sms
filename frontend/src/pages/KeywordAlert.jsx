@@ -290,18 +290,19 @@ export default function KeywordAlert() {
             </div>
           ) : logs.map((row) => (
             <button key={row.id} onClick={() => openLog(row)}
-              className={`w-full text-left px-4 py-3 border-b last:border-b-0 hover:bg-slate-50 flex gap-3 items-start transition ${row.read_at ? '' : 'bg-violet-50/70'}`}>
+              className={`w-full text-left px-4 py-3 border-b last:border-b-0 hover:bg-slate-50 flex gap-3 items-start transition ${row.read_at ? '' : 'bg-blue-50'}`}>
               <span className="mt-0.5 text-base leading-none">{row.direction === 'out' ? '⬆️' : '⬇️'}</span>
               <span className="flex-1 min-w-0">
                 <span className="flex items-center gap-2 text-xs text-slate-500 flex-wrap">
-                  {!row.read_at && <span className="w-2 h-2 rounded-full bg-violet-500 shrink-0" title="Unread" />}
-                  <b className="text-slate-700">{row.rule_name || 'Keyword rule'}</b>
-                  <span className="px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-semibold max-w-[12rem] truncate">
+                  {!row.read_at && <span className="w-2 h-2 rounded-full bg-blue-600 shrink-0" title="Unread" />}
+                  <b className={row.read_at ? 'text-slate-700' : 'text-blue-700'}>{row.rule_name || 'Keyword rule'}</b>
+                  {/* Unread = Outlook-style blue; read rows fall back to muted slate. */}
+                  <span className={`px-1.5 py-0.5 rounded font-semibold max-w-[12rem] truncate ${row.read_at ? 'bg-slate-100 text-slate-600' : 'bg-blue-100 text-blue-700'}`}>
                     “{row.matched_keyword}”
                   </span>
                   <span>{row.direction === 'out' ? 'sent' : 'received'}</span>
                 </span>
-                <span className="block text-sm text-slate-800 truncate mt-0.5">{row.message_text}</span>
+                <span className={`block text-sm truncate mt-0.5 ${row.read_at ? 'text-slate-800' : 'font-bold text-blue-700'}`}>{row.message_text}</span>
                 <span className="block text-[11px] text-slate-400 mt-0.5">
                   {row.direction === 'out'
                     ? `To ${row.to_number ? fmtPhone(row.to_number) : '?'} from ${fmtPhone(row.sms_number || row.from_number)}`
@@ -377,7 +378,7 @@ export default function KeywordAlert() {
           </div>
           <dl className="text-sm space-y-1.5 mb-5">
             <div className="flex gap-2"><dt className="w-32 text-slate-500 font-semibold shrink-0">Rule</dt><dd className="text-slate-800">{viewing.rule_name || '—'}</dd></div>
-            <div className="flex gap-2"><dt className="w-32 text-slate-500 font-semibold shrink-0">Keyword caught</dt><dd><span className="px-2 py-0.5 rounded bg-violet-100 text-violet-700 font-semibold text-xs">“{viewing.matched_keyword}”</span></dd></div>
+            <div className="flex gap-2"><dt className="w-32 text-slate-500 font-semibold shrink-0">Keyword caught</dt><dd><span className="px-2 py-0.5 rounded bg-blue-100 text-blue-700 font-semibold text-xs">“{viewing.matched_keyword}”</span></dd></div>
             <div className="flex gap-2"><dt className="w-32 text-slate-500 font-semibold shrink-0">Direction</dt><dd className="text-slate-800">{DIR_LABEL[viewing.direction] || viewing.direction}</dd></div>
             <div className="flex gap-2"><dt className="w-32 text-slate-500 font-semibold shrink-0">From</dt><dd className="text-slate-800">{viewing.from_number ? fmtPhone(viewing.from_number) : '—'}</dd></div>
             <div className="flex gap-2"><dt className="w-32 text-slate-500 font-semibold shrink-0">To</dt><dd className="text-slate-800">{viewing.to_number ? fmtPhone(viewing.to_number) : '—'}</dd></div>
