@@ -211,6 +211,9 @@ Route::get('/email-sms-senders', [EmailSmsSenderController::class, 'index']);
 Route::post('/email-sms-senders', [EmailSmsSenderController::class, 'store']);
 Route::put('/email-sms-senders/{id}', [EmailSmsSenderController::class, 'update']);
 Route::delete('/email-sms-senders/{id}', [EmailSmsSenderController::class, 'destroy']);
+// Per-number notify list (incoming SMS/MMS → email): admins on any number,
+// every other user on numbers they own or that are shared with them.
+Route::put('/number-emails/{number}', [EmailSmsSenderController::class, 'saveNotifyEmails']);
 Route::get('/opt-events', [OptEventController::class, 'index']);
 Route::post('/auto-replies/{autoReply}/unlock', [AutoReplyController::class, 'unlock']);
 Route::post('/auto-replies/{autoReply}/reset', [AutoReplyController::class, 'reset']);

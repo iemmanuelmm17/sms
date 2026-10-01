@@ -103,6 +103,43 @@ class EmailSmsSenderController extends Controller
         return response()->json(['ok' => true]);
     }
 
+    /**
+     * PUT /api/number-emails/{number} { notify: [], enabled? }
+     *
+     * The per-number "notify on incoming SMS/MMS" list — the RECEIVING side
+     * of the email gateway. Admins manage every number; other users manage
+     * the numbers they own or that are shared with them (the same visibility
+     * the Numbers page shows). Stores into the same company-settings slot
+     * the admin endpoint writes, so the mailer keeps ONE source of truth.
+     */
+    public function saveNotifyEmails(Request $request, string $number)
+    {
+        $a = $this->actor($request);
+        $d = preg_replace('/\D/', '', (string) $number);
+        if (strlen($d) < 7 || strlen($d) > 15) {
+            return response()->json(['message' => 'Invalid SMS number.'], 422);
+        }
+        // Admins pass; agents need the number to be their own or shared.
+        $this->assertAgentNumber($request, $d, 'read');
+        $data = $request->validate([
+            'notify'   => 'present|array|max:10',
+            'notify.*' => 'email|max:190',
+            'enabled'  => 'sometimes|boolean',
+        ]);
+        $settings = app(\App\Services\CompanySettingsService::class);
+        $prev = (array) ($settings->get($a['domain'])['number_email'][$d] ?? []);
+        $enabled = array_key_exists('enabled', $data) ? (bool) $data['enabled'] : (bool) ($prev['enabled'] ?? true);
+        $notify = array_values(array_unique(array_map(
+            fn($e) => mb_strtolower(trim((string) $e)), (array) $data['notify']
+        ), SORT_REGULAR));
+        $settings->setNumberEmail($a['domain'], $d, $notify, $enabled);
+        $this->audit($request, 'number.notify-emails-changed', [
+            'number' => $d, 'count' => count($notify), 'enabled' => $enabled,
+        ]);
+        DataChanged::send($a['domain'], $a['user'], 'company-settings', 'saved');
+        return response()->json(['ok' => true, 'notify' => $notify, 'enabled' => $enabled]);
+    }
+
     /** Normalize to unique digit strings, 7-15 digits each. */
     protected function digits(array $numbers): array
     {

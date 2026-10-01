@@ -1255,6 +1255,11 @@ export const api = {
     if (DEMO_MODE) { await delay(50); demo.numberEmail = { ...(demo.numberEmail || {}), [digits]: { notify, enabled: enabled ?? demo.numberEmail?.[digits]?.enabled ?? true } }; saveDemo(demo); return { number_email: { [digits]: { notify } } }; }
     return (await http.put('/api/company-settings', { number_email: { [digits]: { notify, ...(enabled !== undefined ? { enabled } : {}) } } })).data;
   },
+  // Per-number notify list — works for admins AND agents (own/shared numbers).
+  async saveNumberEmails(digits, notify, enabled) {
+    if (DEMO_MODE) { await delay(50); demo.numberEmail = { ...(demo.numberEmail || {}), [digits]: { notify, enabled: enabled ?? demo.numberEmail?.[digits]?.enabled ?? true } }; saveDemo(demo); return { ok: true }; }
+    return (await http.put(`/api/number-emails/${digits}`, { notify, ...(enabled !== undefined ? { enabled } : {}) })).data;
+  },
   async saveNumberMeta(digits, label, tags, signature = undefined) {
     const cfg = { label, tags, ...(signature === undefined ? {} : { signature: !!signature }) };
     if (DEMO_MODE) {

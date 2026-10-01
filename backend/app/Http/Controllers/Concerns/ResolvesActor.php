@@ -248,6 +248,7 @@ trait ResolvesActor
      *   $context = 'reply' → replyableNumbers()  (answer an existing convo)
      *   $context = 'new'   → creatableNumbers()  (start a new conversation)
      *   $context = 'send'  → sendableNumbers()   (legacy union)
+     *   $context = 'read'  → readableNumbers()   (view/manage number settings)
      *
      * The read path uses readableNumbers() from the same service, so the
      * sets can never drift apart.
@@ -266,6 +267,7 @@ trait ResolvesActor
             $allowed = match ($context) {
                 'reply' => $access->replyableNumbers($a['domain'], $ext, $tok),
                 'new'   => $access->creatableNumbers($a['domain'], $ext, $tok),
+                'read'  => $access->readableNumbers($a['domain'], $ext, $tok),
                 default => $access->sendableNumbers($a['domain'], $ext, $tok),
             };
             if (!$allowed) {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../api/client';
+import { EditBtn, DeleteBtn } from '../components/IconAction';
 import { toastError, toastSuccess } from '../lib/toast';
 
 const digits = (v) => String(v ?? '').replace(/\D/g, '');
@@ -844,7 +845,7 @@ function WebhooksSection() {
               <button onClick={() => loadDeliv(w)} className="text-[11px] text-brand-600 hover:underline shrink-0">Deliveries</button>
               <button onClick={() => test(w)} className="text-[11px] text-brand-600 hover:underline shrink-0">Test</button>
               <button onClick={() => flip(w)} className="text-[11px] text-amber-700 hover:underline shrink-0">{w.status === 'active' ? 'Disable' : 'Enable'}</button>
-              <button onClick={() => remove(w)} className="text-[11px] text-red-600 hover:underline shrink-0">Delete</button>
+              <DeleteBtn onClick={() => remove(w)} />
             </div>
             <div className="text-[11px] text-slate-400 mt-0.5">
               {(w.events?.length ? w.events : ['all events']).join(', ')}

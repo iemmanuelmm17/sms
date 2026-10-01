@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, contactName, fmtPhone, primaryPhone, contactId, fmtDateTime } from '../api/client';
+import { EditBtn, DeleteBtn } from '../components/IconAction';
 import { toastError, toastSuccess } from '../lib/toast';
 import Modal from '../components/Modal';
 import { useSocket } from '../context/SocketContext';
@@ -151,13 +152,9 @@ export default function Companies() {
                     </div>
                   )}
 
-                <div className="flex gap-2 mt-4">
-                  <button onClick={() => setEditingCompany({ ...activeCompany })}
-                    className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-lg px-4 py-2">Edit</button>
-                  {!isAgent && (
-                    <button onClick={() => deleteCompany(activeCompany)}
-                      className="border border-red-200 text-red-600 text-sm rounded-lg px-4 py-2 hover:bg-red-50">Delete</button>
-                  )}
+                <div className="flex items-center gap-1 mt-4">
+                  <EditBtn onClick={() => setEditingCompany({ ...activeCompany })} />
+                  {!isAgent && <DeleteBtn onClick={() => deleteCompany(activeCompany)} />}
                 </div>
               </div>
             )}
@@ -199,18 +196,14 @@ export default function Companies() {
                     </div>
                   ))}
                 </div>
-                <div className="flex gap-2 mt-4">
-                  <button
+                <div className="flex items-center gap-1 mt-4">
+                  <EditBtn
                     onClick={() => setEditingGroup({
                       ...activeGroup,
                       memberIds: (activeGroup.members || []).map((m) => m['unique-id']).filter(Boolean),
                       manualNumbers: (activeGroup.members || []).filter((m) => !m['unique-id']).map((m) => m.phone).filter(Boolean),
-                    })}
-                    className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-lg px-4 py-2">Edit</button>
-                  {!isAgent && (
-                    <button onClick={() => deleteGroup(activeGroup)}
-                      className="border border-red-200 text-red-600 text-sm rounded-lg px-4 py-2 hover:bg-red-50">Delete</button>
-                  )}
+                    })} />
+                  {!isAgent && <DeleteBtn onClick={() => deleteGroup(activeGroup)} />}
                 </div>
               </div>
             )}

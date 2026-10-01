@@ -267,7 +267,7 @@ export default function Numbers() {
     const notify = numEmail[d]?.notify || [];
     setNumEmail((p) => ({ ...p, [d]: { notify, enabled: next } }));
     try {
-      await api.saveNumberEmail(d, notify, next);
+      await api.saveNumberEmails(d, notify, next);
       reload();
       toastSuccess(next ? `Email notifications enabled for ${fmtPhone(d)}.` : `Email notifications disabled for ${fmtPhone(d)}.`);
     } catch (e) {
@@ -472,12 +472,10 @@ export default function Numbers() {
       try { await api.saveNumberMeta(d, String(m.label || '').trim(), m.tags || [], !!m.signature); }
       catch (e) { metaOk = false; failed.push(`description/tags (${e?.response?.data?.message || e.message})`); }
     }
-    if (!isAgent) {
-      // Notify list lives on the admin-only company-settings endpoint;
-      // agents only persist their authorized-sender edits below.
-      try { await api.saveNumberEmail(d, notify, numEmail[d]?.enabled); }
-      catch (e) { mailOk = false; failed.push(`notify list (${e?.response?.data?.message || e.message})`); }
-    }
+    // Notify list: the per-number endpoint serves admins AND agents (own or
+    // shared numbers — exactly this page's visibility).
+    try { await api.saveNumberEmails(d, notify, numEmail[d]?.enabled); }
+    catch (e) { mailOk = false; failed.push(`notify list (${e?.response?.data?.message || e.message})`); }
     try { await syncSenders(d, send); }
     catch (e) { sendOk = false; failed.push(`authorized senders (${e?.response?.data?.message || e.message})`); }
 
@@ -538,7 +536,7 @@ export default function Numbers() {
         <div className="flex-1">
           <h1 className="text-fluid-xl font-bold text-slate-900">Numbers</h1>
           <p className="text-xs text-slate-400 mt-1">Per SMS number: assigned agents, shared flag, notify emails on incoming SMS/MMS, and who may send SMS by email. Separate addresses with ;.</p>
-          {isAgent && <p className="text-xs text-amber-600 mt-1">Read-only — your assigned numbers. Contact an admin to change these lists.</p>}
+          {isAgent && <p className="text-xs text-slate-500 mt-1">Your assigned and shared numbers — you can manage both email lists here. Agent assignments, descriptions and sharing stay admin-only.</p>}
         </div>
         {allDigits.length > 1 && (
           <div className="flex gap-2 text-xs mt-1">
@@ -872,8 +870,8 @@ export default function Numbers() {
                     </InfoTip>
                   </div>
                 )}
-                <label className="mt-3 flex items-center gap-2 text-sm text-slate-700 w-fit ${isAgent ? '' : 'cursor-pointer'}">
-                  <input type="checkbox" checked={numEmail[d]?.enabled !== false} onChange={() => toggleNotify(d)} disabled={isAgent}
+                <label className="mt-3 flex items-center gap-2 text-sm text-slate-700 w-fit cursor-pointer">
+                  <input type="checkbox" checked={numEmail[d]?.enabled !== false} onChange={() => toggleNotify(d)}
                     className="w-4 h-4 accent-brand-600" />
                   Enable email notification
                 </label>
@@ -886,7 +884,6 @@ export default function Numbers() {
                   onChange={(v) => setNotifyInput((p) => ({ ...p, [d]: v }))}
                   onAdd={() => addNotify(d)}
                   onRemove={(em) => removeNotify(d, em)}
-                  disabled={isAgent}
                   placeholder="alerts@company.com"
                   emptyText="No notify addresses."
                 />
@@ -914,7 +911,7 @@ export default function Numbers() {
                 </div>
                 <div className="mt-2 flex items-center gap-2 flex-wrap">
                   <button onClick={() => save(d)} disabled={!!busy[d] || !rowDirty}
-                    title={rowDirty ? (isAgent ? 'Save authorized senders' : 'Save agent assignments, description, tags and email settings') : 'No changes to save'}
+                    title={rowDirty ? (isAgent ? 'Save email settings' : 'Save agent assignments, description, tags and email settings') : 'No changes to save'}
                     className="text-sm bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-lg px-4 py-2 disabled:opacity-50 disabled:cursor-not-allowed">
                     {busy[d] ? 'Saving…' : rowDirty ? 'Save settings' : 'Saved'}
                   </button>

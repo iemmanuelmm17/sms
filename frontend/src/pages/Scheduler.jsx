@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, fmtPhone, contactName, primaryPhone, contactId, fmtDateTimeIn, getTimezone, TIMEZONES, zonedTimeToUtc, utcToWallInput, nowWallInputInZone } from '../api/client';
+import { EditBtn, DeleteBtn } from '../components/IconAction';
 import { smsSegments, MMS_MAX_BYTES, MMS_MAX_LABEL } from '../lib/segments';
 import { toastError, toastSuccess } from '../lib/toast';
 import Modal from '../components/Modal';
@@ -133,12 +134,12 @@ export default function Scheduler() {
                     className="text-[11px] text-emerald-700 hover:underline font-semibold py-1">↻ Retry failed</button>
                 )}
                 {m.status !== 'sent' && (
-                  <button onClick={() => {
+                  <DeleteBtn onClick={() => {
                     const msg = m.status === 'pending'
                       ? `Delete this PENDING message?\n\n"${(m.name || m.message || '').slice(0, 80)}"\n\nIt has NOT been sent yet — deleting cancels it for all ${m.recipients?.length || 0} recipient(s).`
                       : `Delete this ${m.status} message?\n\n"${(m.name || m.message || '').slice(0, 80)}"`;
                     if (confirm(msg)) api.deleteScheduled(m.id).then(() => { reload(); toastSuccess('Deleted'); }).catch((e) => toastError(e.message));
-                  }} className="text-[11px] text-red-600 hover:underline py-1">Delete</button>
+                  }} />
                 )}
               </div>
             </div>

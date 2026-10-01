@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, fmtPhone, fmtDateTime } from '../api/client';
+import { EditBtn, DeleteBtn } from '../components/IconAction';
 import { toastError, toastSuccess } from '../lib/toast';
 import Modal from '../components/Modal';
 import { useSocket } from '../context/SocketContext';
@@ -347,8 +348,8 @@ export default function KeywordAlert() {
                     className={`relative w-11 h-6 rounded-full transition ${r.active ? 'bg-emerald-500' : 'bg-slate-300'}`}>
                     <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${r.active ? 'left-[1.375rem]' : 'left-0.5'}`} />
                   </button>
-                  <button onClick={() => setEditing(r)} className="text-xs font-bold text-brand-700 hover:underline">Edit</button>
-                  <button onClick={() => removeRule(r)} className="text-xs font-bold text-red-500 hover:underline">Delete</button>
+                  <EditBtn onClick={() => setEditing(r)} />
+                  <DeleteBtn onClick={() => removeRule(r)} />
                 </div>
               </div>
             </div>

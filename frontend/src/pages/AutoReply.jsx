@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, fmtPhone, fmtDateTime, getTimezone, TIMEZONES } from '../api/client';
+import { EditBtn, DeleteBtn } from '../components/IconAction';
 import { toastError, toastSuccess } from '../lib/toast';
 import Modal from '../components/Modal';
 import { useSocket } from '../context/SocketContext';
@@ -402,10 +403,10 @@ export default function AutoReply() {
                         )}
                         {global
                           ? <button onClick={() => setManaging('all')} className="text-[11px] text-brand-600 hover:underline">Edit globally →</button>
-                          : editable && <button onClick={() => setEditing({ ...r })} className="text-[11px] text-brand-600 hover:underline">Edit</button>}
+                          : editable && <EditBtn onClick={() => setEditing({ ...r })} />}
                         {!isAgent && <button onClick={() => setVerifyTarget(r)} className="text-[11px] text-slate-500 hover:underline">Verify</button>}
                         {editable && !!r.is_deletable && (
-                          <button onClick={() => removeRule(r)} className="text-[11px] text-red-600 hover:underline">Delete</button>
+                          <DeleteBtn onClick={() => removeRule(r)} />
                         )}
                       </div>
                     </div>
