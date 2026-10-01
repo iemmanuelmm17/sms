@@ -2,14 +2,32 @@
 
 namespace App\Services;
 
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use App\Models\OptEvent;
 
 /**
- * TCPA do-not-contact list. JSON per domain (same pattern as
- * companies/groups): storage/app/optouts/{domain}.json
- * Shape: { "<digits>": { "at": iso, "source": "stop-keyword|manual", "note"?, "numbers": ["*"]|[digits...] } }
+ * TCPA do-not-contact list.
+ *
+ * Storage: the `opt_outs` database table (migration 000053 imported the
+ * legacy JSON). Compliance state now lives with the rest of the data —
+ * transactional, backed up with the DB, auditable.
+ *
+ * Safety rails (this list gates SENDS — it must never silently empty):
+ *  - If the table is missing/unreadable (e.g. code deployed before
+ *    `php artisan migrate`), every read/write falls back to the legacy
+ *    JSON store: storage/app/optouts/{domain}.json.
+ *  - Every DB write is mirrored into the JSON file (best effort), so the
+ *    on-disk copy stays a current cold backup and a downgrade is safe.
+ *
+ * Row shape mirrors the old JSON entry:
+ *   digits => { at: iso, source: stop-keyword|manual, note?, numbers: ["*"]|[digits...] }
  * numbers ["*"] blocks all senders; otherwise only those business numbers.
+ *
+ * The per-event audit trail (who opted out/in, when, with which keyword)
+ * is the OptEvent table — unchanged.
  */
 class OptOutService
 {
@@ -28,9 +46,54 @@ class OptOutService
 
     protected static array $memo = [];
 
+    /** One-shot per process: has the opt_outs migration run? */
+    protected static ?bool $dbReady = null;
+
+    protected function dbReady(): bool
+    {
+        if (static::$dbReady === null) {
+            try {
+                static::$dbReady = Schema::hasTable('opt_outs');
+            } catch (\Throwable $e) {
+                static::$dbReady = false;
+            }
+        }
+        return static::$dbReady;
+    }
+
+    /** 10/11-digit lookup variants of the same number, exact form first. */
+    protected static function variants(string $d): array
+    {
+        $keys = [$d];
+        if (strlen($d) === 11 && str_starts_with($d, '1')) $keys[] = substr($d, 1);
+        if (strlen($d) === 10) $keys[] = '1' . $d;
+        return $keys;
+    }
+
     public function all(string $domain): array
     {
         if (array_key_exists($domain, static::$memo)) return static::$memo[$domain];
+        if ($this->dbReady()) {
+            try {
+                $rows = DB::table('opt_outs')->where('domain', $domain)->orderBy('id')->get();
+                $map = [];
+                foreach ($rows as $row) {
+                    $nums = json_decode((string) $row->numbers, true);
+                    $nums = is_array($nums) && $nums !== [] ? array_map('strval', $nums) : ['*'];
+                    try {
+                        $at = \Illuminate\Support\Carbon::parse($row->created_at)->toISOString();
+                    } catch (\Throwable $e) {
+                        $at = now()->toISOString();
+                    }
+                    $entry = ['at' => $at, 'source' => (string) $row->source, 'numbers' => $nums];
+                    if ($row->note !== null && $row->note !== '') $entry['note'] = (string) $row->note;
+                    $map[(string) $row->digits] = $entry;
+                }
+                return static::$memo[$domain] = $map;
+            } catch (\Throwable $e) {
+                Log::error('optout:db-read-failed — falling back to JSON', ['domain' => $domain, 'error' => (string) $e]);
+            }
+        }
         return static::$memo[$domain] = JsonFileStore::read($this->path($domain), []);
     }
 
@@ -73,6 +136,58 @@ class OptOutService
         if (strlen($d) < 10) return false;
         $scope = $number ? self::digits($number) : '*';
         $changed = false;
+        if ($this->dbReady()) {
+            try {
+                $changed = DB::transaction(function () use ($domain, $d, $scope, $source, $note) {
+                    // Same precedence the JSON store used: exact digits, then
+                    // the 10/11-digit variant of the same contact.
+                    $row = null;
+                    foreach (self::variants($d) as $k) {
+                        $row = DB::table('opt_outs')->where('domain', $domain)->where('digits', $k)->first();
+                        if ($row) break;
+                    }
+                    if ($row) {
+                        $nums = json_decode((string) $row->numbers, true);
+                        $nums = is_array($nums) && $nums !== [] ? array_map('strval', $nums) : ['*'];
+                        if (!in_array('*', $nums, true) && !in_array($scope, $nums, true)) {
+                            $merged = $scope === '*' ? ['*'] : array_values([...$nums, $scope]);
+                            DB::table('opt_outs')->where('id', $row->id)
+                                ->update(['numbers' => json_encode($merged), 'updated_at' => now()]);
+                            return true;
+                        }
+                        return false; // already blocked at this scope
+                    }
+                    DB::table('opt_outs')->insert([
+                        'domain' => $domain, 'digits' => $d, 'source' => $source,
+                        'note' => $note, 'numbers' => json_encode([$scope]),
+                        'created_at' => now(), 'updated_at' => now(),
+                    ]);
+                    return true;
+                });
+                // Mirror into the JSON cold backup (best effort — the DB is
+                // the source of truth; a mirror failure must not undo it).
+                try { $this->optOutJson($domain, $d, $scope, $source, $note); } catch (\Throwable $e) {}
+            } catch (\Throwable $e) {
+                // A DNC write must never silently vanish: fall back to the
+                // legacy JSON store and log loudly.
+                Log::error('optout:db-write-failed — falling back to JSON', ['domain' => $domain, 'phone' => $d, 'error' => (string) $e]);
+                $changed = $this->optOutJson($domain, $d, $scope, $source, $note);
+            }
+        } else {
+            $changed = $this->optOutJson($domain, $d, $scope, $source, $note);
+        }
+        unset(static::$memo[$domain]);
+        if ($changed) {
+            $this->recordEvent($domain, $d, 'opt_out', $note ?: 'manual');
+            \App\Models\TenantWebhook::fire($domain, null, 'optout.added', ['phone' => $d, 'source' => $source, 'number' => $scope]);
+        }
+        return $changed;
+    }
+
+    /** Legacy JSON write path — still the fallback + the mirror. */
+    protected function optOutJson(string $domain, string $d, string $scope, string $source, ?string $note): bool
+    {
+        $changed = false;
         JsonFileStore::mutate($this->path($domain), function ($list) use ($d, $scope, $source, $note, &$changed) {
             // Same contact already listed (either digit variant): merge the scope in.
             foreach ([$d, strlen($d) === 11 && str_starts_with($d, '1') ? substr($d, 1) : null, strlen($d) === 10 ? '1' . $d : null] as $k) {
@@ -91,20 +206,37 @@ class OptOutService
             $changed = true;
             return $list;
         });
-        unset(static::$memo[$domain]);
-        if ($changed) {
-            $this->recordEvent($domain, $d, 'opt_out', $note ?: 'manual');
-            \App\Models\TenantWebhook::fire($domain, null, 'optout.added', ['phone' => $d, 'source' => $source, 'number' => $scope]);
-        }
         return $changed;
     }
 
     public function remove(string $domain, string $phone, string $keyword = 'manual'): bool
     {
         $d = self::digits($phone);
-        $keys = [$d];
-        if (strlen($d) === 11 && str_starts_with($d, '1')) $keys[] = substr($d, 1);
-        if (strlen($d) === 10) $keys[] = '1' . $d;
+        $keys = self::variants($d);
+        $hit = false;
+        if ($this->dbReady()) {
+            try {
+                $hit = DB::table('opt_outs')->where('domain', $domain)->whereIn('digits', $keys)->delete() > 0;
+                // Mirror into the JSON cold backup (best effort).
+                try { $this->removeJson($domain, $keys); } catch (\Throwable $e) {}
+            } catch (\Throwable $e) {
+                Log::error('optout:db-remove-failed — falling back to JSON', ['domain' => $domain, 'phone' => $d, 'error' => (string) $e]);
+                $hit = $this->removeJson($domain, $keys);
+            }
+        } else {
+            $hit = $this->removeJson($domain, $keys);
+        }
+        unset(static::$memo[$domain]);
+        if ($hit) {
+            $this->recordEvent($domain, $d, 'opt_in', $keyword);
+            \App\Models\TenantWebhook::fire($domain, null, 'optout.removed', ['phone' => $d, 'keyword' => $keyword]);
+        }
+        return $hit;
+    }
+
+    /** Legacy JSON remove path — still the fallback + the mirror. */
+    protected function removeJson(string $domain, array $keys): bool
+    {
         $hit = false;
         JsonFileStore::mutate($this->path($domain), function ($list) use ($keys, &$hit) {
             foreach ($keys as $k) {
@@ -112,11 +244,6 @@ class OptOutService
             }
             return $list;
         });
-        unset(static::$memo[$domain]);
-        if ($hit) {
-            $this->recordEvent($domain, $d, 'opt_in', $keyword);
-            \App\Models\TenantWebhook::fire($domain, null, 'optout.removed', ['phone' => $d, 'keyword' => $keyword]);
-        }
         return $hit;
     }
 

@@ -13,7 +13,10 @@ return Application::configure(basePath: dirname(__DIR__))
         channels: __DIR__.'/../routes/channels.php',
         health: '/up',
         then: function () {
-            Route::middleware('web')->prefix('api')->group(base_path('routes/api.php'));
+            // throttle:tenant = 240/min partitioned per workspace (defined in
+            // AppServiceProvider). The provider webhook routes opt back out
+            // with withoutMiddleware() in api.php so inbound SMS can never 429.
+            Route::middleware(['web', 'throttle:tenant'])->prefix('api')->group(base_path('routes/api.php'));
         },
     )
     ->withMiddleware(function (Middleware $middleware) {

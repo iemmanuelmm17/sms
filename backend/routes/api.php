@@ -44,14 +44,16 @@ use App\Http\Controllers\TenantSettingsController;
  */
 
 // Public
-Route::post('/login', [AuthController::class, 'login']);
+Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:login');
 Route::get('/auth/login-options', [AuthController::class, 'loginOptions']);
-Route::post('/tenant/login', [AuthController::class, 'tenantLogin']);
-Route::post('/webhooks/dynalink', [WebhookController::class, 'dynalink']); // server-to-server
+Route::post('/tenant/login', [AuthController::class, 'tenantLogin'])->middleware('throttle:login');
+// Server-to-server: exempt from the tenant throttle — an inbound SMS burst
+// must never 429 (the provider would drop events). IP-allowlisted instead.
+Route::post('/webhooks/dynalink', [WebhookController::class, 'dynalink'])->withoutMiddleware(\Illuminate\Routing\Middleware\ThrottleRequests::class);
 // Dynalink URL validation, browsers and uptime monitors may ping the webhook
 // with a GET. Answer quietly with 200 instead of a 405 error page — the POST
 // route above does the real (IP-allowlisted) work.
-Route::get('/webhooks/dynalink', fn () => response()->json(['ok' => true, 'endpoint' => 'dynalink-webhook', 'expects' => 'POST']));
+Route::get('/webhooks/dynalink', fn () => response()->json(['ok' => true, 'endpoint' => 'dynalink-webhook', 'expects' => 'POST']))->withoutMiddleware(\Illuminate\Routing\Middleware\ThrottleRequests::class);
 Route::get('/branding', [BrandingController::class, 'show']);
 Route::get('/branding/logo', [BrandingController::class, 'logo']);
 Route::get('/realtime', [BrandingController::class, 'realtime']);
@@ -64,7 +66,7 @@ Route::post('/refresh', [AuthController::class, 'refresh']);
 Route::post('/auth/verify-password', [AuthController::class, 'verifyPassword'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':10,1');
 
 // Agent local auth (Phase 1 roles)
-Route::post('/agent/login', [AuthController::class, 'agentLogin']);
+Route::post('/agent/login', [AuthController::class, 'agentLogin'])->middleware('throttle:login');
 Route::post('/agent/forgot/start', [AgentPasswordResetController::class, 'start'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':10,1');
 Route::post('/agent/forgot/answer', [AgentPasswordResetController::class, 'answer'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':10,1');
 Route::post('/agent/forgot/complete', [AgentPasswordResetController::class, 'complete'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':10,1');
@@ -74,7 +76,7 @@ Route::post('/tenant/forgot/complete', [TenantPasswordResetController::class, 'c
 
 // Superadmin portal — IP-restricted, separate session (class middleware, no aliases needed).
 Route::post('/superadmin/login', [SuperAdminAuthController::class, 'login'])
-    ->middleware([\App\Http\Middleware\EnsureSuperAdminIp::class]);
+    ->middleware([\App\Http\Middleware\EnsureSuperAdminIp::class, 'throttle:login']);
 Route::prefix('superadmin')->middleware([\App\Http\Middleware\EnsureSuperAdminIp::class, \App\Http\Middleware\EnsureSuperAdminAuth::class])->group(function () {
     Route::get('/me', [SuperAdminAuthController::class, 'me']);
     Route::post('/logout', [SuperAdminAuthController::class, 'logout']);
@@ -165,11 +167,11 @@ Route::put('/integrations/revio/settings', [IntegrationController::class, 'setti
 
 Route::get('/sessions', [MessageSessionController::class, 'index']);
 Route::get('/sessions/{id}/messages', [MessageSessionController::class, 'messages']);
-Route::post('/sessions/{id}/messages', [MessageSessionController::class, 'send'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':30,1');
+Route::post('/sessions/{id}/messages', [MessageSessionController::class, 'send'])->middleware('throttle:tenant-send'); // 30/min per WORKSPACE (was per-IP)
 Route::post('/sessions/{id}/read', [MessageSessionController::class, 'read']);
 Route::post('/sessions/{id}/unread', [MessageSessionController::class, 'unread']);
 
-Route::post('/messages', [MessageController::class, 'store'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':30,1');
+Route::post('/messages', [MessageController::class, 'store'])->middleware('throttle:tenant-send'); // 30/min per WORKSPACE (was per-IP)
 Route::post('/messages/bulk', [MessageController::class, 'bulk'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':5,1'); // single call, array destination
 
 // Registered before the resource so /contacts/resync and /contacts/sync-status

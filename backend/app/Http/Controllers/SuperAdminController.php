@@ -78,6 +78,9 @@ class SuperAdminController extends Controller
         try {
             $numbers = $this->fetchAssignedNumbers($data['dynalink_user'], $data['domain'], $data['dynalink_pass']);
         } catch (\RuntimeException $e) {
+            // Message is one of fetchAssignedNumbers()'s crafted strings (no
+            // raw provider internals); logged for traceability.
+            \Illuminate\Support\Facades\Log::warning('superadmin:dynalink-verify-failed', ['error' => $e->getMessage()]);
             return response()->json(['message' => $e->getMessage()], 422);
         }
         if ($numbers === []) {
@@ -97,6 +100,7 @@ class SuperAdminController extends Controller
             $numbers = $this->fetchAssignedNumbers(
                 $tenant->dynalink_user, $tenant->domain, $tenant->dynalink_pass);
         } catch (\RuntimeException $e) {
+            \Illuminate\Support\Facades\Log::warning('superadmin:dynalink-verify-failed', ['error' => $e->getMessage()]);
             return response()->json(['message' => $e->getMessage()], 422);
         }
         return response()->json(['numbers' => $numbers]);
@@ -185,6 +189,9 @@ class SuperAdminController extends Controller
         try {
             $numbers = $this->fetchAssignedNumbers($data['dynalink_user'], $data['domain'], $data['dynalink_pass']);
         } catch (\RuntimeException $e) {
+            // Message is one of fetchAssignedNumbers()'s crafted strings (no
+            // raw provider internals); logged for traceability.
+            \Illuminate\Support\Facades\Log::warning('superadmin:dynalink-verify-failed', ['error' => $e->getMessage()]);
             return response()->json(['message' => $e->getMessage()], 422);
         }
         if ($numbers === []) {
@@ -263,6 +270,7 @@ class SuperAdminController extends Controller
                     $numbers = $this->fetchAssignedNumbers(
                         $tenant->dynalink_user, $tenant->domain, $tenant->dynalink_pass);
                 } catch (\RuntimeException $e) {
+                    \Illuminate\Support\Facades\Log::warning('superadmin:dynalink-verify-failed', ['error' => $e->getMessage()]);
                     return response()->json(['message' => $e->getMessage()], 422);
                 }
                 if (!in_array($want, array_column($numbers, 'digits'), true)) {
@@ -793,7 +801,10 @@ class SuperAdminController extends Controller
             app(\App\Services\EmailSmsService::class)->testSend($data['to']);
             return response()->json(['ok' => true]);
         } catch (\Throwable $e) {
-            return response()->json(['message' => $e->getMessage()], 422);
+            // Raw SMTP/IMAP errors can embed hostnames, file paths and auth
+            // context — log the detail, return a safe pointer instead.
+            \Illuminate\Support\Facades\Log::error('superadmin:mail-test-failed', ['error' => (string) $e]);
+            return response()->json(['message' => 'Email test failed — full error logged in laravel.log (search "superadmin:mail-test-failed").'], 422);
         }
     }
 
