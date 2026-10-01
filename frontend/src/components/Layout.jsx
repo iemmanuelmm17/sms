@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { PwaBanner } from './PwaInstall';
 import {
-  BarChart3, Bot, CalendarClock, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight,
+  BarChart3, BellRing, Bot, CalendarClock, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight,
   Ellipsis, Hash, Headset, Hourglass, Inbox, KeyRound, LayoutTemplate, LogOut, MessageSquarePlus,
   Plug, ScrollText, Search, Settings as SettingsIcon, Share2, ShieldOff, UserX, Users, UsersRound, X,
 } from 'lucide-react';
@@ -37,6 +37,7 @@ const NAV = [
     { id: 'scheduler', path: '/app/scheduler', label: 'Scheduler', icon: CalendarClock, badge: 'pending' },
     { id: 'templates', path: '/app/templates', label: 'Templates', icon: LayoutTemplate },
     { id: 'auto-reply', path: '/app/auto-reply', label: 'Auto-responder', icon: Bot },
+    { id: 'keyword-alerts', path: '/app/keyword-alerts', label: 'Keyword Alerts', icon: BellRing, badge: 'kalerts', hideForAgent: true },
   ] },
   { title: 'Insights', items: [
     { id: 'reporting', path: '/app/reporting', label: 'Reporting', icon: BarChart3 },
@@ -116,6 +117,48 @@ export default function Layout({ children }) {
     window.addEventListener('pending-sync', onPending);
     return () => window.removeEventListener('pending-sync', onPending);
   }, []);
+
+  // Keyword-alert nav badge (admins only): unread alert count. The page
+  // pushes exact counts via `kalerts-sync`; any keyword-alerts socket event
+  // (trigger/read) refetches so every admin window stays in step.
+  const [kalerts, setKalerts] = useState(() => {
+    try { return Number(localStorage.getItem('sms-kalerts') || 0); } catch { return 0; }
+  });
+  const kaIsAgent = user?.role === 'agent';
+  useEffect(() => {
+    const onSync = (e) => {
+      const { count } = e.detail || {};
+      if (typeof count === 'number') {
+        setKalerts(count);
+        try { localStorage.setItem('sms-kalerts', String(count)); } catch {}
+      }
+    };
+    window.addEventListener('kalerts-sync', onSync);
+    return () => window.removeEventListener('kalerts-sync', onSync);
+  }, []);
+  useEffect(() => {
+    if (kaIsAgent) { setKalerts(0); return undefined; }
+    let alive = true;
+    api.keywordAlertLogs({ limit: 1 })
+      .then((r) => {
+        if (!alive) return;
+        const n = Number(r?.unread || 0);
+        setKalerts(n);
+        try { localStorage.setItem('sms-kalerts', String(n)); } catch {}
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [kaIsAgent]);
+  useEffect(() => {
+    if (kaIsAgent || !lastSync || lastSync.resource !== 'keyword-alerts') return;
+    if (!['triggered', 'read', 'read-all'].includes(lastSync.action)) return;
+    api.keywordAlertLogs({ limit: 1 }).then((r) => {
+      const n = Number(r?.unread || 0);
+      setKalerts(n);
+      try { localStorage.setItem('sms-kalerts', String(n)); } catch {}
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastSync, kaIsAgent]);
 
   // Queue / unassigned totals + per-agent unread, pushed by Messages via
   // `folder-sync` (same pattern as unread/pending; last-known elsewhere).
@@ -309,6 +352,7 @@ export default function Layout({ children }) {
     if (n.badge === 'pending') return pending > 0 ? { text: fmt99(pending), cls: 'bg-amber-500' } : null;
     if (n.badge === 'queue') return queueTotal > 0 ? { text: fmt99(queueTotal), cls: 'bg-amber-500' } : null;
     if (n.badge === 'unassigned') return unassignedTotal > 0 ? { text: fmt99(unassignedTotal), cls: 'bg-slate-400' } : null;
+    if (n.badge === 'kalerts') return kalerts > 0 ? { text: fmt99(kalerts), cls: 'bg-violet-500' } : null;
     return null;
   };
 

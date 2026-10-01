@@ -406,7 +406,7 @@ class AutoReplyService
 
     /** [domain, user] from a webhook event. */
 
-    protected function resolveUser(array $event): array
+    public static function resolveUser(array $event): array
     {
         // 'terminating-user-id' is the documented name; live message events
         // actually carry 'term_uid'. Without this the message twin of every

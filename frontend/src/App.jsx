@@ -19,6 +19,7 @@ const Companies = lazy(() => import('./pages/Companies'));
 const Agents = lazy(() => import('./pages/Agents'));
 const Templates = lazy(() => import('./pages/Templates'));
 const AutoReply = lazy(() => import('./pages/AutoReply'));
+const KeywordAlert = lazy(() => import('./pages/KeywordAlert'));
 const Settings = lazy(() => import('./pages/Settings'));
 const TCPA = lazy(() => import('./pages/TCPA'));
 const AuditLog = lazy(() => import('./pages/AuditLog'));
@@ -145,7 +146,8 @@ function PrefetchRoutes() {
     if (hasUser) mods.push(
       () => import('./pages/Messages'), () => import('./pages/Users'), () => import('./pages/Scheduler'),
       () => import('./pages/Contacts'), () => import('./pages/Companies'), () => import('./pages/Agents'),
-      () => import('./pages/Templates'), () => import('./pages/AutoReply'), () => import('./pages/Settings'),
+      () => import('./pages/Templates'), () => import('./pages/AutoReply'), () => import('./pages/KeywordAlert'),
+      () => import('./pages/Settings'),
       () => import('./pages/TCPA'), () => import('./pages/AuditLog'), () => import('./pages/Reporting'),
       () => import('./pages/Integration'), () => import('./pages/Numbers'), () => import('./pages/ForgotPassword'),
     );
@@ -214,6 +216,7 @@ export default function App() {
                     <Route path="people" element={<Navigate to="/app/users" replace />} />
                     <Route path="templates" element={<Templates />} />
                     <Route path="auto-reply" element={<AutoReply />} />
+                    <Route path="keyword-alerts" element={<KeywordAlert />} />
                     <Route path="settings" element={<Settings />} />
                     <Route path="tcpa" element={<TCPA />} />
                     <Route path="audit" element={<AuditLog />} />

@@ -188,6 +188,13 @@ class WebhookController extends Controller
             } catch (\Throwable $e) {
                 Log::warning('AutoReply failed: ' . $e->getMessage());
             }
+            // Keyword Alerts: the admin watchlist — BOTH directions, notify
+            // only, never replies (never throws).
+            try {
+                app(\App\Services\KeywordAlertService::class)->maybeAlert($ev);
+            } catch (\Throwable $e) {
+                Log::warning('KeywordAlert failed: ' . $e->getMessage());
+            }
             // Inbound changed the session list → drop the cached list.
             if (!empty($domain) && !empty($channelUser)) {
                 try { \App\Services\DynalinkService::forgetSessions((string) $domain, (string) $channelUser); } catch (\Throwable $e) {}

@@ -63,6 +63,7 @@ function loadDemo() {
 function saveDemo(s) { localStorage.setItem(LS_KEY, JSON.stringify(s)); }
 let demo = loadDemo();
 if (!demo.autoReplies) { demo.autoReplies = []; demo.autoReplyLogs = []; saveDemo(demo); }
+if (!demo.keywordAlerts) { demo.keywordAlerts = []; saveDemo(demo); }
 if (!demo.agents) {
   demo.agents = [
     { id: 'ag-1', first_name: 'Maria', last_name: 'Santos', tag_color: '#10b981' },
@@ -1319,6 +1320,36 @@ export const api = {
   async deleteAutoReply(id) {
     if (DEMO_MODE) { await delay(150); demo.autoReplies = (demo.autoReplies || []).filter((r) => String(r.id) !== String(id)); saveDemo(demo); return { ok: true }; }
     return (await http.delete(`/api/auto-replies/${id}`)).data;
+  },
+
+  // ---- Keyword Alerts (admin watchlist — notify, never reply) ----
+  async keywordAlerts() {
+    if (DEMO_MODE) { await delay(); return [...(demo.keywordAlerts || [])]; }
+    return (await http.get('/api/keyword-alerts')).data;
+  },
+  async createKeywordAlert(payload) {
+    if (DEMO_MODE) { await delay(); const r = { id: uid('ka'), trigger_count: 0, last_triggered_at: null, ...payload }; demo.keywordAlerts = [...(demo.keywordAlerts || []), r]; saveDemo(demo); return r; }
+    return (await http.post('/api/keyword-alerts', payload)).data;
+  },
+  async updateKeywordAlert(id, payload) {
+    if (DEMO_MODE) { await delay(); demo.keywordAlerts = (demo.keywordAlerts || []).map((r) => (String(r.id) === String(id) ? { ...r, ...payload } : r)); saveDemo(demo); return demo.keywordAlerts.find((r) => String(r.id) === String(id)); }
+    return (await http.put(`/api/keyword-alerts/${id}`, payload)).data;
+  },
+  async deleteKeywordAlert(id) {
+    if (DEMO_MODE) { await delay(150); demo.keywordAlerts = (demo.keywordAlerts || []).filter((r) => String(r.id) !== String(id)); saveDemo(demo); return { ok: true }; }
+    return (await http.delete(`/api/keyword-alerts/${id}`)).data;
+  },
+  async keywordAlertLogs(params = {}) {
+    if (DEMO_MODE) { await delay(); return { unread: 0, items: [] }; }
+    return (await http.get('/api/keyword-alert-logs', { params })).data;
+  },
+  async readKeywordAlertLog(id) {
+    if (DEMO_MODE) { await delay(80); return { ok: true }; }
+    return (await http.post(`/api/keyword-alert-logs/${id}/read`)).data;
+  },
+  async readAllKeywordAlertLogs() {
+    if (DEMO_MODE) { await delay(80); return { ok: true }; }
+    return (await http.post('/api/keyword-alert-logs/read-all')).data;
   },
   async unlockAutoReply(id, password) {
     return (await http.post(`/api/auto-replies/${id}/unlock`, { password })).data;

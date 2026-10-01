@@ -21,6 +21,7 @@ use App\Http\Controllers\WebhookController;
 use App\Http\Controllers\ReportController;
 use App\Http\Controllers\IntegrationController;
 use App\Http\Controllers\AutoReplyController;
+use App\Http\Controllers\KeywordAlertController;
 use App\Http\Controllers\AgentController;
 use App\Http\Controllers\ConversationMetaController;
 use App\Http\Controllers\AgentSelfController;
@@ -229,6 +230,14 @@ Route::post('/auto-replies/{autoReply}/fire', [AutoReplyController::class, 'fire
 // NOTE: explicit parameter name — Laravel would singularize to {auto_reply},
 // which would NOT bind to the $autoReply arguments (update/delete/show/fire).
 Route::apiResource('/auto-replies', AutoReplyController::class, ['parameters' => ['auto-replies' => 'autoReply']])->except(['create', 'edit']);
+
+// ---- Keyword Alerts (admin-only watchlist: notify, never reply) ----
+Route::get('/keyword-alert-logs', [KeywordAlertController::class, 'logs']);
+Route::post('/keyword-alert-logs/read-all', [KeywordAlertController::class, 'readAll']);
+Route::post('/keyword-alert-logs/{log}/read', [KeywordAlertController::class, 'read']);
+// Explicit parameter name — same trap as auto-replies: Laravel would bind
+// {keyword_alert}, NOT the $keywordAlert arguments.
+Route::apiResource('/keyword-alerts', KeywordAlertController::class, ['parameters' => ['keyword-alerts' => 'keywordAlert']])->except(['create', 'edit', 'show']);
 
 // ---- Tenant API tokens + outbound webhooks + push (portal, session auth) ----
 Route::get('/api-tokens', [ApiTokenController::class, 'index']);
