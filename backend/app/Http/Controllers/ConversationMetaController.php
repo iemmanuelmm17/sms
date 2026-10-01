@@ -46,28 +46,54 @@ class ConversationMetaController extends Controller
     public function index(Request $request)
     {
         [$domain, $user] = $this->scope($request);
+        $actor = $this->actor($request);
         try {
-            return response()->json(
-                ConversationMeta::where('domain', $domain)->get()
-                    ->mapWithKeys(fn($m) => [$m->session_id => $this->shape($m)])
-            );
+            $rows = ConversationMeta::where('domain', $domain)->get();
         } catch (QueryException $e) {
             return $this->migrateHint();
         }
+        // Agents only receive metadata for conversations on numbers they can
+        // read (own or shared). Sessions whose number cannot be resolved
+        // locally (inbound-only threads never sent from) stay included: their
+        // ids are opaque provider ids an agent can only have obtained from a
+        // conversation they ARE allowed to see, and filtering them out would
+        // silently drop pins/claims on first-touch threads.
+        if (($actor['role'] ?? '') === 'agent') {
+            $readable = $this->agentReadable($request, $actor);
+            $map = $this->sessionNumbers($domain, $rows->pluck('session_id')->all());
+            $rows = $rows->filter(fn($m) => $this->sessionVisible($map[(string) $m->session_id] ?? [], $readable));
+        }
+        return response()->json($rows->mapWithKeys(fn($m) => [$m->session_id => $this->shape($m)]));
     }
 
     /** PUT /api/conversation-meta/{sessionId} — partial upsert. */
     public function upsert(Request $request, string $sessionId)
     {
         [$domain, $user] = $this->scope($request);
+        // Tenant-scoped existence checks: a global exists:agents,id let an
+        // admin reference another tenant's agent AND turned validation errors
+        // into a cross-tenant id-existence oracle.
         $data = $request->validate([
-            'agent_id'    => 'sometimes|nullable|integer|exists:agents,id',
-            'identity_id' => 'sometimes|nullable|integer|exists:agent_identities,id',
+            'agent_id'    => ['sometimes', 'nullable', 'integer',
+                \Illuminate\Validation\Rule::exists('agents', 'id')->where('domain', $domain)],
+            'identity_id' => ['sometimes', 'nullable', 'integer',
+                \Illuminate\Validation\Rule::exists('agent_identities', 'id')->where('domain', $domain)],
             'pinned'      => 'sometimes|boolean',
             'status'      => 'sometimes|in:active,archived,spam,deleted,queued',
             'important'   => 'sometimes|boolean',
         ]);
         $actor = $this->actor($request);
+
+        // Visibility gate: an agent may only set status/pinned/important (or
+        // claim) conversations on numbers they can read. Unresolved sessions
+        // pass — see index() for why that is the safe default.
+        if (($actor['role'] ?? '') === 'agent') {
+            $map = $this->sessionNumbers($domain, [$sessionId]);
+            $nums = $map[(string) $sessionId] ?? [];
+            if ($nums !== [] && !$this->sessionVisible($nums, $this->agentReadable($request, $actor))) {
+                abort(response()->json(['message' => 'You can only manage conversations on your own or shared numbers.'], 403));
+            }
+        }
 
         // Portal users claim via identity_id (they have no legacy agents row).
         if (($actor['role'] ?? '') === 'agent' && !empty($actor['portal_auth'])) {
@@ -121,6 +147,65 @@ class ConversationMetaController extends Controller
         return response()->json([
             'message' => 'Conversation data unavailable — run "php artisan migrate" inside backend/ and retry.',
         ], 422);
+    }
+
+    /**
+     * Local session → business-number map. Dynalink messagesession-ids are
+     * opaque; SentMessageLog is the only server-side link we keep (it records
+     * from_number + session_id for every send). Inbound-only sessions resolve
+     * to nothing and are treated as "unresolved" by the callers.
+     *
+     * @return array<string, string[]>  sessionId => list of digit strings
+     */
+    protected function sessionNumbers(string $domain, array $sessionIds): array
+    {
+        $out = [];
+        $ids = array_values(array_unique(array_filter(array_map('strval', $sessionIds))));
+        if ($ids === []) return $out;
+        try {
+            $rows = \App\Models\SentMessageLog::where('domain', $domain)
+                ->whereIn('session_id', $ids)
+                ->whereNotNull('from_number')
+                ->get(['session_id', 'from_number']);
+            foreach ($rows as $r) {
+                $d = preg_replace('/\D/', '', (string) $r->from_number);
+                if ($d === '' || $r->session_id === null) continue;
+                $out[(string) $r->session_id][$d] = true;
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('conversation-meta: session number map failed', ['error' => (string) $e]);
+        }
+        return array_map('array_keys', $out);
+    }
+
+    /** The agent's readable numbers — portal grants, or legacy assignment. */
+    protected function agentReadable(Request $r, array $actor): array
+    {
+        try {
+            if (!empty($actor['portal_auth'])) {
+                $ext = $actor['ext'] ?? $actor['user'];
+                return app(\App\Services\AgentAccess::class)
+                    ->readableNumbers((string) $actor['domain'], (string) $ext, $this->dtoken($r));
+            }
+            $agent = \App\Models\Agent::find($actor['agent_id'] ?? null);
+            return $agent ? $agent->assignedNumbers() : [];
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('conversation-meta: readable numbers failed (fail closed)', ['error' => (string) $e]);
+            return [];
+        }
+    }
+
+    /** True when no numbers resolved, or any resolved number is readable (10/11-digit tolerant). */
+    protected function sessionVisible(array $nums, array $readable): bool
+    {
+        if ($nums === []) return true;
+        foreach ($nums as $n) {
+            $cands = [(string) $n];
+            if (strlen($n) === 11 && str_starts_with($n, '1')) $cands[] = substr($n, 1);
+            if (strlen($n) === 10) $cands[] = '1' . $n;
+            foreach ($cands as $c) { if (in_array($c, $readable, true)) return true; }
+        }
+        return false;
     }
 
     protected function shape(ConversationMeta $m): array

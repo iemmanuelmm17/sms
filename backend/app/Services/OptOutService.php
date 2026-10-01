@@ -31,8 +31,13 @@ use App\Models\OptEvent;
  */
 class OptOutService
 {
-    public const STOP_WORDS = ['stop', 'stopall', 'unsubscribe', 'unsubscribed', 'cancel', 'end', 'quit'];
-    public const START_WORDS = ['start', 'subscribed', 'yes', 'unstop'];
+    // Exact-match revocation keywords. Ambiguous everyday words (cancel, end,
+    // quit) ONLY ever match exactly; the strong words also match at the start
+    // of a short message (see stopWord()).
+    public const STOP_WORDS = ['stop', 'stopall', 'stop all', 'unsubscribe', 'unsubscribed', 'cancel', 'end', 'quit', 'revoke', 'opt out', 'optout', 'opt-out'];
+    // Re-subscription stays EXPLICIT (FCC-safe): a plain "yes" — which people
+    // text to answer unrelated questions — no longer lifts a do-not-contact.
+    public const START_WORDS = ['start', 'subscribed', 'unstop', 'resubscribe'];
 
     public static function digits(string $phone): string
     {
@@ -45,6 +50,16 @@ class OptOutService
     }
 
     protected static array $memo = [];
+
+    /**
+     * Drop every cached DNC list. Long-lived queue workers call this between
+     * jobs (Queue::looping in AppServiceProvider) so a STOP recorded in the
+     * web process can never go stale inside a worker.
+     */
+    public static function flushMemo(): void
+    {
+        static::$memo = [];
+    }
 
     /** One-shot per process: has the opt_outs migration run? */
     protected static ?bool $dbReady = null;
@@ -353,11 +368,30 @@ class OptOutService
         }
     }
 
-    /** Exact keyword match (case-insensitive, edge punctuation ignored). */
+    /**
+     * Revocation detection (case-insensitive, edge punctuation ignored).
+     *
+     * 1. Exact match against STOP_WORDS (fast path, historic behavior).
+     * 2. BALANCED FCC-2024 matching ("any reasonable means"): a message that
+     *    STARTS with a strong revocation word and stays short (<=48 chars or
+     *    <=8 words) counts — "stop texting me", "please unsubscribe",
+     *    "opt out of alerts". Everyday-phrase guards ("stop by my office",
+     *    "stop light", "stop watching") are excluded, and the ambiguous words
+     *    (cancel/end/quit) never match by prefix — "cancel my appointment"
+     *    must not opt anyone out.
+     */
     public static function stopWord(?string $text): ?string
     {
         $t = strtolower(trim((string) $text, " \t\n\r\0\x0B!?.\"'"));
-        return in_array($t, self::STOP_WORDS, true) ? $t : null;
+        if ($t === '') return null;
+        if (in_array($t, self::STOP_WORDS, true)) return $t;
+        $core = preg_replace('/^(please|kindly|pls|plz)\s+/u', '', $t);
+        if (!preg_match('/^(stop|stopall|unsubscribe|revoke|opt[\s_-]?out)\b/u', $core, $m)) return null;
+        $rest = preg_replace('/^(stop|stopall|unsubscribe|revoke|opt[\s_-]?out)\b\s*/u', '', $core);
+        if (preg_match('/^(by|over|light|sign|watch|gap|distance)\b/u', $rest)) return null;
+        if (mb_strlen($core) > 48 && str_word_count($core) > 8) return null;
+        $kw = preg_replace('/\s+/u', ' ', str_replace(['-', '_'], ' ', strtolower($m[1])));
+        return $kw;
     }
 
     public static function startWord(?string $text): ?string

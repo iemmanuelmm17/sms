@@ -154,10 +154,16 @@ npm run dev        # DEMO mode by default: no backend needed
 
 - **1-by-1 sends**: bulk + scheduler fan out to individual messages per
   contact, staggered ~2s.
-- **TCPA**: STOP/STOPALL/UNSUBSCRIBE/CANCEL/END/QUIT opt out (DNC list gates
-  every send path — app, API, scheduler, auto-reply); START/YES/UNSTOP opt
-  back in; every event is journaled in `opt_events` and DNC state lives in the
-  `opt_outs` DB table (JSON mirror kept as cold backup).
+- **TCPA**: exact keywords (STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT,
+  REVOKE, OPT OUT) opt out, plus balanced FCC-2024 matching — a short message
+  STARTING with a strong revocation word ("stop texting me", "please
+  unsubscribe") counts, with guards for everyday phrases ("stop by my
+  office"). Re-subscription is explicit: START/SUBSCRIBED/UNSTOP/RESUBSCRIBE
+  (a plain "yes" no longer lifts a do-not-contact). The DNC list gates every
+  send path (app, API, scheduler, auto-reply), STOP recording runs
+  unconditionally with retries before any dedupe lock, queue workers flush
+  their DNC cache between jobs, state lives in the `opt_outs` DB table with
+  every event journaled in `opt_events` (JSON mirror kept as cold backup).
 - **MMS provider constraint**: picture+text cannot ride one MMS — sends are
   split into an image-only MMS leg plus a text SMS leg; immediate sends use
   the sanitized uploaded file name as the MMS caption.

@@ -31,8 +31,9 @@ class AutoReplyController extends Controller
      * dead weight. Rejected up front instead.
      */
     public const RESERVED_KEYWORDS = [
-        'stop', 'stopall', 'unsubscribe', 'unsubscribed', 'cancel', 'end', 'quit',
-        'start', 'subscribed', 'yes', 'unstop',
+        'stop', 'stopall', 'stop all', 'unsubscribe', 'unsubscribed', 'cancel', 'end', 'quit',
+        'revoke', 'opt out', 'optout', 'opt-out',
+        'start', 'subscribed', 'unstop', 'resubscribe',
     ];
 
     /** 422 unless every keyword is outside the TCPA-reserved set. */

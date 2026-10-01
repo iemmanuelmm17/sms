@@ -90,7 +90,14 @@ class AutoReplyService
 
             [$domain, $user] = $this->resolveUser($event);
             if (!$domain || !$user) {
-                Log::info('AutoReply: ignored (event carries no domain/user to act for)');
+                // Unattributable inbound: no tenant to record a STOP for, no
+                // room to reply from. Never silent — ops counter (surfaced on
+                // GET /api/ops/health) plus a loud, greppable warning.
+                try { Cache::increment('ops:unattributed-inbound'); } catch (\Throwable $e) {}
+                Log::warning('AutoReply: UNATTRIBUTED inbound dropped (no terminating-user-id / domain+user — STOP handling impossible for this event)', [
+                    'keys' => array_keys($event),
+                    'remote_hash' => substr(hash('sha256', (string) ($event['remote'] ?? $event['from_num'] ?? '')), 0, 12),
+                ]);
                 return;
             }
             // Accept field-name variants — Dynalink delivers TWO event shapes
@@ -149,6 +156,44 @@ class AutoReplyService
                 : self::TWIN_WINDOW_SEC;
             $dedupeKey = self::dedupeKey($domain, $user, $from, $text);
             $fromHash = substr(hash('sha256', (string) $from), 0, 12);
+
+            // TCPA STOP/START: recorded UNCONDITIONALLY — before the dedupe
+            // claim lock, in its own try/catch, with retries. Honoring a
+            // revocation must never depend on the reply pipeline: if optOut()
+            // threw AFTER the claim lock was taken, the twin event was blocked
+            // by the lock and the STOP was silently lost. optOut()/remove()
+            // are idempotent, so recording on both twins is safe.
+            $stopWord = OptOutService::stopWord($text);
+            $startWord = $stopWord ? null : OptOutService::startWord($text);
+            $optKeyword = $stopWord ?? $startWord;
+            $stateChanged = false;
+            if ($optKeyword) {
+                $stopNumber = (string) ($event['dialed'] ?? $event['smsani'] ?? '');
+                $recorded = false;
+                $lastErr = null;
+                for ($attempt = 1; $attempt <= 3 && !$recorded; $attempt++) {
+                    try {
+                        if ($stopWord) {
+                            // Scope the opt-out to the business number they replied to.
+                            $stateChanged = $this->optouts->optOut($domain, $from, 'stop-keyword', $stopWord, $stopNumber !== '' ? $stopNumber : null);
+                        } else {
+                            $stateChanged = $this->optouts->remove($domain, $from, $startWord);
+                        }
+                        $recorded = true;
+                    } catch (\Throwable $e) {
+                        $lastErr = $e;
+                        usleep(50000);
+                    }
+                }
+                if ($recorded) {
+                    DataChanged::send($domain, $user, 'optouts', 'saved');
+                    DataChanged::send($domain, $user, 'opt-events', 'saved');
+                    Log::info('AutoReply: STOP/START processed', ['from_hash' => $fromHash, 'word' => $optKeyword, 'changed' => $stateChanged]);
+                } else {
+                    Log::error('AutoReply: TCPA RECORDING FAILED after 3 attempts — add the number under Opt-outs manually', ['from_hash' => $fromHash, 'word' => $optKeyword, 'error' => (string) $lastErr]);
+                }
+            }
+
             try {
                 if (!Cache::lock($dedupeKey . ':claim', $dedupeSec)->get()) {
                     Log::info("AutoReply: skipped (duplicate of the same text from the same sender within {$dedupeSec}s — twin event or rapid re-test)", ['from_hash' => $fromHash]);
@@ -162,31 +207,10 @@ class AutoReplyService
             }
             // Per-sender cooldown (tenant setting, default 5 min): at most one
             // auto-reply per window no matter how the text varies. Gates the
-            // REPLY only — STOP/START bookkeeping below always runs.
+            // REPLY only — STOP/START bookkeeping above (pre-lock) always runs.
             $cdKey = "autoreply:cooldown:{$domain}:{$user}:{$from}";
             $inCooldown = $cooldownMin > 0 && Cache::has($cdKey);
             Log::info('AutoReply: guards passed', ['from_hash' => $fromHash, 'text_len' => strlen($text)]);
-
-            // TCPA STOP/START: exact keyword match does the bookkeeping here
-            // (opt-out/in + history event). The reply itself comes from the two
-            // DEFAULT auto-reply actions below — custom rules never answer STOP.
-            $stopWord = OptOutService::stopWord($text);
-            $startWord = $stopWord ? null : OptOutService::startWord($text);
-            $optKeyword = $stopWord ?? $startWord;
-            $stateChanged = false;
-            if ($optKeyword) {
-                if ($stopWord) {
-                    // Scope the opt-out to the business number they replied to.
-                    $stopNumber = (string) ($event['dialed'] ?? $event['smsani'] ?? '');
-                    $stateChanged = $this->optouts->optOut($domain, $from, 'stop-keyword', $stopWord, $stopNumber !== '' ? $stopNumber : null);
-                } else {
-                    $stateChanged = $this->optouts->remove($domain, $from, $startWord);
-                }
-                DataChanged::send($domain, $user, 'optouts', 'saved');
-                DataChanged::send($domain, $user, 'opt-events', 'saved');
-                Log::info('AutoReply: STOP/START processed', ['from_hash' => substr(hash('sha256', (string) $from), 0, 12), 'word' => $optKeyword]);
-            }
-
 
             // Integration-owned numbers: the provider dialog answers instead
             // of these rules. STOP/START texts (above) always stay on this
@@ -203,10 +227,19 @@ class AutoReplyService
             Log::info('AutoReply: rules loaded', ['count' => $rules->count()]);
             if ($rules->isEmpty()) return;
 
-            $matches = $this->findMatches($rules, $text);
             if ($optKeyword) {
-                // STOP/START is answered ONLY by the default actions.
-                $matches = array_values(array_filter($matches, fn($m) => (bool) $m['rule']->is_default));
+                // STOP/START is answered ONLY by the default compliance action —
+                // picked by default_key instead of keyword matching: the default
+                // rules match exact words, but a balanced revocation like
+                // "stop texting me" (or an exact CANCEL/REVOKE) must still get
+                // its confirmation text.
+                $wantKey = $stopWord ? 'opt_out' : 'opt_in';
+                $matches = array_values(array_map(
+                    fn($r) => ['rule' => $r, 'keyword' => strtoupper((string) $optKeyword)],
+                    $rules->filter(fn($r) => (string) ($r->default_key ?? '') === $wantKey)->all()
+                ));
+            } else {
+                $matches = $this->findMatches($rules, $text);
             }
             // Line scope: defaults fire everywhere (compliance); admin rules
             // fire on the tenant main line only; agent rules fire on their

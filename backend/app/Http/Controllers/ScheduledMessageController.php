@@ -39,6 +39,8 @@ class ScheduledMessageController extends Controller
         $seen = null;
         try { $seen = \Illuminate\Support\Facades\Cache::get('ops:queue-heartbeat'); } catch (\Throwable $e) {}
         $seenAt = $seen ? strtotime((string) $seen) : 0;
+        $unattributed = 0;
+        try { $unattributed = (int) \Illuminate\Support\Facades\Cache::get('ops:unattributed-inbound', 0); } catch (\Throwable $e) {}
         $q = ScheduledMessage::where('domain', $domain)->where('user', $user)
             ->where('status', 'pending')->where('send_at', '<', now());
         if ($actor['role'] === 'agent') $q->where('created_by', 'agent:' . $actor['agent_id']);
@@ -47,6 +49,9 @@ class ScheduledMessageController extends Controller
             'worker_seen_at' => $seen,
             'worker_seen_ago_s' => $seenAt > 0 ? max(0, time() - $seenAt) : null,
             'overdue' => $q->count(),
+            // Inbound webhook events that carried no tenant attribution — a
+            // STOP in that shape could not be recorded, so this must stay ~0.
+            'unattributed_inbound' => $unattributed,
         ]);
     }
 

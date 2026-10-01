@@ -75,6 +75,14 @@ class AppServiceProvider extends ServiceProvider
             ]);
         });
 
+        // ---- Stale-cache guard for long-lived queue workers ----------------
+        // OptOutService memoizes the DNC list per process. queue:work runs
+        // forever, so without this a STOP recorded in the web process could
+        // stay invisible to scheduled/recurring sends until worker restart.
+        \Illuminate\Support\Facades\Queue::looping(function () {
+            \App\Services\OptOutService::flushMemo();
+        });
+
         // Superadmin realtime overrides (Super → Settings → Realtime broadcast)
         // take precedence over .env so the broadcast host/port/key can move
         // without redeploying config. Fail-open: Settings::get returns null

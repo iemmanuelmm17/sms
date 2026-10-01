@@ -26,7 +26,11 @@ class AuditLog extends Model
                 'created_at' => now(),
             ]);
         } catch (\Throwable $e) {
-            // Auditing must never break the request it observes.
+            // Auditing must never break the request it observes — but losing a
+            // security event must not be invisible either (greppable prefix).
+            \Illuminate\Support\Facades\Log::error('audit:write-failed', [
+                'action' => $action, 'domain' => $domain, 'error' => (string) $e,
+            ]);
         }
     }
 }
