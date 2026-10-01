@@ -66,6 +66,7 @@ class MessageController extends Controller
             'data'        => 'sometimes|string',
             'mime-type'   => 'sometimes|string',
             'size'        => 'sometimes|nullable|integer|min:0|max:1048576',
+            'media-name'  => 'sometimes|nullable|string|max:255',   // uploaded file's name (MMS caption)
         ]);
         $data['message'] = (string) ($data['message'] ?? '');
 
@@ -84,7 +85,7 @@ class MessageController extends Controller
             'destination' => $data['destination'],
             'from-number' => $data['from-number'],
         ];
-        foreach (['data', 'mime-type', 'size'] as $k) {
+        foreach (['data', 'mime-type', 'size', 'media-name'] as $k) {
             if (isset($data[$k])) $payload[$k] = $data[$k];
         }
 
@@ -104,6 +105,9 @@ class MessageController extends Controller
             if ($status < 200 || $status >= 300) break;
         }
         if ($status >= 200 && $status < 300) $body = $firstBody;
+        // The media twin's text is the caption (uploaded file's name).
+        $mediaText = (($payload['type'] ?? '') === 'mms' && isset($legs[0]['message']))
+            ? (string) $legs[0]['message'] : null;
 
         if ($status >= 200 && $status < 300) {
             DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', null, [
@@ -111,6 +115,7 @@ class MessageController extends Controller
                 'text' => (string) $data['message'],
                 // Split MMS: the text rides its own SMS leg — pin THAT twin.
                 'type' => count($legs) > 1 ? 'sms' : (string) ($data['type'] ?? 'sms'),
+                'media_text' => $mediaText,
             ]);
             \App\Services\OnboardingService::markAgentStep($s, 'first_send');
             SentMessageLog::record([
@@ -128,10 +133,13 @@ class MessageController extends Controller
         // Echo the FINAL body so the sending window can fingerprint what the
         // provider actually received (variables may have been resolved).
         if ($status >= 200 && $status < 300 && is_array($body)) {
-            $body += [
-                'sent-text' => (string) $data['message'],
+            $aug = [
+                // Image-only MMS: the twin's text IS the caption — echo that.
+                'sent-text' => ((string) $data['message']) !== '' ? (string) $data['message'] : (string) $mediaText,
                 'sent-type' => count($legs) > 1 ? 'sms' : (string) ($payload['type'] ?? 'sms'),
             ];
+            if (count($legs) > 1 && $mediaText !== null) $aug['sent-media-text'] = $mediaText;
+            $body += $aug;
         }
         return response()->json($body, $status);
     }
@@ -157,6 +165,7 @@ class MessageController extends Controller
             'data'         => 'sometimes|string',
             'mime-type'    => 'sometimes|string',
             'size'         => 'sometimes|nullable|integer|min:0|max:1048576',
+            'media-name'   => 'sometimes|nullable|string|max:255',   // uploaded file's name (MMS caption)
         ]);
         $data['message'] = (string) ($data['message'] ?? '');
 
@@ -198,7 +207,7 @@ class MessageController extends Controller
         }
 
         $mms = [];
-        foreach (['data', 'mime-type', 'size'] as $k) {
+        foreach (['data', 'mime-type', 'size', 'media-name'] as $k) {
             if (isset($data[$k])) $mms[$k] = $data[$k];
         }
 
@@ -222,11 +231,14 @@ class MessageController extends Controller
                 if ($status < 200 || $status >= 300) break;
             }
             if ($status >= 200 && $status < 300) $body = $firstBody;
+            $mediaText = ((($data['type'] ?? '') === 'mms') && isset($legs[0]['message']))
+                ? (string) $legs[0]['message'] : null;
             if ($status >= 200 && $status < 300) {
                 DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', null, [
                     'remote' => $dests[0],
                     'text' => (string) $data['message'],
                     'type' => count($legs) > 1 ? 'sms' : (string) ($data['type'] ?? 'sms'),
+                    'media_text' => $mediaText,
                 ]);
                 \App\Services\OnboardingService::markAgentStep($s, 'first_send');
                 SentMessageLog::record([
@@ -273,12 +285,15 @@ class MessageController extends Controller
             if ($status < 200 || $status >= 300) break;
         }
         if ($status >= 200 && $status < 300) $body = $firstBody;
+        $mediaText = ((($data['type'] ?? '') === 'mms') && isset($legs[0]['message']))
+            ? (string) $legs[0]['message'] : null;
 
         if ($status >= 200 && $status < 300) {
             DataChanged::send($s['domain'], $s['user'], 'sessions', 'message-sent', null, [
                 'remotes' => $dests,
                 'text' => (string) $data['message'],
                 'type' => count($legs) > 1 ? 'sms' : (string) ($data['type'] ?? 'sms'),
+                'media_text' => $mediaText,
             ]);
             \App\Services\OnboardingService::markAgentStep($s, 'first_send');
             foreach ($dests as $d) {

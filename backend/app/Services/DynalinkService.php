@@ -418,9 +418,14 @@ class DynalinkService
         if (($payload['type'] ?? '') !== 'mms' || empty($payload['data'])) {
             return [$payload];
         }
-        $media = $payload;
-        unset($media['message']);           // image-only: no text may ride along
         $text = trim((string) ($payload['message'] ?? ''));
+        // Dynalink REJECTS a send whose 'message' field is missing (HTTP 400
+        // "Please include field message"), but picture + text still cannot
+        // share one MMS — so the media leg's message is the uploaded file's
+        // (sanitized) NAME, and the user's text rides the separate SMS leg.
+        $media = $payload;
+        unset($media['media-name']);
+        $media['message'] = self::safeMediaName((string) ($payload['media-name'] ?? ''));
         if ($text === '') return [$media];
         $sms = [
             'type'        => 'sms',
@@ -429,6 +434,22 @@ class DynalinkService
         ];
         if (isset($payload['destination'])) $sms['destination'] = $payload['destination'];
         return [$media, $sms];
+    }
+
+    /**
+     * Sanitize an uploaded file's name for use as an MMS caption: strips any
+     * path (browsers hand over "C:\fakepath\…"), control/format characters
+     * and stray whitespace, caps the length, and NEVER returns '' — Dynalink
+     * requires a non-empty message field on every send.
+     */
+    public static function safeMediaName(string $name): string
+    {
+        $name = basename(str_replace(chr(92), '/', trim($name)));   // chr(92) = backslash: browsers send "C:\fakepath\name.jpg"
+        $clean = preg_replace('/\p{C}+/u', ' ', $name);   // control/format chars
+        if ($clean === null) return 'Photo';               // invalid UTF-8
+        $clean = trim(preg_replace('/\s+/', ' ', $clean) ?? '');
+        $clean = mb_substr($clean, 0, 100);
+        return $clean !== '' ? $clean : 'Photo';
     }
 
     /* ------------------------------------------------------------------

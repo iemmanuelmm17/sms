@@ -664,6 +664,9 @@ export default function Messages() {
       // refetched twin renders as Delivered here immediately instead of
       // sitting at the provider's parked 'sending' for 5 minutes.
       if (payload?.text) confirmSent(payload.text, payload.type || 'sms');
+      // Image-only / split MMS: the media twin's text is the caption (the
+      // uploaded file's name) — pin it too, else it parks at 'sending'.
+      if (payload?.media_text) confirmSent(payload.media_text, 'mms');
       syncSessions(remotes);
       const openRemote = active ? digits(active['messagesession-remote']) : '';
       if (activeId && (String(sid) === String(activeId) || (openRemote && remotes.includes(openRemote)))) {
@@ -1073,7 +1076,7 @@ export default function Messages() {
         name: `Reply to ${active['messagesession-remote']}`,
         message: draft,   // image-only MMS: no fake caption — it would go out as a separate SMS
         'from-number': fromNumber,
-        ...(attach ? { type: 'mms', data: attach.base64, 'mime-type': attach.mime, size: attach.size } : { type: 'sms' }),
+        ...(attach ? { type: 'mms', data: attach.base64, 'mime-type': attach.mime, size: attach.size, 'media-name': attach.name } : { type: 'sms' }),
         send_at: zonedTimeToUtc(schedAt, tz).toISOString(),
         timezone: tz,
         targets: { contacts: [{ phone: String(active['messagesession-remote']), 'name-first-name': activeContact?.['name-first-name'] || '', 'name-last-name': activeContact?.['name-last-name'] || '' }] },
@@ -1139,7 +1142,7 @@ export default function Messages() {
       message: withSender(resolveVars(base, activeContact, companyName, myName), senderName),
       'from-number': fromNumber,
       destination: String(active['messagesession-remote']),
-      ...(attach ? { type: 'mms', data: attach.base64, 'mime-type': attach.mime, size: attach.size } : { type: 'sms' }),
+      ...(attach ? { type: 'mms', data: attach.base64, 'mime-type': attach.mime, size: attach.size, 'media-name': attach.name } : { type: 'sms' }),
     };
     // Undo-send (Settings → delay 1-5s, or off for instant send).
     const undo = getUndoSend();
@@ -1184,7 +1187,7 @@ export default function Messages() {
     // Optimistic bubble: Sending -> Delivered, or Sending failed + Retry.
     const tmpId = retryId || `pending-${Date.now()}`;
     if (!retryId) {
-      setMsgs((p) => sortOldestFirst([...p, { id: tmpId, timestamp: new Date().toISOString().slice(0, 19).replace('T', ' '), type: payload.type, direction: 'term', dialed: active['messagesession-remote'], text: payload.message, status: 'sending', 'from-number': Number(digits(fromNumber)), 'messagesession-id': activeId, _payload: payload }]));
+      setMsgs((p) => sortOldestFirst([...p, { id: tmpId, timestamp: new Date().toISOString().slice(0, 19).replace('T', ' '), type: payload.type, direction: 'term', dialed: active['messagesession-remote'], text: payload.message || payload['media-name'] || '', status: 'sending', 'from-number': Number(digits(fromNumber)), 'messagesession-id': activeId, _payload: payload }]));
     } else {
       setMsgs((p) => p.map((m) => (m.id === tmpId ? { ...m, status: 'sending', _error: null } : m)));
     }
@@ -1211,7 +1214,7 @@ export default function Messages() {
       // is pinned so later reloads can't drag it back to 'sending'.
       const final = sent.id
         ? { ...sent, status: 'delivered' }
-        : { id: `m-${Date.now()}`, timestamp: new Date().toISOString().slice(0, 19).replace('T', ' '), type: payload.type, direction: 'term', dialed: active['messagesession-remote'], text: payload.message, status: 'delivered', 'from-number': Number(digits(fromNumber)), 'messagesession-id': activeId, _local: true };
+        : { id: `m-${Date.now()}`, timestamp: new Date().toISOString().slice(0, 19).replace('T', ' '), type: payload.type, direction: 'term', dialed: active['messagesession-remote'], text: payload.message || (sent && sent['sent-text']) || payload['media-name'] || '', status: 'delivered', 'from-number': Number(digits(fromNumber)), 'messagesession-id': activeId, _local: true };
       confirmDelivered(final.id);
       // The server may rewrite the body, so fingerprint BOTH what we sent and
       // what it echoed back.
@@ -1223,6 +1226,10 @@ export default function Messages() {
       // 'sending' for up to 5 minutes.
       if (sent && typeof sent['sent-text'] === 'string') {
         confirmSent(sent['sent-text'], sent['sent-type'] || payload.type);
+      }
+      // Split MMS: the media twin's text is the caption — pin it too.
+      if (sent && typeof sent['sent-media-text'] === 'string') {
+        confirmSent(sent['sent-media-text'], 'mms');
       }
 
       if (crossNumber) {
@@ -1277,7 +1284,11 @@ export default function Messages() {
       return;
     }
     const payload = {
+      // Dynalink requires a 'message' on every send but cannot carry text
+      // WITH the picture — the backend captions the image leg with this name
+      // (sanitized server-side) and keeps typed text as a separate SMS.
       message: '',
+      'media-name': media.name,
       'from-number': fromNumber,
       destination: String(active['messagesession-remote']),
       type: 'mms', data: media.base64, 'mime-type': media.mime, size: media.size,
@@ -2215,7 +2226,7 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
         message: msg,   // image-only MMS: no fake caption — it would go out as a separate SMS
         'from-number': from,
         tcpa_script: tcpaFooter,
-        ...(attach ? { type: 'mms', data: attach.base64, 'mime-type': attach.mime, size: attach.size } : { type: 'sms' }),
+        ...(attach ? { type: 'mms', data: attach.base64, 'mime-type': attach.mime, size: attach.size, 'media-name': attach.name } : { type: 'sms' }),
         send_at: zonedTimeToUtc(schedAt, tz).toISOString(),
         timezone: tz,
         targets: { contacts: destinations.map((d) => ({ phone: d })) },
@@ -2239,7 +2250,7 @@ function NewMessageModal({ contacts, numbers, defaultFrom, templates, contactByP
           destinations,
           'from-number': from,
           tcpa_script: tcpaFooter,
-          ...(attach ? { type: 'mms', data: attach.base64, 'mime-type': attach.mime, size: attach.size } : { type: 'sms' }),
+          ...(attach ? { type: 'mms', data: attach.base64, 'mime-type': attach.mime, size: attach.size, 'media-name': attach.name } : { type: 'sms' }),
         });
       if (res && res.status >= 200 && res.status < 300) {
         const skipped = res.skipped || [];

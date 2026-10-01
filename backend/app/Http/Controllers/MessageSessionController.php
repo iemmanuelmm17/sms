@@ -441,6 +441,7 @@ class MessageSessionController extends Controller
             'data'         => 'sometimes|string',       // base64 for MMS
             'mime-type'    => 'sometimes|string',       // image/png|jpg|gif...
             'size'         => 'sometimes',
+            'media-name'   => 'sometimes|nullable|string|max:255',   // uploaded file's name (MMS caption)
         ]);
         $data['message'] = (string) ($data['message'] ?? '');
 
@@ -474,7 +475,7 @@ class MessageSessionController extends Controller
             'from-number' => $data['from-number'],
         ];
         if (isset($data['destination'])) $payload['destination'] = $data['destination'];
-        foreach (['data', 'mime-type', 'size'] as $k) {
+        foreach (['data', 'mime-type', 'size', 'media-name'] as $k) {
             if (isset($data[$k])) $payload[$k] = $data[$k];
         }
 
@@ -493,6 +494,10 @@ class MessageSessionController extends Controller
             if ($status < 200 || $status >= 300) break;
         }
         if ($status >= 200 && $status < 300) $body = $firstBody;
+        // The media twin's text is the caption (uploaded file's name) — other
+        // windows pin it with this, otherwise it parks at 'sending'.
+        $mediaText = (($payload['type'] ?? '') === 'mms' && isset($legs[0]['message']))
+            ? (string) $legs[0]['message'] : null;
 
         if ($status >= 200 && $status < 300) {
             if (!empty($s['portal_auth'])) {
@@ -514,6 +519,7 @@ class MessageSessionController extends Controller
                 'text' => (string) $data['message'],
                 // Split MMS: the text rides its own SMS leg — pin THAT twin.
                 'type' => count($legs) > 1 ? 'sms' : (string) ($payload['type'] ?? 'sms'),
+                'media_text' => $mediaText,
             ]);
             \App\Services\OnboardingService::markAgentStep($s, 'first_send');
             $toDigits = preg_replace('/\D/', '', (string) ($check[0] ?? ''));
@@ -536,10 +542,14 @@ class MessageSessionController extends Controller
         // received — otherwise the refetched twin of a rewritten message
         // never matches and parks at 'sending' for up to 5 minutes.
         if ($status >= 200 && $status < 300 && is_array($body)) {
-            $body += [
-                'sent-text' => (string) $data['message'],
+            $aug = [
+                // Image-only MMS: the twin's text IS the caption — echo that,
+                // so the sending window pins the right fingerprint.
+                'sent-text' => ((string) $data['message']) !== '' ? (string) $data['message'] : (string) $mediaText,
                 'sent-type' => count($legs) > 1 ? 'sms' : (string) ($payload['type'] ?? 'sms'),
             ];
+            if (count($legs) > 1 && $mediaText !== null) $aug['sent-media-text'] = $mediaText;
+            $body += $aug;
         }
         return response()->json($body, $status);
     }
