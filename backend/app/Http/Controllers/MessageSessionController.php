@@ -392,33 +392,137 @@ class MessageSessionController extends Controller
         $this->assertSessionVisible($request, $id);
         return response()->json($this->normalizeStaleStatuses(
             $this->dynalink->sessionMessages($this->dtoken(request()), $s['domain'],
-                $this->ownerForSession($request, $id), $id)
+                $this->ownerForSession($request, $id), $id),
+            $s['domain'],
+            $id
         ));
     }
 
     /**
      * The provider parks outbound history at 'sending'/'scheduled' forever —
      * delivery receipts only arrive by webhook, which a LAN box never gets.
-     * Anything outbound older than 2 minutes demonstrably went out (sends are
-     * synchronous 2xx; this is the same rule the web client applied locally);
-     * normalizing here fixes it once for every client instead of per-render.
-     * Windows that were OPEN at send time pin the twin instantly via the
-     * message-sent broadcast — this covers windows opened afterwards.
+     * A successful local send-log confirms MMS immediately even though the
+     * provider may leave history parked at "sending"; other old outbound rows
+     * normalize to delivered after 2 minutes. This also covers windows opened
+     * after the send, where the live broadcast cannot pin the history twin.
      */
-    protected function normalizeStaleStatuses(array $list): array
+    protected function normalizeStaleStatuses(array $list, string $domain, string $sessionId): array
     {
+        $hasPendingMms = false;
+        foreach ($list as $message) {
+            if (!is_array($message)) continue;
+            $status = strtolower(trim((string) ($message['status'] ?? '')));
+            if (($message['direction'] ?? '') === 'term'
+                && strtolower(trim((string) ($message['type'] ?? ''))) === 'mms'
+                && in_array($status, ['sending', 'pending', 'queued', 'scheduled'], true)) {
+                $hasPendingMms = true;
+                break;
+            }
+        }
+
+        // Dynalink's MMS POST can return 202 Accepted without a message id,
+        // and provider history may keep the corresponding row at "sending".
+        // A successful send-log row is our durable confirmation that the API
+        // accepted the MMS; use it when provider timestamps/statuses lag.
+        $recentMmsSends = [];
+        if ($hasPendingMms) {
+            try {
+                $recentMmsSends = SentMessageLog::query()
+                    ->where('domain', $domain)
+                    ->where('type', 'mms')
+                    ->where('sent_at', '>=', now()->subMinutes(30))
+                    ->orderByDesc('sent_at')
+                    ->limit(500)
+                    ->get(['session_id', 'from_number', 'to_number', 'sent_at'])
+                    ->all();
+            } catch (\Throwable $e) {
+                // Status display must still work if reporting storage is down;
+                // the age-based normalization below remains the fallback.
+            }
+        }
+
         foreach ($list as &$m) {
             if (!is_array($m) || ($m['direction'] ?? '') !== 'term') continue;
-            if (!preg_match('/^(sending|pending|queued|scheduled)$/i', (string) ($m['status'] ?? ''))) continue;
-            try {
-                $ts = \Illuminate\Support\Carbon::parse((string) ($m['timestamp'] ?? ''), 'UTC');
-            } catch (\Throwable $e) {
-                continue; // unparseable timestamp — leave the status alone
+            $status = strtolower(trim((string) ($m['status'] ?? '')));
+            if (!in_array($status, ['sending', 'pending', 'queued', 'scheduled'], true)) continue;
+
+            $isMms = strtolower(trim((string) ($m['type'] ?? ''))) === 'mms';
+            $ts = null;
+            $rawTs = $m['timestamp'] ?? $m['time'] ?? $m['created_at'] ?? null;
+            if (is_scalar($rawTs) && trim((string) $rawTs) !== '') {
+                try {
+                    $ts = \Illuminate\Support\Carbon::parse((string) $rawTs, 'UTC');
+                } catch (\Throwable $e) {
+                    // If the provider's timestamp format changes, try the
+                    // successful-send record below rather than leaving MMS
+                    // parked at "sending" indefinitely.
+                }
             }
-            if ($ts->lt(now()->subMinutes(2))) $m['status'] = 'delivered';
+
+            if ($isMms && $recentMmsSends !== []
+                && $this->hasSuccessfulMmsSend($m, $recentMmsSends, $sessionId, $ts)) {
+                $m['status'] = 'delivered';
+                continue;
+            }
+
+            if ($ts && $ts->lt(now()->subMinutes(2))) $m['status'] = 'delivered';
         }
         unset($m);
         return $list;
+    }
+
+    /**
+     * Match a parked MMS row to a successful send-log row. A matching session
+     * id is strongest; new-message sends sometimes have no provider session id
+     * in their 202 response, so compare the from/to pair as a fallback.
+     */
+    protected function hasSuccessfulMmsSend(array $message, array $logs, string $sessionId, $messageTs): bool
+    {
+        $msgSession = (string) ($message['messagesession-id'] ?? $message['session_id'] ?? $sessionId);
+        $from = $this->statusPhoneDigits($message['from-number'] ?? $message['from_number'] ?? $message['from'] ?? '');
+        $to = $this->statusPhoneDigits($message['dialed'] ?? $message['destination'] ?? $message['to-number'] ?? $message['to_number'] ?? '');
+
+        foreach ($logs as $log) {
+            if (!$log || empty($log->sent_at)) continue;
+            try {
+                $sentAt = $log->sent_at instanceof \DateTimeInterface
+                    ? \Illuminate\Support\Carbon::instance($log->sent_at)
+                    : \Illuminate\Support\Carbon::parse((string) $log->sent_at, 'UTC');
+            } catch (\Throwable $e) {
+                continue;
+            }
+            if ($messageTs) {
+                if (abs($messageTs->getTimestamp() - $sentAt->getTimestamp()) > 15 * 60) continue;
+            } elseif ($sentAt->lt(now()->subMinutes(15))) {
+                continue;
+            }
+
+            $logSession = (string) ($log->session_id ?? '');
+            if ($msgSession !== '' && $logSession !== '' && hash_equals($msgSession, $logSession)) return true;
+
+            $logFrom = $this->statusPhoneDigits($log->from_number ?? '');
+            $logTo = $this->statusPhoneDigits($log->to_number ?? '');
+            if ($from !== '' && $to !== ''
+                && (($this->statusPhoneMatches($from, $logFrom)
+                        && $this->statusPhoneMatches($to, $logTo))
+                    || ($this->statusPhoneMatches($from, $logTo)
+                        && $this->statusPhoneMatches($to, $logFrom)))) return true;
+        }
+        return false;
+    }
+
+    protected function statusPhoneDigits(mixed $value): string
+    {
+        return is_scalar($value) ? (preg_replace('/\D/', '', (string) $value) ?? '') : '';
+    }
+
+    protected function statusPhoneMatches(string $left, string $right): bool
+    {
+        if ($left === '' || $right === '') return false;
+        if ($left === $right) return true;
+        if (strlen($left) === 11 && str_starts_with($left, '1')) $left = substr($left, 1);
+        if (strlen($right) === 11 && str_starts_with($right, '1')) $right = substr($right, 1);
+        return $left === $right;
     }
 
     /**

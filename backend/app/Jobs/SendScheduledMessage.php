@@ -39,8 +39,8 @@ class SendScheduledMessage implements ShouldQueue
 
         // Idempotency: this recipient already got a confirmed send → never resend.
         $sentPhones = collect($m->send_log ?? [])->where('ok', true)
-            ->map(fn($l) => preg_replace('/\\D/', '', (string) ($l['phone'] ?? '')));
-        if ($sentPhones->contains(preg_replace('/\\D/', '', (string) ($recipient['phone'] ?? '')))) return;
+            ->map(fn($l) => preg_replace('/\D/', '', (string) ($l['phone'] ?? '')));
+        if ($sentPhones->contains(preg_replace('/\D/', '', (string) ($recipient['phone'] ?? '')))) return;
 
         // Overlap guard: only one worker attempt per recipient at a time.
         $idemKey = "sched:send:{$m->id}:{$this->recipientIndex}";
@@ -272,31 +272,47 @@ class SendScheduledMessage implements ShouldQueue
 
     protected function logResult(ScheduledMessage $m, array $recipient, bool $ok, string $detail): void
     {
-        $log = $m->send_log ?? [];
-        $log[] = [
-            'phone' => $recipient['phone'], 'name' => $recipient['name'] ?? '',
-            'ok' => $ok, 'detail' => $detail, 'at' => now()->toISOString(),
-        ];
-        $m->send_log = $log;
-        // Latest result per phone wins (retries can log the same phone twice).
-        $latest = [];
-        foreach ($log as $l) {
-            $latest[preg_replace('/\D/', '', (string) ($l['phone'] ?? ''))] = !empty($l['ok']);
-        }
-        unset($latest['']);
-        $need = collect($m->recipients ?? [])->map(fn($r) => preg_replace('/\D/', '', (string) ($r['phone'] ?? '')))->filter()->unique()->values();
-        if ($need->every(fn($d) => array_key_exists($d, $latest))) {
-            $m->status = $need->every(fn($d) => $latest[$d]) ? 'sent' : 'partial';
-        } else {
-            $m->status = 'sending';
-        }
-        $m->save();
+        // Different recipients run in separate queue jobs. Read/append/save
+        // under one shared lock so two completed MMS sends cannot each write
+        // a stale copy of send_log and leave the schedule stuck at "sending".
+        $fresh = null;
+        \Illuminate\Support\Facades\Cache::lock("sched:result:{$m->id}", 60)->block(15, function () use (
+            $m, $recipient, $ok, $detail, &$fresh
+        ): void {
+            $fresh = ScheduledMessage::find($m->id);
+            if (!$fresh) return;
+
+            $log = $fresh->send_log ?? [];
+            $log[] = [
+                'phone' => $recipient['phone'], 'name' => $recipient['name'] ?? '',
+                'ok' => $ok, 'detail' => $detail, 'at' => now()->toISOString(),
+            ];
+            $fresh->send_log = $log;
+
+            // Latest result per phone wins (retries can log the same phone twice).
+            $latest = [];
+            foreach ($log as $l) {
+                $latest[preg_replace('/\D/', '', (string) ($l['phone'] ?? ''))] = !empty($l['ok']);
+            }
+            unset($latest['']);
+            $need = collect($fresh->recipients ?? [])
+                ->map(fn($r) => preg_replace('/\D/', '', (string) ($r['phone'] ?? '')))
+                ->filter()->unique()->values();
+            if ($need->every(fn($d) => array_key_exists($d, $latest))) {
+                $fresh->status = $need->every(fn($d) => $latest[$d]) ? 'sent' : 'partial';
+            } else {
+                $fresh->status = 'sending';
+            }
+            $fresh->save();
+        });
+
+        if (!$fresh) return;
         // Recurring series: once every recipient of this occurrence has a
         // result, queue up the next one (no cron — the queue drives it).
-        if (in_array($m->status, ['sent', 'partial'], true)) {
-            try { $this->spawnNextOccurrence($m); } catch (\Throwable $e) { /* never break reporting */ }
+        if (in_array($fresh->status, ['sent', 'partial'], true)) {
+            try { $this->spawnNextOccurrence($fresh); } catch (\Throwable $e) { /* never break reporting */ }
         }
-        DataChanged::send($m->domain, $m->user, 'scheduled', 'saved', $m->id);
+        DataChanged::send($fresh->domain, $fresh->user, 'scheduled', 'saved', $fresh->id);
     }
 
     protected function serviceToken(DynalinkService $dynalink, ScheduledMessage $m): string
