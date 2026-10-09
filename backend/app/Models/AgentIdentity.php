@@ -15,13 +15,15 @@ class AgentIdentity extends Model
 {
     protected $fillable = ['domain', 'ext', 'display_name', 'tag_color',
         'status', 'onboarding', 'last_seen_at', 'first_login_at',
-        'first_name', 'last_name', 'email', 'department', 'site', 'profile_synced_at'];
+        'first_name', 'last_name', 'email', 'department', 'site', 'profile_synced_at',
+        'idle_timeout_hours'];
 
     protected $casts = [
         'onboarding'        => 'array',
         'last_seen_at'      => 'datetime',
         'first_login_at'    => 'datetime',
         'profile_synced_at' => 'datetime',
+        'idle_timeout_hours' => 'integer',
     ];
 
     /**

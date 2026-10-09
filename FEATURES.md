@@ -92,6 +92,7 @@ A multi-tenant team SMS workspace on top of a Dynalink voice/SMS account. Each t
 
 ### 7. Auth & account security
 - Password logins with lockout (3 fails → 5-min user lock; 15 fails → 5-min IP lock), fixation-safe sessions, `session_version` global sign-out, CSRF cookie auth, private broadcast channels, per-record tenant IDOR checks, traversal guards on file IDs.
+- Per-user session timeout (avatar menu → Session timeout): sign out after 1–8 hours with no keyboard/mouse/touch input, or Unlimited (saves immediately; choosing Unlimited shows a warning toast). Default 1 hour, the previous fixed value. Stored on the user's own row (tenant admin, portal agent, or legacy agent); break-glass Dynalink sessions keep the default. Admin sessions are kept alive during the window by a light `/api/me` keepalive.
 - Forgot-password via secret Q&A: uniform responses (no enumeration), per-account budgets across restarts, hashed single-use challenges, 15-min TTL, 5 tries each.
 - Endpoint throttles (bulk 5/min, single/in-session 30/min, v1 send 60/min, scheduled store 10/min/account, import 3/min, resets/verify 10/min, subscription mgmt 20/min).
 - Secrets: tenant Dynalink passwords + refresh tokens encrypted at rest (APP_KEY); message text never logged; sender numbers hashed in logs; daily log rotation.

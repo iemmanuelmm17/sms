@@ -24,6 +24,7 @@ const LABELS = {
   'admin.login.locked': '🔒 Admin locked out (3 fails)',
   'admin.logout': '👋 Admin signed out',
   'agent.logout': '👋 Agent signed out',
+  'user.idle-timeout.update': '⏱ Session timeout changed',
   'ip.login-blocked': '🛡 Sign-in blocked (IP locked)',
   'template.created': '📝 Template created',
   'template.updated': '📝 Template updated',

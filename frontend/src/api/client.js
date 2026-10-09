@@ -584,6 +584,11 @@ export const api = {
     if (DEMO_MODE) return { ok: true, days };
     return (await http.put('/api/settings/password-expiry', { days })).data;
   },
+  // Signed-in user's own idle sign-out window (1..8 hours, 0 = unlimited).
+  async updateIdleTimeout(hours) {
+    if (DEMO_MODE) { await delay(100); return { ok: true, idle_timeout_hours: hours }; }
+    return (await http.put('/api/me/idle-timeout', { idle_timeout_hours: hours })).data;
+  },
   async agentPing() {
     if (DEMO_MODE) return { ok: true };
     return (await http.post('/api/agent/ping')).data;

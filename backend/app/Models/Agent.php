@@ -15,7 +15,8 @@ class Agent extends Model
         'username', 'password_hash', 'secret_question', 'secret_answer_hash',
         'status', 'default_number', 'allowed_numbers', 'session_version', 'last_seen_at', 'onboarding',
         'password_last_changed_at', 'password_expires_at',
-        'password_expiry_notice_dismissed_for', 'password_expiry_days_applied'];
+        'password_expiry_notice_dismissed_for', 'password_expiry_days_applied',
+        'idle_timeout_hours'];
 
     /** Credentials are write-only: never serialized to any API response. */
     protected $hidden = ['password_hash', 'secret_answer_hash'];
@@ -23,7 +24,7 @@ class Agent extends Model
     protected $casts = ['last_seen_at' => 'datetime', 'allowed_numbers' => 'array', 'onboarding' => 'array',
         'password_last_changed_at' => 'datetime', 'password_expires_at' => 'datetime',
         'password_expiry_notice_dismissed_for' => 'datetime',
-        'password_expiry_days_applied' => 'integer'];
+        'password_expiry_days_applied' => 'integer', 'idle_timeout_hours' => 'integer'];
 
     /** Effective send-numbers: default first, then allowed extras (de-duped digits). */
     /** Roster-list cache (index + directory share one version; any write busts both). */

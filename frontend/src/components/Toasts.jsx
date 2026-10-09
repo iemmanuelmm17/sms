@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { friendlyError } from '../lib/toast';
 
-const STYLE = { error: 'bg-red-600', success: 'bg-emerald-600', info: 'bg-slate-900' };
-const ICON = { error: '⛔', success: '✅', info: 'ℹ️' };
+const STYLE = { error: 'bg-red-600', success: 'bg-emerald-600', info: 'bg-slate-900', warning: 'bg-amber-600' };
+const ICON = { error: '⛔', success: '✅', info: 'ℹ️', warning: '⚠️' };
 
 export default function Toasts() {
   const [items, setItems] = useState([]);
@@ -18,7 +18,8 @@ export default function Toasts() {
       const safe = (type || 'info') === 'error' ? friendlyError(message) : String(message);
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       setItems((t) => [...t.slice(-3), { id, type: type || 'info', message: safe }]);
-      setTimeout(() => setItems((t) => t.filter((x) => x.id !== id)), type === 'error' ? 7000 : 4000);
+      // Errors and warnings stay longer: they usually need the user to read and act.
+      setTimeout(() => setItems((t) => t.filter((x) => x.id !== id)), type === 'error' || type === 'warning' ? 7000 : 4000);
     };
     window.addEventListener('app-toast', h);
     return () => window.removeEventListener('app-toast', h);

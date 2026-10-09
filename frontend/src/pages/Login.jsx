@@ -5,6 +5,7 @@ import { useBrand } from '../context/BrandContext';
 import BrandMark from '../components/BrandMark';
 import { api } from '../api/client';
 import ForcedPasswordChange from '../components/ForcedPasswordChange';
+import { idleLabel } from '../lib/sessionPolicy';
 
 const fmtCountdown = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
@@ -21,7 +22,9 @@ export default function Login() {
   const { login, setUser } = useAuth();
   const { appName } = useBrand();
   const nav = useNavigate();
-  const reason = useLocation().state?.reason;
+  const locState = useLocation().state;
+  const reason = locState?.reason;
+  const idleHours = locState?.idleHours;
   const demo = api.isDemo;
 
   useEffect(() => {
@@ -94,7 +97,9 @@ export default function Login() {
         </div>
         {reason && (
           <div className="mb-4 text-xs bg-sky-50 border border-sky-200 text-sky-800 rounded-lg p-3">
-            {reason === 'idle' ? 'Signed out after 60 minutes of inactivity.' : 'Your session expired — please sign in again.'}
+            {reason === 'idle'
+              ? `Signed out after ${idleLabel(idleHours).toLowerCase()} of inactivity.`
+              : 'Your session expired — please sign in again.'}
           </div>
         )}
         {demo && (

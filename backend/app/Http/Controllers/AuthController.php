@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Services\DynalinkService;
 use App\Services\OnboardingService;
+use App\Services\IdleTimeout;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use App\Models\Agent;
@@ -196,6 +197,7 @@ class AuthController extends Controller
             'tenant' => $admin->tenant->name ?? null,
             'company' => $admin->tenant->company_name ?? null,
             'onboarding' => OnboardingService::state($admin),
+            'idle_timeout_hours' => IdleTimeout::hoursFor($admin),
         ] + $admin->passwordExpiryState();
     }
 
@@ -450,6 +452,7 @@ class AuthController extends Controller
             'own_numbers' => $own,
             'main_number' => $tenant?->main_number,
             'onboarding' => \App\Services\OnboardingService::state($i),
+            'idle_timeout_hours' => IdleTimeout::hoursFor($i),
             'portal_auth' => true,   // no local password: hide change-password UI
         ];
     }
@@ -468,6 +471,7 @@ class AuthController extends Controller
             'default_number' => $agent->default_number,
             'assigned_numbers' => $agent->assignedNumbers(),
             'onboarding' => OnboardingService::state($agent),
+            'idle_timeout_hours' => IdleTimeout::hoursFor($agent),
         ] + $agent->passwordExpiryState();
     }
 
@@ -668,6 +672,8 @@ class AuthController extends Controller
             'email'        => $s['email'] ?? null,
             'scope'        => $s['scope'] ?? null,
             'expires_at'    => $s['expires_at'] ?? null,
+            // No local row on a break-glass session: null = not user-editable.
+            'idle_timeout_hours' => null,
             'main_number'   => Tenant::where('domain', $s['domain'] ?? '')->where('dynalink_user', $s['user'] ?? '')->value('main_number'),
         ];
     }

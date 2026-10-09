@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { PwaBanner } from './PwaInstall';
 import {
   BarChart3, BellRing, Bot, CalendarClock, ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight,
-  Ellipsis, Hash, Headset, Hourglass, Inbox, KeyRound, LayoutTemplate, LogOut, MessageSquarePlus,
+  Ellipsis, Hash, Headset, Hourglass, Inbox, KeyRound, LayoutTemplate, LogOut, MessageSquarePlus, Timer,
   Plug, ScrollText, Search, Settings as SettingsIcon, Share2, ShieldOff, UserX, Users, UsersRound, X,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -16,6 +16,7 @@ import { api, agentName, fmtPhone, initials, setPasswordExpiredHandler } from '.
 const digits = (v) => String(v ?? '').replace(/\D/g, '');
 import { AGENTS_ENABLED } from '../lib/features';
 import ChangePasswordModal from './ChangePasswordModal';
+import IdleTimeoutModal from './IdleTimeoutModal';
 import ForcedPasswordChange from './ForcedPasswordChange';
 import PasswordExpiryWarning from './PasswordExpiryWarning';
 
@@ -423,6 +424,7 @@ export default function Layout({ children }) {
 
   // ---- Password expiry ----
   const [pwOpen, setPwOpen] = useState(false);       // avatar menu > Change password
+  const [idleOpen, setIdleOpen] = useState(false);   // avatar menu > Session timeout
   const [expiredAt, setExpiredAt] = useState(null);  // non-null => forced-change screen
   const [warnOpen, setWarnOpen] = useState(false);   // pre-expiry advisory
 
@@ -996,6 +998,13 @@ export default function Layout({ children }) {
                     <KeyRound className="w-4 h-4" /> Change password
                   </button>
                 )}
+                {/* Null for break-glass Dynalink sessions: no row to store a choice on. */}
+                {user?.idle_timeout_hours != null && (
+                  <button onClick={() => { setMenuOpen(false); setIdleOpen(true); }}
+                    className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                    <Timer className="w-4 h-4" /> Session timeout
+                  </button>
+                )}
                 <button onClick={doLogout}
                   className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                   <LogOut className="w-4 h-4" /> Sign out
@@ -1114,6 +1123,13 @@ export default function Layout({ children }) {
       )}
       {expiredAt === null && pwOpen && (
         <ChangePasswordModal onClose={() => setPwOpen(false)} />
+      )}
+      {idleOpen && (
+        <IdleTimeoutModal
+          value={user?.idle_timeout_hours}
+          onClose={() => setIdleOpen(false)}
+          onSaved={(h) => setUser((u) => (u ? { ...u, idle_timeout_hours: h } : u))}
+        />
       )}
       {!convoOpen && !typing && (
         <button onClick={goCompose} title="New message"

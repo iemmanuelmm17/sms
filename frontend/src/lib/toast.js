@@ -76,3 +76,6 @@ export function fireToast(type, message) {
 export const toastError = (msg) => fireToast('error', msg);
 export const toastSuccess = (msg) => fireToast('success', msg);
 export const toastInfo = (msg) => fireToast('info', msg);
+// Heads-up that is not a failure: the action worked, but the user should know
+// about its consequence (e.g. turning off the idle sign-out).
+export const toastWarning = (msg) => fireToast('warning', msg);

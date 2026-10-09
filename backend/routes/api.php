@@ -36,6 +36,7 @@ use App\Http\Controllers\PushSubscriptionController;
 use App\Http\Controllers\LockoutController;
 use App\Http\Controllers\TenantSelfController;
 use App\Http\Controllers\TenantSettingsController;
+use App\Http\Controllers\SessionSettingsController;
 
 /*
  | API routes — session auth via `web` middleware group
@@ -62,6 +63,8 @@ Route::get('/realtime', [BrandingController::class, 'realtime']);
 Route::post('/logout', [AuthController::class, 'logout']);
 Route::get('/me', [AuthController::class, 'me']);
 Route::put('/me/onboarding', [OnboardingController::class, 'update']);
+// Signed-in user's own sign-in window: 1..8 hours of inactivity, 0 = unlimited.
+Route::put('/me/idle-timeout', [SessionSettingsController::class, 'updateIdleTimeout']);
 Route::post('/refresh', [AuthController::class, 'refresh']);
 Route::post('/auth/verify-password', [AuthController::class, 'verifyPassword'])->middleware(\Illuminate\Routing\Middleware\ThrottleRequests::class.':10,1');
 

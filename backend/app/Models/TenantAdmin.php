@@ -20,7 +20,8 @@ class TenantAdmin extends Model
         'password_hash', 'secret_question', 'secret_answer_hash',
         'status', 'session_version', 'last_seen_at', 'onboarding',
         'password_last_changed_at', 'password_expires_at',
-        'password_expiry_notice_dismissed_for', 'password_expiry_days_applied'];
+        'password_expiry_notice_dismissed_for', 'password_expiry_days_applied',
+        'idle_timeout_hours'];
 
     /** Credentials are write-only: never serialized to any API response. */
     protected $hidden = ['password_hash', 'secret_answer_hash'];
@@ -28,7 +29,7 @@ class TenantAdmin extends Model
     protected $casts = ['last_seen_at' => 'datetime', 'onboarding' => 'array',
         'password_last_changed_at' => 'datetime', 'password_expires_at' => 'datetime',
         'password_expiry_notice_dismissed_for' => 'datetime',
-        'password_expiry_days_applied' => 'integer'];
+        'password_expiry_days_applied' => 'integer', 'idle_timeout_hours' => 'integer'];
 
     /** Password-history bucket for PasswordPolicyService. */
     public function passwordUserType(): string

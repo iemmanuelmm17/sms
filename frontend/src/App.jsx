@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { BrandProvider } from './context/BrandContext';
 import { useEffect, Component, Suspense, lazy } from 'react';
 import { api, setUnauthorizedHandler } from './api/client';
+import { IDLE_DEFAULT_HOURS, idleLimitMs } from './lib/sessionPolicy';
 import { SocketProvider } from './context/SocketContext';
 import { ReferenceDataProvider } from './context/ReferenceDataContext';
 import Layout from './components/Layout';
@@ -44,11 +45,12 @@ function PageLoader() {
   return <div className="h-full min-h-[50vh] flex items-center justify-center text-slate-400 text-sm">Loading…</div>;
 }
 
-const IDLE_LIMIT_MS = 60 * 60 * 1000; // 60 minutes of no activity -> logout
 const REFRESH_AHEAD_S = 5 * 60; // refresh the token 5 minutes before expiry
+const KEEPALIVE_MS = 5 * 60 * 1000; // non-agent keepalive cadence (see tick)
 
 /** Session watchdog (needs Router context): proactive token refresh, idle
- *  logout, and graceful 401 handling (controlled logout, never a crash). */
+ *  logout (per-user window, see lib/sessionPolicy), and graceful 401 handling
+ *  (controlled logout, never a crash). */
 function SessionManager() {
   const { user, setUser, logout } = useAuth();
   const nav = useNavigate();
@@ -64,7 +66,11 @@ function SessionManager() {
       bye('expired');
     });
     if (api.isDemo || !user) return;
+    // The user's own window. Unlimited → Infinity, so the idle check never fires.
+    const idleHours = user.idle_timeout_hours ?? IDLE_DEFAULT_HOURS;
+    const idleLimit = idleLimitMs(idleHours);
     let lastActive = Date.now();
+    let lastKeepalive = Date.now();
     let stopped = false;
     const bump = () => { lastActive = Date.now(); };
     const evts = ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart'];
@@ -73,11 +79,20 @@ function SessionManager() {
       if (stopped) return;
       stopped = true;
       try { await logout(); } catch {}
-      nav('/login', { state: { reason }, replace: true });
+      nav('/login', { state: { reason, idleHours }, replace: true });
     };
     const tick = async () => {
       if (stopped) return;
-      if (Date.now() - lastActive > IDLE_LIMIT_MS) { bye('idle'); return; }
+      if (Date.now() - lastActive > idleLimit) { bye('idle'); return; }
+      // Keep the server session alive while the user is still inside their
+      // window. Agents already ping every minute (AuthContext). Tenant admins
+      // and break-glass sessions have no token expiry to refresh, so without
+      // this the 120-minute server session would lapse during a long idle
+      // window and the next click would bounce to the login screen.
+      if (user.role !== 'agent' && Date.now() - lastKeepalive > KEEPALIVE_MS) {
+        lastKeepalive = Date.now();
+        api.me().catch(() => {});
+      }
       const exp = user.expires_at;
       if (exp && exp - Date.now() / 1000 < REFRESH_AHEAD_S) {
         try {
@@ -90,7 +105,7 @@ function SessionManager() {
     const id = setInterval(tick, 30000);
     return () => { stopped = true; clearInterval(id); evts.forEach((e) => window.removeEventListener(e, bump)); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.username, user?.expires_at]);
+  }, [user?.username, user?.expires_at, user?.idle_timeout_hours]);
 
   return null;
 }
