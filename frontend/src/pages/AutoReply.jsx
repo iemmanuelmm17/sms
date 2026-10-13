@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, fmtPhone, fmtDateTime, getTimezone, TIMEZONES } from '../api/client';
 import { EditBtn, DeleteBtn } from '../components/IconAction';
 import { toastError, toastSuccess } from '../lib/toast';
-import { toInputValue, toStoredValue, dateRangeSummary } from '../lib/autoReplyDates';
+import { toInputValue, toStoredValue, dateRangeSummary, todayRange, MAX_DATE_RANGES } from '../lib/autoReplyDates';
 import Modal from '../components/Modal';
 import { useSocket } from '../context/SocketContext';
 import { useAuth } from '../context/AuthContext';
@@ -644,7 +644,13 @@ function RuleForm({ initial, numbers, templates, scopeHint, onClose, onSaved }) 
     return {};
   };
   const [sched, setSched] = useState(initialSched);
-  const [useWindow, setUseWindow] = useState(() => Object.keys(initialSched()).length > 0);
+  // Timeframe: 24/7, a day/time schedule, or date/time ranges. A rule saves only one of these.
+  const [tfMode, setTfMode] = useState(() => {
+    if (initial.date_ranges?.length) return 'dates';
+    return Object.keys(initialSched()).length > 0 ? 'days' : 'always';
+  });
+  const useWindow = tfMode === 'days';
+  const useDates = tfMode === 'dates';
   const dayCount = Object.keys(sched).length;
   const copyToAll = (idx) => {
     const w = sched[idx];
@@ -659,12 +665,20 @@ function RuleForm({ initial, numbers, templates, scopeHint, onClose, onSaved }) 
     setSched(n);
   };
   const [tz, setTz] = useState(initial.timezone || getTimezone());
-  // Optional one-off date range, in the same timezone. Either bound may be empty.
-  const [useDates, setUseDates] = useState(!!(initial.active_starts_at || initial.active_ends_at));
-  const [startsAt, setStartsAt] = useState(toInputValue(initial.active_starts_at));
-  const [endsAt, setEndsAt] = useState(toInputValue(initial.active_ends_at));
+  // Date/time ranges, in the same timezone as the day/time window.
+  const [ranges, setRanges] = useState(() => (initial.date_ranges || []).map((r) => ({
+    from: toInputValue(r.from), to: toInputValue(r.to),
+  })));
   // datetime-local values are 'YYYY-MM-DDTHH:MM', so string order is time order.
-  const datesInvalid = useDates && !!startsAt && !!endsAt && endsAt <= startsAt;
+  const rangeInvalid = (r) => !!r.from && !!r.to && r.to <= r.from;
+  const rangesInvalid = ranges.some(rangeInvalid);
+  const pickTfMode = (m) => {
+    setTfMode(m);
+    if (m === 'dates' && ranges.length === 0) setRanges([todayRange()]);
+  };
+  const setRange = (i, patch) => setRanges((rs) => rs.map((r, k) => (k === i ? { ...r, ...patch } : r)));
+  const addRange = () => setRanges((rs) => [...rs, todayRange()]);
+  const removeRange = (i) => setRanges((rs) => rs.filter((_, k) => k !== i));
   const [active, setActive] = useState(initial.active !== false);
   const [showTpl, setShowTpl] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -703,19 +717,19 @@ function RuleForm({ initial, numbers, templates, scopeHint, onClose, onSaved }) 
     if (!message.trim()) return toastError('Reply message is required.');
     if (!allNums && sel.length === 0) return toastError('Pick at least one number — or choose “All numbers”.');
     if (!isAny && useWindow && dayCount === 0) return toastError('Pick at least one day for the active hours — or turn the hours off to run 24/7.');
-    if (!isAny && useDates && !startsAt && !endsAt) return toastError('Set a start or an end for the date range — or turn the date range off.');
-    if (!isAny && useDates && datesInvalid) return toastError('The date range must end after it starts.');
+    if (!isAny && useDates && ranges.length === 0) return toastError('Add at least one date/time range — or choose another timeframe.');
+    if (!isAny && useDates && ranges.some((r) => !r.from && !r.to)) return toastError('Each date/time range needs a start or an end.');
+    if (!isAny && useDates && rangesInvalid) return toastError('Each date/time range must end after it starts.');
     setBusy(true);
     try {
       const hasWindow = !isAny && useWindow;
-      const hasDates = !isAny && useDates && (!!startsAt || !!endsAt);
+      const hasDates = !isAny && useDates;
       const payload = {
         name, match_type: matchType, match_mode: isDefault || isAny ? 'any' : mode, message, active,
         keywords: isAny ? [] : keywords,
         numbers: allNums ? [ALL] : sel,
         schedule: hasWindow ? sched : null, // per-day windows; null = 24/7
-        active_starts_at: hasDates ? toStoredValue(startsAt) : null, // date range; null = no limit
-        active_ends_at: hasDates ? toStoredValue(endsAt) : null,
+        date_ranges: hasDates ? ranges.map((r) => ({ from: toStoredValue(r.from), to: toStoredValue(r.to) })) : null,
         timezone: hasWindow || hasDates ? tz : null,
       };
       if (isDefault) payload._password = pw;
@@ -897,18 +911,19 @@ function RuleForm({ initial, numbers, templates, scopeHint, onClose, onSaved }) 
                 <span className="w-5 h-5 rounded-full bg-brand-600 text-white text-[11px] font-bold flex items-center justify-center shrink-0">4</span>
                 <span className={section}>Schedule Constraints</span>
               </div>
-              <label className="flex items-center gap-1.5 text-[11px] text-slate-600 shrink-0">
-                <input type="checkbox" checked={useWindow} disabled={isAny}
-                  onChange={(e) => setUseWindow(e.target.checked)} className="accent-brand-600" />
-                Enable
-              </label>
             </div>
 
             {isAny ? (
               <p className="text-[11px] text-slate-400">⏱ Catch-all rules run 24/7 — no timeframe.</p>
             ) : (
               <>
-                {(useWindow || useDates) && (
+                <div className="grid grid-cols-3 gap-1 mb-3 bg-slate-100 rounded-lg p-1">
+                  {[['always', '24/7'], ['days', 'Day/time'], ['dates', 'Date/time']].map(([m, lbl]) => (
+                    <button key={m} type="button" onClick={() => pickTfMode(m)} aria-pressed={tfMode === m}
+                      className={`text-xs font-semibold rounded-md py-1.5 ${tfMode === m ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>{lbl}</button>
+                  ))}
+                </div>
+                {tfMode !== 'always' && (
                   <>
                     <label className="text-[11px] text-slate-500">Timezone</label>
                     <select value={tz} onChange={(e) => setTz(e.target.value)}
@@ -918,11 +933,10 @@ function RuleForm({ initial, numbers, templates, scopeHint, onClose, onSaved }) 
                   </>
                 )}
 
-                {!useWindow ? (
-                  <p className="text-[11px] text-slate-400">
-                    {useDates ? 'No day/time limit — active all day, but only inside the date range below.' : 'Runs 24/7 — turn on Enable to limit it to certain hours.'}
-                  </p>
-                ) : (
+                {tfMode === 'always' && (
+                  <p className="text-[11px] text-slate-400">Runs 24/7 — pick Day/time or Date/time above to limit when it runs.</p>
+                )}
+                {useWindow && (
                   <>
                 <div className="flex items-center gap-1.5 mt-2 flex-wrap">
                   <span className="text-[11px] text-slate-500 mr-1">Active Days:</span>
@@ -975,37 +989,41 @@ function RuleForm({ initial, numbers, templates, scopeHint, onClose, onSaved }) 
                   </>
                 )}
 
-                <div className="border-t mt-3 pt-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] font-semibold text-slate-600">Date range</span>
-                    <label className="flex items-center gap-1.5 text-[11px] text-slate-600 shrink-0">
-                      <input type="checkbox" checked={useDates} onChange={(e) => setUseDates(e.target.checked)} className="accent-brand-600" />
-                      Enable
-                    </label>
+                {useDates && (
+                  <div className="mt-2">
+                    <div className="space-y-2">
+                      {ranges.map((r, i) => (
+                        <div key={i} className="border rounded-lg p-2">
+                          <div className="grid grid-cols-[1fr_auto_1fr_auto] items-end gap-2">
+                            <div>
+                              <label className="text-[11px] text-slate-500">Starts</label>
+                              <input type="datetime-local" value={r.from} onChange={(e) => setRange(i, { from: e.target.value })}
+                                className="w-full border rounded-lg px-2 py-1 text-xs bg-white mt-1 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+                            </div>
+                            <span className="text-[11px] text-slate-400 pb-1.5">→</span>
+                            <div>
+                              <label className="text-[11px] text-slate-500">Ends</label>
+                              <input type="datetime-local" value={r.to} onChange={(e) => setRange(i, { to: e.target.value })}
+                                className="w-full border rounded-lg px-2 py-1 text-xs bg-white mt-1 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+                            </div>
+                            <button type="button" onClick={() => removeRange(i)} disabled={ranges.length === 1}
+                              aria-label="Remove date/time range" title="Remove"
+                              className="text-sm text-slate-400 hover:text-red-600 pb-1 px-1 disabled:opacity-30">✕</button>
+                          </div>
+                          {rangeInvalid(r) && <div className="text-[11px] text-red-600 mt-1">The end must be after the start.</div>}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-2 mt-2">
+                      <button type="button" onClick={addRange} disabled={ranges.length >= MAX_DATE_RANGES}
+                        className="text-[11px] border rounded-lg px-2 py-1 hover:bg-slate-50 disabled:opacity-40">+ Add date/time range</button>
+                      {ranges.length >= MAX_DATE_RANGES && <span className="text-[11px] text-slate-400">Limit of {MAX_DATE_RANGES} ranges reached.</span>}
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1.5">
+                      The rule replies when a message arrives inside any one of these ranges, in the timezone above. Starts is included and Ends is not. Leave one side empty for an open-ended range.
+                    </p>
                   </div>
-                  {!useDates ? (
-                    <p className="text-[11px] text-slate-400 mt-1">No date limit — runs for as long as the rule is active.</p>
-                  ) : (
-                    <>
-                      <div className="grid grid-cols-2 gap-2 mt-2">
-                        <div>
-                          <label className="text-[11px] text-slate-500">Starts</label>
-                          <input type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)}
-                            className="w-full border rounded-lg px-2 py-1 text-xs bg-white mt-1 focus:outline-none focus:ring-2 focus:ring-brand-500" />
-                        </div>
-                        <div>
-                          <label className="text-[11px] text-slate-500">Ends</label>
-                          <input type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)}
-                            className="w-full border rounded-lg px-2 py-1 text-xs bg-white mt-1 focus:outline-none focus:ring-2 focus:ring-brand-500" />
-                        </div>
-                      </div>
-                      {datesInvalid && <div className="text-[11px] text-red-600 mt-1">The end must be after the start.</div>}
-                      <p className="text-[11px] text-slate-400 mt-1.5">
-                        Active from Starts up to (not including) Ends, in the timezone above. Leave Starts empty to begin right away, or Ends empty for no end date. When day/time hours are also on, both must match.
-                      </p>
-                    </>
-                  )}
-                </div>
+                )}
               </>
             )}
           </div>
@@ -1027,7 +1045,7 @@ function RuleForm({ initial, numbers, templates, scopeHint, onClose, onSaved }) 
         </span>
         {!isAny && useDates && (
           <span className="text-[11px] bg-brand-50 text-brand-700 rounded-full px-2 py-0.5">
-            📅 {dateRangeSummary({ active_starts_at: toStoredValue(startsAt), active_ends_at: toStoredValue(endsAt) }) || 'no dates set'}
+            📅 {ranges.length ? `${ranges.length} date/time range${ranges.length === 1 ? '' : 's'}` : 'no dates set'}
           </span>
         )}
         <div className="ml-auto flex gap-2">

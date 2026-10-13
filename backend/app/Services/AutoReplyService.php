@@ -256,7 +256,7 @@ class AutoReplyService
                 // Per-rule active window (days + local time range).
                 // Catch-all rules are 24/7 by design — a window never applies.
                 if (!$rule->isCatchAll() && !$rule->inSchedule()) {
-                    Log::info('AutoReply: skipped (outside active hours or date range)', ['rule' => $rule->id]);
+                    Log::info('AutoReply: skipped (outside its day/time schedule or date/time ranges)', ['rule' => $rule->id]);
                     return false;
                 }
 

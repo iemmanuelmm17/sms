@@ -21,10 +21,36 @@ export function prettyDateTime(v) {
   return `${MONTHS[Number(mo) - 1]} ${Number(d)}, ${y} ${h12}:${mm} ${ampm}`;
 }
 
-/** Rule summary for the list, e.g. 'Oct 13, 2026 9:00 AM → Oct 31, 2026 5:00 PM'. Null when no range. */
-export function dateRangeSummary(rule) {
-  const from = rule?.active_starts_at;
-  const to = rule?.active_ends_at;
-  if (!from && !to) return null;
+/** Most date/time ranges one rule can hold. Must match AutoReplyWindow::MAX_RANGES on the server. */
+export const MAX_DATE_RANGES = 20;
+
+/** One range as text, e.g. 'Oct 13, 2026 12:00 AM → Oct 13, 2026 11:59 PM'. */
+export function dateRangeLabel(r) {
+  const from = r?.from;
+  const to = r?.to;
   return `${from ? prettyDateTime(from) : 'Any time before'} → ${to ? prettyDateTime(to) : 'no end date'}`;
+}
+
+/**
+ * Rule summary for the list: the first range, then '+N more' when there are several.
+ * Null when the rule has no date/time ranges.
+ */
+export function dateRangeSummary(rule) {
+  const list = Array.isArray(rule?.date_ranges) ? rule.date_ranges : [];
+  if (!list.length) return null;
+  const first = dateRangeLabel(list[0]);
+  return list.length > 1 ? `${first} +${list.length - 1} more` : first;
+}
+
+/** Today's date in the browser's local timezone, as 'YYYY-MM-DD'. */
+function localToday() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** Default new range: today 00:00 → today 23:59 (datetime-local values, local date). */
+export function todayRange() {
+  const day = localToday();
+  return { from: `${day}T00:00`, to: `${day}T23:59` };
 }

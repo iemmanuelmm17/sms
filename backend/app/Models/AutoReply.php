@@ -13,7 +13,7 @@ class AutoReply extends Model
         'is_default', 'is_deletable', 'default_key', 'default_body', 'default_keywords',
         'created_by', 'created_by_name', 'updated_by', 'updated_by_name',
         'numbers', 'active_from', 'active_to', 'active_days', 'timezone', 'schedule',
-        'active_starts_at', 'active_ends_at',
+        'date_ranges',
         'match_type', 'priority',
     ];
 
@@ -26,6 +26,7 @@ class AutoReply extends Model
         'numbers'           => 'array',
         'active_days'       => 'array',
         'schedule'          => 'array',
+        'date_ranges'       => 'array',
         'priority'          => 'integer',
         'last_triggered_at' => 'datetime',
     ];
@@ -95,31 +96,27 @@ class AutoReply extends Model
     }
 
     /**
-     * Optional one-off date range: ['from' => 'Y-m-d H:i'|null, 'to' => …|null],
-     * or null when the rule has no date bounds at all.
+     * Date/time mode: list of [{from, to}] ranges, each bound optional (at
+     * least one per range). Empty = not in date/time mode.
      */
-    public function dateRange(): ?array
+    public function dateRanges(): array
     {
-        $from = AutoReplyWindow::normalize($this->active_starts_at);
-        $to   = AutoReplyWindow::normalize($this->active_ends_at);
-        return ($from === null && $to === null) ? null : ['from' => $from, 'to' => $to];
-    }
-
-    public function hasDateRange(): bool
-    {
-        return $this->dateRange() !== null;
+        $clean = AutoReplyWindow::cleanRanges($this->date_ranges);
+        return is_array($clean) ? $clean : [];
     }
 
     /**
      * Is now inside the rule's active window? No window configured = 24/7.
-     * Both the date range (if any) and the day/time schedule (if any) must
-     * match. Per-day windows are honoured individually; windows that cross
-     * midnight (22:00 → 06:00) work as expected.
+     *
+     * A rule uses EITHER date/time ranges OR a day/time schedule, never both.
+     * Date ranges win if somehow both are present. Per-day windows are
+     * honoured individually; windows that cross midnight (22:00 → 06:00) work
+     * as expected.
      */
     public function inSchedule(?\DateTimeInterface $at = null): bool
     {
-        $dates = $this->dateRange();
-        if (!$this->hasSchedule() && $dates === null) return true; // no windows → always on
+        $ranges = $this->dateRanges();
+        if (!$this->hasSchedule() && $ranges === []) return true; // no windows → always on
 
         $tz = $this->timezone ?: config('app.timezone', 'UTC');
         try {
@@ -130,10 +127,13 @@ class AutoReply extends Model
             $now = \Illuminate\Support\Carbon::now($tz);
         }
 
-        if ($dates !== null && !AutoReplyWindow::inDateRange($now->format('Y-m-d H:i'), $dates['from'], $dates['to'])) {
-            return false;                               // outside the date range
+        if ($ranges !== []) {
+            $cur = $now->format('Y-m-d H:i');
+            foreach ($ranges as $r) {
+                if (AutoReplyWindow::inDateRange($cur, $r['from'], $r['to'])) return true;
+            }
+            return false;                               // outside every date range
         }
-        if (!$this->hasSchedule()) return true;         // date range only (or it matched)
 
         $w = $this->dayWindow((int) $now->format('w')); // 0 = Sunday … 6 = Saturday
         if (!$w) return false;                          // this day has no window

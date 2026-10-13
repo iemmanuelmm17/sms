@@ -185,12 +185,13 @@ class AutoReplyController extends Controller
             'active_days.*' => 'integer|between:0,6',
             'timezone'    => 'sometimes|nullable|string|max:64',
             'schedule'    => 'sometimes|nullable',
-            'active_starts_at' => 'sometimes|nullable|date_format:Y-m-d H:i',
-            'active_ends_at'   => 'sometimes|nullable|date_format:Y-m-d H:i',
+            'date_ranges'        => 'sometimes|nullable|array|max:' . AutoReplyWindow::MAX_RANGES,
+            'date_ranges.*.from' => 'nullable|date_format:Y-m-d H:i',
+            'date_ranges.*.to'   => 'nullable|date_format:Y-m-d H:i',
         ]);
         $data = $this->normalizeScope($data);
         $data = $this->normalizeCatchAll($data);
-        if ($err = $this->dateRangeError($data)) return response()->json(['message' => $err], 422);
+        if ($err = $this->resolveTimeframe($data)) return response()->json(['message' => $err], 422);
         if (($data['match_type'] ?? AutoReply::MATCH_KEYWORD) !== AutoReply::MATCH_ANY) {
             $data['keywords'] = $this->normalizeKeywords($data['keywords'] ?? '');
             if (empty($data['keywords'])) {
@@ -272,12 +273,13 @@ class AutoReplyController extends Controller
             'active_days.*' => 'integer|between:0,6',
             'timezone'    => 'sometimes|nullable|string|max:64',
             'schedule'    => 'sometimes|nullable',
-            'active_starts_at' => 'sometimes|nullable|date_format:Y-m-d H:i',
-            'active_ends_at'   => 'sometimes|nullable|date_format:Y-m-d H:i',
+            'date_ranges'        => 'sometimes|nullable|array|max:' . AutoReplyWindow::MAX_RANGES,
+            'date_ranges.*.from' => 'nullable|date_format:Y-m-d H:i',
+            'date_ranges.*.to'   => 'nullable|date_format:Y-m-d H:i',
         ]);
         $data = $this->normalizeScope($data);
         $data = $this->normalizeCatchAll($data);
-        if ($err = $this->dateRangeError($data, $autoReply)) return response()->json(['message' => $err], 422);
+        if ($err = $this->resolveTimeframe($data)) return response()->json(['message' => $err], 422);
         if (isset($data['keywords']) && ($data['match_type'] ?? $autoReply->match_type) !== AutoReply::MATCH_ANY) {
             $data['keywords'] = $this->normalizeKeywords($data['keywords']);
             if (empty($data['keywords'])) {
@@ -481,8 +483,7 @@ class AutoReplyController extends Controller
         $data['active_days'] = null;
         $data['schedule']    = null;
         $data['timezone']    = null;
-        $data['active_starts_at'] = null;
-        $data['active_ends_at']   = null;
+        $data['date_ranges'] = null;
         return $data;
     }
 
@@ -553,24 +554,43 @@ class AutoReplyController extends Controller
             if (array_key_exists($k, $data)) $data[$k] = $data[$k] ? substr((string) $data[$k], 0, 5) : null;
         }
         if (array_key_exists('timezone', $data)) $data['timezone'] = $data['timezone'] ?: null;
-        foreach (['active_starts_at', 'active_ends_at'] as $k) {
-            if (array_key_exists($k, $data)) $data[$k] = AutoReplyWindow::normalize($data[$k]);
-        }
         return $data;
     }
 
     /**
-     * Date-range bounds are each optional, but when both are set the end must
-     * come after the start. A bound not sent falls back to the stored rule.
-     * Returns the 422 message, or null when the range is fine.
+     * A rule runs on EITHER a day/time schedule OR date/time ranges, never both.
+     *
+     * - date_ranges is validated: at most MAX_RANGES rows, each with a bound,
+     *   and each end after its start.
+     * - Ranges set → the day/time schedule (and legacy window) is cleared.
+     * - A day/time schedule set → the ranges are cleared.
+     * - Both sent with content → refused, so the choice is always explicit.
+     *
+     * Returns the 422 message, or null when the timeframe is fine.
      */
-    protected function dateRangeError(array $data, ?AutoReply $current = null): ?string
+    protected function resolveTimeframe(array &$data): ?string
     {
-        $from = array_key_exists('active_starts_at', $data) ? $data['active_starts_at'] : $current?->active_starts_at;
-        $to   = array_key_exists('active_ends_at', $data) ? $data['active_ends_at'] : $current?->active_ends_at;
-        $from = AutoReplyWindow::normalize($from);
-        $to   = AutoReplyWindow::normalize($to);
-        return AutoReplyWindow::isOrdered($from, $to) ? null : 'The date range must end after it starts.';
+        if (array_key_exists('date_ranges', $data)) {
+            $clean = AutoReplyWindow::cleanRanges($data['date_ranges']);
+            if (is_string($clean)) return $clean;
+            $data['date_ranges'] = $clean === [] ? null : $clean;
+        }
+        // normalizeScope() has already reduced 'schedule' to an array or null.
+        $wantsRanges = !empty($data['date_ranges']);
+        $wantsDays   = !empty($data['schedule']);
+
+        if ($wantsRanges && $wantsDays) {
+            return 'Pick either day/time or date/time for a rule, not both.';
+        }
+        if ($wantsRanges) {
+            $data['schedule']    = null;
+            $data['active_from'] = null;
+            $data['active_to']   = null;
+            $data['active_days'] = null;
+        } elseif ($wantsDays) {
+            $data['date_ranges'] = null;
+        }
+        return null;
     }
 
     /**
