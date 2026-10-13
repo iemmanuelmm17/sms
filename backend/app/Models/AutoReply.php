@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\AutoReplyWindow;
 use Illuminate\Database\Eloquent\Model;
 
 class AutoReply extends Model
@@ -12,6 +13,7 @@ class AutoReply extends Model
         'is_default', 'is_deletable', 'default_key', 'default_body', 'default_keywords',
         'created_by', 'created_by_name', 'updated_by', 'updated_by_name',
         'numbers', 'active_from', 'active_to', 'active_days', 'timezone', 'schedule',
+        'active_starts_at', 'active_ends_at',
         'match_type', 'priority',
     ];
 
@@ -93,13 +95,31 @@ class AutoReply extends Model
     }
 
     /**
+     * Optional one-off date range: ['from' => 'Y-m-d H:i'|null, 'to' => …|null],
+     * or null when the rule has no date bounds at all.
+     */
+    public function dateRange(): ?array
+    {
+        $from = AutoReplyWindow::normalize($this->active_starts_at);
+        $to   = AutoReplyWindow::normalize($this->active_ends_at);
+        return ($from === null && $to === null) ? null : ['from' => $from, 'to' => $to];
+    }
+
+    public function hasDateRange(): bool
+    {
+        return $this->dateRange() !== null;
+    }
+
+    /**
      * Is now inside the rule's active window? No window configured = 24/7.
-     * Per-day windows are honoured individually; windows that cross midnight
-     * (22:00 → 06:00) work as expected.
+     * Both the date range (if any) and the day/time schedule (if any) must
+     * match. Per-day windows are honoured individually; windows that cross
+     * midnight (22:00 → 06:00) work as expected.
      */
     public function inSchedule(?\DateTimeInterface $at = null): bool
     {
-        if (!$this->hasSchedule()) return true; // no windows → always on
+        $dates = $this->dateRange();
+        if (!$this->hasSchedule() && $dates === null) return true; // no windows → always on
 
         $tz = $this->timezone ?: config('app.timezone', 'UTC');
         try {
@@ -109,6 +129,11 @@ class AutoReply extends Model
         } catch (\Throwable $e) {
             $now = \Illuminate\Support\Carbon::now($tz);
         }
+
+        if ($dates !== null && !AutoReplyWindow::inDateRange($now->format('Y-m-d H:i'), $dates['from'], $dates['to'])) {
+            return false;                               // outside the date range
+        }
+        if (!$this->hasSchedule()) return true;         // date range only (or it matched)
 
         $w = $this->dayWindow((int) $now->format('w')); // 0 = Sunday … 6 = Saturday
         if (!$w) return false;                          // this day has no window

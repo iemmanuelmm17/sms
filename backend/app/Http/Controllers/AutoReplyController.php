@@ -6,6 +6,7 @@ use App\Events\DataChanged;
 use App\Models\AutoReply;
 use App\Models\AutoReplyLog;
 use App\Services\AutoReplyService;
+use App\Services\AutoReplyWindow;
 use App\Services\DynalinkService;
 use App\Http\Controllers\Concerns\ResolvesActor;
 use Illuminate\Http\Request;
@@ -184,9 +185,12 @@ class AutoReplyController extends Controller
             'active_days.*' => 'integer|between:0,6',
             'timezone'    => 'sometimes|nullable|string|max:64',
             'schedule'    => 'sometimes|nullable',
+            'active_starts_at' => 'sometimes|nullable|date_format:Y-m-d H:i',
+            'active_ends_at'   => 'sometimes|nullable|date_format:Y-m-d H:i',
         ]);
         $data = $this->normalizeScope($data);
         $data = $this->normalizeCatchAll($data);
+        if ($err = $this->dateRangeError($data)) return response()->json(['message' => $err], 422);
         if (($data['match_type'] ?? AutoReply::MATCH_KEYWORD) !== AutoReply::MATCH_ANY) {
             $data['keywords'] = $this->normalizeKeywords($data['keywords'] ?? '');
             if (empty($data['keywords'])) {
@@ -268,9 +272,12 @@ class AutoReplyController extends Controller
             'active_days.*' => 'integer|between:0,6',
             'timezone'    => 'sometimes|nullable|string|max:64',
             'schedule'    => 'sometimes|nullable',
+            'active_starts_at' => 'sometimes|nullable|date_format:Y-m-d H:i',
+            'active_ends_at'   => 'sometimes|nullable|date_format:Y-m-d H:i',
         ]);
         $data = $this->normalizeScope($data);
         $data = $this->normalizeCatchAll($data);
+        if ($err = $this->dateRangeError($data, $autoReply)) return response()->json(['message' => $err], 422);
         if (isset($data['keywords']) && ($data['match_type'] ?? $autoReply->match_type) !== AutoReply::MATCH_ANY) {
             $data['keywords'] = $this->normalizeKeywords($data['keywords']);
             if (empty($data['keywords'])) {
@@ -474,6 +481,8 @@ class AutoReplyController extends Controller
         $data['active_days'] = null;
         $data['schedule']    = null;
         $data['timezone']    = null;
+        $data['active_starts_at'] = null;
+        $data['active_ends_at']   = null;
         return $data;
     }
 
@@ -544,7 +553,24 @@ class AutoReplyController extends Controller
             if (array_key_exists($k, $data)) $data[$k] = $data[$k] ? substr((string) $data[$k], 0, 5) : null;
         }
         if (array_key_exists('timezone', $data)) $data['timezone'] = $data['timezone'] ?: null;
+        foreach (['active_starts_at', 'active_ends_at'] as $k) {
+            if (array_key_exists($k, $data)) $data[$k] = AutoReplyWindow::normalize($data[$k]);
+        }
         return $data;
+    }
+
+    /**
+     * Date-range bounds are each optional, but when both are set the end must
+     * come after the start. A bound not sent falls back to the stored rule.
+     * Returns the 422 message, or null when the range is fine.
+     */
+    protected function dateRangeError(array $data, ?AutoReply $current = null): ?string
+    {
+        $from = array_key_exists('active_starts_at', $data) ? $data['active_starts_at'] : $current?->active_starts_at;
+        $to   = array_key_exists('active_ends_at', $data) ? $data['active_ends_at'] : $current?->active_ends_at;
+        $from = AutoReplyWindow::normalize($from);
+        $to   = AutoReplyWindow::normalize($to);
+        return AutoReplyWindow::isOrdered($from, $to) ? null : 'The date range must end after it starts.';
     }
 
     /**

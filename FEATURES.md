@@ -63,7 +63,7 @@ A multi-tenant team SMS workspace on top of a Dynalink voice/SMS account. Each t
 - Per-rule active window: **each weekday has its own checkbox + start/end time** in the rule's own timezone (overnight windows supported, e.g. 18:00 → 08:00). Days left unchecked never reply; with hours off the rule runs 24/7. Default STOP/START actions always run (compliance).
 - TCPA actions (STOP/START) are hidden from each number's rule list — they're compliance plumbing, owned and edited under “All numbers”. Other global rules still appear under every number.
 - Rule types: **keyword** rules, or **any message** catch-alls that answer every inbound text on their numbers (24/7, no keywords).
-- Priority: rules are checked top-to-bottom and the FIRST eligible one replies — exactly one auto-reply per inbound message. Paused rules and rules outside their timeframe are skipped, so the next one down gets its turn. STOP/START compliance replies ignore priority and always win.
+- Priority: rules are checked top-to-bottom and the FIRST eligible one replies — exactly one auto-reply per inbound message. Paused rules and rules outside their timeframe are skipped, so the next one down gets its turn. A rule's timeframe is an optional day/time schedule plus an optional date range (start and/or end date and time, in the rule's timezone, start inclusive, end exclusive); when both are set, both must match. STOP/START compliance replies ignore priority and always win.
 - Numbers-first manager: pick a number (or "All numbers") to see and manage its rules; "All numbers" rules appear under every number. Rows reorder by drag-and-drop or ↑↓; new rules start at the lowest priority.
 
 ### 4. Webhook ingestion pipeline
