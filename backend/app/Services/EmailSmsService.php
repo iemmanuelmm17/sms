@@ -12,6 +12,7 @@ use App\Services\Mail\ImapClient;
 use App\Services\Mail\MailParser;
 use App\Services\Mail\SmtpClient;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -36,6 +37,7 @@ class EmailSmsService
     public const FAIL_LIMIT = 3;      // poison-message give-up
     public const NOTIFY_DAYS = 90;    // reply window / prune age
     public const PURGE_DAYS = 7;        // inbound mail older than this is deleted
+    public const MAX_MMS_ATTACH = 10485760; // MMS image attached to notification mail: 10 MB cap
 
     public function __construct(
         protected DynalinkService $dynalink,
@@ -171,8 +173,18 @@ class EmailSmsService
             // so the reply routes like a fresh send (sender auth +
             // subject routing; notify-only recipients can't reply).
             $subject = $number;
+            // MMS image: downloaded once, attached to every copy of this email.
+            // Anything else (video, a failed or oversize download) keeps the
+            // text note, so the notification still goes out.
+            $image = $this->fetchMmsImage($ev);
+            $note = '';
+            if (!empty($ev['file-access-url'])) {
+                $note = $image
+                    ? "\n\nThe image from this MMS is attached as {$image['name']}."
+                    : "\n\nThe MMS attachment could not be included here. Open the conversation in the app to view it.";
+            }
             $body = "From: {$remote}\nTo: {$number}\nTime: " . now()->format('M d, Y g:i A')
-                . "\n\n{$text}\n\n--\nReply to this email to text {$remote} back (authorized senders only).";
+                . "\n\n{$text}{$note}\n\n--\nReply to this email to text {$remote} back (authorized senders only).";
             $fromName = $smtp['from_name'] !== '' ? $smtp['from_name'] : ($co !== '' ? $co . ' SMS' : '');
             $failed = 0;
             // One row + Reply-To per recipient, so replies thread per address.
@@ -188,9 +200,10 @@ class EmailSmsService
                     $replyTo = $inbound !== '' ? "{$remote}@{$inbound}" : '';
                     $mid = '<smsnotify-' . $row->id . '-' . substr(md5((string) random_bytes(8)), 0, 8) . "@{$host}>";
                     $row->update(['message_id' => $mid]);
-                    $mime = SmtpClient::buildText($smtp['from_address'], $fromName,
-                        [$to], $subject, $body,
-                        ['Message-ID' => $mid] + ($replyTo !== '' ? ['Reply-To' => $replyTo] : []));
+                    $headers = ['Message-ID' => $mid] + ($replyTo !== '' ? ['Reply-To' => $replyTo] : []);
+                    $mime = $image
+                        ? SmtpClient::buildWithAttachments($smtp['from_address'], $fromName, [$to], $subject, $body, [$image], $headers)
+                        : SmtpClient::buildText($smtp['from_address'], $fromName, [$to], $subject, $body, $headers);
                     $mailer->send($smtp['from_address'], [$to], $mime);
                 } catch (\Throwable $e) {
                     $failed++;
@@ -592,6 +605,90 @@ class EmailSmsService
         } catch (\Throwable $e) {
             Log::warning('EmailSms unauthorized notice failed: ' . $e->getMessage());
         }
+    }
+
+    /**
+     * Download an inbound MMS image for the notification email. Returns
+     * ['name', 'mime', 'data'], or null when there is no image, it is too
+     * big, the URL is refused, or the download fails. Never throws, and never
+     * logs the URL (it can be a signed link).
+     */
+    protected function fetchMmsImage(array $ev): ?array
+    {
+        $url = trim((string) ($ev['file-access-url'] ?? ''));
+        if ($url === '') return null;
+        // Images only: video, audio and documents are not attached.
+        $hint = strtolower(trim((string) ($ev['mime-type'] ?? $ev['media-type'] ?? '')));
+        if ($hint !== '' && !str_starts_with($hint, 'image/')) return null;
+        try {
+            if (!$this->isPublicHttpUrl($url)) {
+                Log::warning('EmailSms MMS: image URL refused (not a public http/https address)');
+                return null;
+            }
+            $res = Http::timeout(10)
+                ->withOptions(['allow_redirects' => false, 'stream' => true])
+                ->withHeaders(['Accept' => 'image/*'])
+                ->get($url);
+            if (!$res->successful()) {
+                Log::warning('EmailSms MMS: image download HTTP ' . $res->status());
+                return null;
+            }
+            if ((int) $res->header('Content-Length') > self::MAX_MMS_ATTACH) return null;
+            $stream = $res->toPsrResponse()->getBody();
+            $data = '';
+            while (!$stream->eof() && strlen($data) <= self::MAX_MMS_ATTACH) {
+                $data .= $stream->read(65536);
+            }
+            if ($data === '' || strlen($data) > self::MAX_MMS_ATTACH) return null;
+
+            $mime = strtolower(trim(explode(';', (string) $res->header('Content-Type'))[0]));
+            if (!str_starts_with($mime, 'image/')) $mime = $this->sniffMime($data);
+            if (!str_starts_with($mime, 'image/')) return null;
+            if ($mime === 'image/jpg') $mime = 'image/jpeg';
+            $ext = match ($mime) {
+                'image/jpeg' => 'jpg',
+                'image/png' => 'png',
+                'image/gif' => 'gif',
+                'image/webp' => 'webp',
+                'image/heic' => 'heic',
+                'image/heif' => 'heif',
+                default => 'img',
+            };
+            return [
+                'name' => 'mms-image-' . now()->format('Ymd-His') . '.' . $ext,
+                'mime' => $mime,
+                'data' => $data,
+            ];
+        } catch (\Throwable $e) {
+            Log::warning('EmailSms MMS: image download failed');
+            return null;
+        }
+    }
+
+    /** Content-sniff the bytes when the server's Content-Type is missing or generic. */
+    protected function sniffMime(string $data): string
+    {
+        if (!class_exists(\finfo::class)) return '';
+        return strtolower((string) (new \finfo(FILEINFO_MIME_TYPE))->buffer($data));
+    }
+
+    /**
+     * http(s) only, and every resolved address must be public. The URL comes
+     * from a webhook payload, so this keeps the server from being pointed at
+     * internal hosts. IPv6 literals are refused outright.
+     */
+    protected function isPublicHttpUrl(string $url): bool
+    {
+        $p = parse_url($url);
+        if (!is_array($p) || !in_array(strtolower((string) ($p['scheme'] ?? '')), ['http', 'https'], true)) return false;
+        $host = strtolower(trim((string) ($p['host'] ?? ''), '[]'));
+        if ($host === '' || str_contains($host, ':')) return false;
+        $ips = filter_var($host, FILTER_VALIDATE_IP) ? [$host] : (gethostbynamel($host) ?: []);
+        if ($ips === []) return false;
+        foreach ($ips as $ip) {
+            if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) return false;
+        }
+        return true;
     }
 
     protected function digits(string $v): string

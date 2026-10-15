@@ -67,19 +67,73 @@ class SmtpClient
      */
     public static function buildText(string $from, string $fromName, array $to, string $subject, string $body, array $extra = []): string
     {
-        $lines = [
+        $lines = array_merge(self::baseHeaders($from, $fromName, $to, $subject), [
+            'MIME-Version: 1.0',
+            'Content-Type: text/plain; charset=UTF-8',
+            'Content-Transfer-Encoding: quoted-printable',
+        ], self::extraHeaders($extra));
+        return implode("\r\n", $lines) . "\r\n\r\n" . quoted_printable_encode($body);
+    }
+
+    /**
+     * Build a multipart/mixed MIME message: a plain-text body plus binary
+     * attachments. $attachments is a list of ['name', 'mime', 'data'] where
+     * data is the raw bytes. Attachment bytes are base64-encoded, wrapped at 76 columns.
+     */
+    public static function buildWithAttachments(string $from, string $fromName, array $to, string $subject, string $body, array $attachments, array $extra = []): string
+    {
+        $boundary = 'sms-' . bin2hex(random_bytes(12));
+        $lines = array_merge(self::baseHeaders($from, $fromName, $to, $subject), [
+            'MIME-Version: 1.0',
+            "Content-Type: multipart/mixed; boundary=\"{$boundary}\"",
+        ], self::extraHeaders($extra));
+
+        $parts = [
+            "--{$boundary}\r\n"
+            . "Content-Type: text/plain; charset=UTF-8\r\n"
+            . "Content-Transfer-Encoding: quoted-printable\r\n\r\n"
+            . quoted_printable_encode($body),
+        ];
+        foreach ($attachments as $a) {
+            $name = self::safeFilename((string) $a['name']);
+            $mime = preg_replace('/[^A-Za-z0-9.+\/-]/', '', (string) $a['mime']) ?: 'application/octet-stream';
+            $parts[] = "--{$boundary}\r\n"
+                . "Content-Type: {$mime}; name=\"{$name}\"\r\n"
+                . "Content-Disposition: attachment; filename=\"{$name}\"\r\n"
+                . "Content-Transfer-Encoding: base64\r\n\r\n"
+                . chunk_split(base64_encode((string) $a['data']), 76, "\r\n");
+        }
+        $parts[] = "--{$boundary}--";
+
+        return implode("\r\n", $lines) . "\r\n\r\n" . implode("\r\n", $parts) . "\r\n";
+    }
+
+    /** From / To / Subject / Date, shared by the text and multipart builders. */
+    protected static function baseHeaders(string $from, string $fromName, array $to, string $subject): array
+    {
+        return [
             'From: ' . ($fromName !== '' ? mb_encode_mimeheader($fromName, 'UTF-8', 'Q', "\r\n") . " <{$from}>" : $from),
             'To: ' . implode(', ', $to),
             'Subject: ' . mb_encode_mimeheader($subject, 'UTF-8', 'Q', "\r\n"),
             'Date: ' . date('r'),
-            'MIME-Version: 1.0',
-            'Content-Type: text/plain; charset=UTF-8',
-            'Content-Transfer-Encoding: quoted-printable',
         ];
+    }
+
+    /** Optional headers (Message-ID, Reply-To, …); blank values are skipped. */
+    protected static function extraHeaders(array $extra): array
+    {
+        $out = [];
         foreach ($extra as $k => $v) {
-            if ($v !== '' && $v !== null) $lines[] = "{$k}: {$v}";
+            if ($v !== '' && $v !== null) $out[] = "{$k}: {$v}";
         }
-        return implode("\r\n", $lines) . "\r\n\r\n" . quoted_printable_encode($body);
+        return $out;
+    }
+
+    /** Keep attachment names header-safe: ASCII letters, digits, dot, dash, underscore. */
+    protected static function safeFilename(string $name): string
+    {
+        $clean = preg_replace('/[^A-Za-z0-9._-]/', '_', $name) ?? '';
+        return substr($clean !== '' ? $clean : 'attachment', 0, 100);
     }
 
     protected function cmd($fp, string $line, array $ok): string
