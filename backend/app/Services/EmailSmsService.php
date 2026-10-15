@@ -149,9 +149,19 @@ class EmailSmsService
         try {
             if (!$this->sendingReady()) return;
             if ($domain === '') return;
-            $remote = $this->digits((string) ($ev['from-number'] ?? ''));
-            $number = (string) ($ev['dialed'] ?? '');
-            if ($remote === '' || $number === '') return;
+            // Message events name the sender and our number differently from
+            // session events (from_num / term_num), so take the first non-empty field.
+            $remote = $this->digits($this->firstValue($ev, ['from-number', 'from_num', 'from', 'remote', 'last_sender']));
+            $number = $this->firstValue($ev, ['dialed', 'term_num', 'smsani']);
+            if ($remote === '' || $number === '') {
+                if ($this->isMmsEvent($ev)) {
+                    // Metadata only: which of the fields were present.
+                    Log::info('EmailSms MMS: event skipped (no sender or number)', [
+                        'has_sender' => $remote !== '', 'has_number' => $number !== '',
+                    ]);
+                }
+                return;
+            }
             $tos = $this->company->numberNotifyEmails($domain, $this->digits($number));
             if ($tos === []) return;
 
@@ -325,6 +335,16 @@ class EmailSmsService
         if (!empty($ev['file-access-url'])) return true;
         if ($this->hasMediaPayload($ev)) return true;
         return (int) ($ev['media_size'] ?? $ev['last_mesg_media_size'] ?? 0) > 0;
+    }
+
+    /** First non-empty string value among $keys, or ''. */
+    protected function firstValue(array $ev, array $keys): string
+    {
+        foreach ($keys as $k) {
+            $v = trim((string) ($ev[$k] ?? ''));
+            if ($v !== '') return $v;
+        }
+        return '';
     }
 
     /** Is there a non-empty media_contents field? */
