@@ -147,7 +147,6 @@ class EmailSmsService
     public function notifySmsReceived(string $domain, string $user, array $ev): void
     {
         try {
-            $ev = $this->withTwinMedia($ev);
             if (!$this->sendingReady()) return;
             if ($domain === '') return;
             $remote = $this->digits((string) ($ev['from-number'] ?? ''));
@@ -155,77 +154,185 @@ class EmailSmsService
             if ($remote === '' || $number === '') return;
             $tos = $this->company->numberNotifyEmails($domain, $this->digits($number));
             if ($tos === []) return;
+
+            // MMS: the media and the caption arrive in different events. Collect them.
+            if ($this->isMmsEvent($ev)) {
+                $this->mmsTwin($domain, $user, $ev, $remote, $number, $tos);
+                return;
+            }
+
             $text = trim((string) ($ev['text'] ?? ''));
-            if ($text === '' && !empty($ev['file-access-url'])) $text = '[MMS attachment]';
             if ($text === '') return;
             // Own dedupe (both twins call us): claim only when sendable, so
             // a numberless message-first twin can't suppress the session
             // twin's mail.
             $nkey = 'emailsms:notify:' . md5(
                 ($ev['messagesession-id'] ?? '') . '|' . $remote . '|' . $text);
-            if (!Cache::add($nkey, 1, now()->addSeconds(60))) {
-                // Another twin already sent this message. Log it, so a missing
-                // image can be traced to the twin that was suppressed.
-                if (!empty($ev['file-access-url'])) Log::info('EmailSms MMS: duplicate suppressed (a twin already sent this message)');
-                return;
-            }
-            $smtp = $this->smtpConfig();
-            $mailer = new SmtpClient($smtp['host'], $smtp['port'], $smtp['encryption'], $smtp['username'], $smtp['password']);
-            $inbound = $this->inboundDomain();
-            $at = strrchr($smtp['from_address'], '@');
-            $host = $at !== false ? substr($at, 1) : ($inbound !== '' ? $inbound : 'localhost');
-            $co = $this->company->name($domain);
-            // Subject is always our number: hitting Reply presets it,
-            // so the reply routes like a fresh send (sender auth +
-            // subject routing; notify-only recipients can't reply).
-            $subject = $number;
-            // MMS image: downloaded once, attached to every copy of this email.
-            // Anything else (video, a failed or oversize download) keeps the
-            // text note, so the notification still goes out.
-            $image = $this->fetchMmsImage($ev);
-            $note = '';
-            if (!empty($ev['file-access-url'])) {
-                Log::info('EmailSms MMS: ' . ($image ? 'image attached' : 'image not attached'), [
-                    'media' => substr(strtolower(trim((string) ($ev['media-type'] ?? $ev['type'] ?? ''))), 0, 24),
-                ]);
-                $note = $image
-                    ? "\n\nThe image from this MMS is attached as {$image['name']}."
-                    : "\n\nThe MMS attachment could not be included here. Open the conversation in the app to view it.";
-            }
-            $body = "From: {$remote}\nTo: {$number}\nTime: " . now()->format('M d, Y g:i A')
-                . "\n\n{$text}{$note}\n\n--\nReply to this email to text {$remote} back (authorized senders only).";
-            $fromName = $smtp['from_name'] !== '' ? $smtp['from_name'] : ($co !== '' ? $co . ' SMS' : '');
-            $failed = 0;
-            // One row + Reply-To per recipient, so replies thread per address.
-            foreach ($tos as $to) {
-                $row = null;
-                try {
-                    $row = EmailSmsNotification::create([
-                        'domain' => $domain, 'user' => $user !== '' ? $user : null,
-                        'to_email' => $to, 'remote' => $remote,
-                        'from_number' => $number,
-                        'session_id' => $ev['messagesession-id'] ?? null,
-                    ]);
-                    $replyTo = $inbound !== '' ? "{$remote}@{$inbound}" : '';
-                    $mid = '<smsnotify-' . $row->id . '-' . substr(md5((string) random_bytes(8)), 0, 8) . "@{$host}>";
-                    $row->update(['message_id' => $mid]);
-                    $headers = ['Message-ID' => $mid] + ($replyTo !== '' ? ['Reply-To' => $replyTo] : []);
-                    $mime = $image
-                        ? SmtpClient::buildWithAttachments($smtp['from_address'], $fromName, [$to], $subject, $body, [$image], $headers)
-                        : SmtpClient::buildText($smtp['from_address'], $fromName, [$to], $subject, $body, $headers);
-                    $mailer->send($smtp['from_address'], [$to], $mime);
-                } catch (\Throwable $e) {
-                    $failed++;
-                    try {
-                        if ($row) $row->delete();
-                    } catch (\Throwable $e2) {
-                    }
-                }
-            }
-            if ($failed > 0) Log::warning("EmailSms notify: {$failed} recipient(s) failed");
+            if (!Cache::add($nkey, 1, now()->addSeconds(60))) return;
+            $this->sendNotifyEmails($domain, $user, $ev, $remote, $number, $tos, $text, null, '');
         } catch (\Throwable $e) {
             Log::warning('EmailSms notify failed: ' . $e->getMessage());
         }
+    }
+
+    /**
+     * An MMS arrives as two events for one message. The message event carries
+     * the media (media_contents, no caption); the session event carries the
+     * caption (last_mesg, no media). Both are collected in one cache entry per
+     * session + sender. The email goes out as soon as it has both pieces, or
+     * after a short wait (a job), so an image-only MMS or a missing twin still
+     * gets its email.
+     */
+    protected function mmsTwin(string $domain, string $user, array $ev, string $remote, string $number, array $tos): void
+    {
+        $session = trim((string) ($ev['messagesession-id'] ?? ''));
+        $key = 'emailsms:mms:' . md5(($session !== '' ? $session : '-') . '|' . $remote);
+        $state = Cache::get($key, []);
+        if (!is_array($state)) $state = [];
+        $src = $this->mediaSource($ev);
+        if ($src === null && $this->hasMediaPayload($ev) && empty($state['src'])) {
+            // Diagnostic (key names only, never values): the media field exists
+            // but no URL or image data was found in it.
+            Log::info('EmailSms MMS: media field present but no URL or image data found', [
+                'shape' => $this->shapeOf($ev['media_contents'] ?? $ev['media-contents'] ?? null),
+            ]);
+        }
+        // A finished MMS that this event does not belong to (a new media URL in the
+        // same conversation) starts a fresh entry. Plain twins are ignored.
+        if (!empty($state['sent'])) {
+            if ($src === null || md5(json_encode($src)) === ($state['src_hash'] ?? null)) return;
+            $state = [];
+        }
+        $state['domain'] = $domain;
+        $state['user'] = $user;
+        $state['remote'] = $remote;
+        $state['number'] = $number;
+        $state['session'] = $session;
+        $state['tos'] = $tos;
+        if ($src !== null && empty($state['src'])) {
+            $state['src'] = $src;
+            $state['src_hash'] = md5(json_encode($src));
+        }
+        $size = $ev['media_size'] ?? $ev['last_mesg_media_size'] ?? $ev['media-size'] ?? null;
+        if ($size !== null && empty($state['size'])) $state['size'] = $size;
+        $caption = trim((string) ($ev['text'] ?? $ev['last_mesg'] ?? ''));
+        if ($caption !== '') $state['text'] = $caption;
+        Cache::put($key, $state, now()->addMinutes(2));
+
+        if (!empty($state['src']) && !empty($state['text'])) {
+            $this->sendMms($key);      // both pieces are here: send now
+            return;
+        }
+        if (empty($state['scheduled'])) {
+            $state['scheduled'] = true;
+            Cache::put($key, $state, now()->addMinutes(2));
+            $this->scheduleMmsSend($key);   // wait for the twin, then send what arrived
+        }
+    }
+
+    /** Send the collected MMS notification once. Called by the delayed job, or directly. */
+    public function sendMms(string $key): void
+    {
+        try {
+            $state = Cache::get($key);
+            if (!is_array($state) || !empty($state['sent'])) return;
+            // Atomic claim, so two workers can't both send.
+            if (!Cache::add('emailsms:mmsdone:' . md5($key . '|' . ($state['src_hash'] ?? '')), 1, now()->addMinutes(2))) return;
+            $state['sent'] = true;
+            Cache::put($key, $state, now()->addMinutes(2));
+
+            $image = !empty($state['src']) ? $this->fetchMmsImage($state['src'], $state['size'] ?? null) : null;
+            Log::info('EmailSms MMS: ' . ($image ? 'image attached' : 'image not attached'), [
+                'has_media' => !empty($state['src']), 'has_caption' => !empty($state['text']),
+            ]);
+            $text = (string) ($state['text'] ?? '');
+            if ($text === '') $text = '[MMS attachment]';
+            $note = $image
+                ? "\n\nThe image from this MMS is attached as {$image['name']}."
+                : "\n\nThe MMS attachment could not be included here. Open the conversation in the app to view it.";
+            $this->sendNotifyEmails($state['domain'], $state['user'], ['messagesession-id' => $state['session']],
+                $state['remote'], $state['number'], $state['tos'], $text, $image, $note);
+        } catch (\Throwable $e) {
+            Log::warning('EmailSms MMS send failed: ' . $e->getMessage());
+        }
+    }
+
+    /** Queue the MMS send for a few seconds from now (lets the twin event arrive first). */
+    protected function scheduleMmsSend(string $key): void
+    {
+        try {
+            \App\Jobs\SendMmsNotification::dispatch($key)->delay(now()->addSeconds(4));
+        } catch (\Throwable $e) {
+            Log::warning('EmailSms MMS schedule failed: ' . $e->getMessage());
+        }
+    }
+
+    /** Build and send the notification, one row + Reply-To per recipient. */
+    protected function sendNotifyEmails(string $domain, string $user, array $ev, string $remote, string $number,
+        array $tos, string $text, ?array $image, string $note): void
+    {
+        $smtp = $this->smtpConfig();
+        $mailer = new SmtpClient($smtp['host'], $smtp['port'], $smtp['encryption'], $smtp['username'], $smtp['password']);
+        $inbound = $this->inboundDomain();
+        $at = strrchr($smtp['from_address'], '@');
+        $host = $at !== false ? substr($at, 1) : ($inbound !== '' ? $inbound : 'localhost');
+        $co = $this->company->name($domain);
+        // Subject is always our number: hitting Reply presets it,
+        // so the reply routes like a fresh send (sender auth +
+        // subject routing; notify-only recipients can't reply).
+        $subject = $number;
+        $body = "From: {$remote}\nTo: {$number}\nTime: " . now()->format('M d, Y g:i A')
+            . "\n\n{$text}{$note}\n\n--\nReply to this email to text {$remote} back (authorized senders only).";
+        $fromName = $smtp['from_name'] !== '' ? $smtp['from_name'] : ($co !== '' ? $co . ' SMS' : '');
+        $failed = 0;
+        foreach ($tos as $to) {
+            $row = null;
+            try {
+                $row = EmailSmsNotification::create([
+                    'domain' => $domain, 'user' => $user !== '' ? $user : null,
+                    'to_email' => $to, 'remote' => $remote,
+                    'from_number' => $number,
+                    'session_id' => $ev['messagesession-id'] ?? null,
+                ]);
+                $replyTo = $inbound !== '' ? "{$remote}@{$inbound}" : '';
+                $mid = '<smsnotify-' . $row->id . '-' . substr(md5((string) random_bytes(8)), 0, 8) . "@{$host}>";
+                $row->update(['message_id' => $mid]);
+                $headers = ['Message-ID' => $mid] + ($replyTo !== '' ? ['Reply-To' => $replyTo] : []);
+                $mime = $image
+                    ? SmtpClient::buildWithAttachments($smtp['from_address'], $fromName, [$to], $subject, $body, [$image], $headers)
+                    : SmtpClient::buildText($smtp['from_address'], $fromName, [$to], $subject, $body, $headers);
+                $mailer->send($smtp['from_address'], [$to], $mime);
+            } catch (\Throwable $e) {
+                $failed++;
+                try {
+                    if ($row) $row->delete();
+                } catch (\Throwable $e2) {
+                }
+            }
+        }
+        if ($failed > 0) Log::warning("EmailSms notify: {$failed} recipient(s) failed");
+    }
+
+    /** Does this event describe an MMS (media present, or type mms)? Metadata only. */
+    public function isMmsEvent(array $ev): bool
+    {
+        foreach (['type', 'media_type', 'last_mesg_type', 'last_mesg_media_type'] as $k) {
+            if (strtolower(trim((string) ($ev[$k] ?? ''))) === 'mms') return true;
+        }
+        foreach (['media_type', 'last_mesg_media_type', 'media-type'] as $k) {
+            if (str_contains((string) ($ev[$k] ?? ''), '/')) return true; // a MIME type means media
+        }
+        if (!empty($ev['file-access-url'])) return true;
+        if ($this->hasMediaPayload($ev)) return true;
+        return (int) ($ev['media_size'] ?? $ev['last_mesg_media_size'] ?? 0) > 0;
+    }
+
+    /** Is there a non-empty media_contents field? */
+    protected function hasMediaPayload(array $ev): bool
+    {
+        $c = $ev['media_contents'] ?? $ev['media-contents'] ?? null;
+        if (is_array($c)) return $c !== [];
+        return is_string($c) && trim($c) !== '' && trim($c) !== '[]';
     }
 
     // ---------- flows 2+3: poll inbox ----------
@@ -617,82 +724,99 @@ class EmailSmsService
     }
 
     /**
-     * Dynalink sends two events per SMS. Only the message event carries the
-     * media URL, and a numberless message-first twin returns early, so the
-     * session twin that actually sends can have no URL. Remember the URL per
-     * session + sender for two minutes, and give it to a twin with the same
-     * text that lacks one. Never overwrites a URL the event already has.
+     * The media source in an event: a file-access-url, or media_contents. Its
+     * shape is not documented, so any http(s) string, data: URI or base64 blob
+     * inside it is considered. Returns ['url' => …] or ['data' => raw bytes], or null.
      */
-    protected function withTwinMedia(array $ev): array
+    protected function mediaSource(array $ev): ?array
     {
-        $remote = $this->digits((string) ($ev['from-number'] ?? ''));
-        $session = trim((string) ($ev['messagesession-id'] ?? ''));
-        if ($remote === '' || $session === '') return $ev;
-        $key = 'emailsms:mms:' . md5($session . '|' . $remote);
-        $text = trim((string) ($ev['text'] ?? ''));
         $url = trim((string) ($ev['file-access-url'] ?? ''));
-        try {
-            if ($url !== '') {
-                Cache::put($key, ['url' => $url, 'text' => $text], now()->addMinutes(2));
-            } elseif ($text !== '') {
-                $hit = Cache::get($key);
-                if (is_array($hit) && ($hit['text'] ?? null) === $text && !empty($hit['url'])) {
-                    $ev['file-access-url'] = $hit['url'];
-                    Log::info('EmailSms MMS: image URL taken from the twin event');
-                }
-            }
-        } catch (\Throwable $e) {
+        if ($url !== '') return ['url' => $url];
+
+        $contents = $ev['media_contents'] ?? $ev['media-contents'] ?? null;
+        if (is_string($contents) && trim($contents) !== '') {
+            $decoded = json_decode($contents, true);
+            $contents = is_array($decoded) ? $decoded : [$contents];
         }
-        return $ev;
+        $strings = [];
+        $walk = function ($v) use (&$walk, &$strings) {
+            if (is_array($v)) {
+                foreach ($v as $x) $walk($x);
+            } elseif (is_string($v) && trim($v) !== '') {
+                $strings[] = trim($v);
+            }
+        };
+        $walk($contents);
+
+        foreach ($strings as $s) {
+            if (preg_match('#^https?://#i', $s)) return ['url' => $s];
+        }
+        foreach ($strings as $s) {
+            $b64 = null;
+            if (preg_match('#^data:[^;,]*;base64,(.+)$#is', $s, $m)) {
+                $b64 = $m[1];
+            } elseif (strlen($s) >= 200 && preg_match('#^[A-Za-z0-9+/=\r\n]+$#', $s)) {
+                $b64 = $s;
+            }
+            if ($b64 !== null) {
+                $bin = base64_decode((string) preg_replace('/\s+/', '', $b64), true);
+                if ($bin !== false && $bin !== '') return ['data' => $bin];
+            }
+        }
+        return null;
     }
 
     /**
-     * Download an inbound MMS image for the notification email. Returns
-     * ['name', 'mime', 'data'], or null when there is no image, it is too
-     * big, the URL is refused, or the download fails. Never throws, and never
-     * logs the URL (it can be a signed link).
+     * Get an MMS image for the notification email: from a URL (downloaded with
+     * a 10 s timeout, the public-address check on every redirect hop, and the
+     * size cap) or from inline data. Returns ['name', 'mime', 'data'] or null.
+     * Images only. Never throws, and never logs the URL (it can be a signed link).
      */
-    protected function fetchMmsImage(array $ev): ?array
+    protected function fetchMmsImage(array $source, mixed $sizeHint = null): ?array
     {
-        $url = trim((string) ($ev['file-access-url'] ?? ''));
-        if ($url === '') return null;
-        // Images only: video, audio and documents are not attached.
-        // Dynalink's media-type is often a label such as "mms", not a MIME type,
-        // so only a real non-image MIME type (contains "/") stops the download.
-        $hint = strtolower(trim((string) ($ev['mime-type'] ?? $ev['media-type'] ?? '')));
-        if (str_contains($hint, '/') && !str_starts_with($hint, 'image/')) return null;
         try {
-            if (!$this->isPublicHttpUrl($url)) {
-                Log::warning('EmailSms MMS: image URL refused (not a public http/https address)');
-                return null;
-            }
-            $res = Http::timeout(10)
-                ->withOptions(['stream' => true, 'allow_redirects' => [
-                    'max' => 3, 'strict' => false, 'protocols' => ['http', 'https'],
-                    'on_redirect' => function ($req, $resp, $uri) {
-                        if (!$this->isPublicHttpUrl((string) $uri)) {
-                            throw new \RuntimeException('MMS redirect refused');
-                        }
-                    },
-                ]])
-                ->withHeaders(['Accept' => 'image/*'])
-                ->get($url);
-            if (!$res->successful()) {
-                Log::warning('EmailSms MMS: image download HTTP ' . $res->status());
-                return null;
-            }
-            if ((int) $res->header('Content-Length') > self::MAX_MMS_ATTACH) return null;
-            $stream = $res->toPsrResponse()->getBody();
-            $data = '';
-            while (!$stream->eof() && strlen($data) <= self::MAX_MMS_ATTACH) {
-                $data .= $stream->read(65536);
+            if ((int) $sizeHint > self::MAX_MMS_ATTACH) return null;
+            if (isset($source['data'])) {
+                $data = (string) $source['data'];
+                $mime = $this->sniffMime($data);
+            } else {
+                $url = (string) ($source['url'] ?? '');
+                if (!$this->isPublicHttpUrl($url)) {
+                    Log::warning('EmailSms MMS: image URL refused (not a public http/https address)');
+                    return null;
+                }
+                $res = Http::timeout(10)
+                    ->withOptions(['stream' => true, 'allow_redirects' => [
+                        'max' => 3, 'strict' => false, 'protocols' => ['http', 'https'],
+                        'on_redirect' => function ($req, $resp, $uri) {
+                            if (!$this->isPublicHttpUrl((string) $uri)) {
+                                throw new \RuntimeException('MMS redirect refused');
+                            }
+                        },
+                    ]])
+                    ->withHeaders(['Accept' => 'image/*'])
+                    ->get($url);
+                if (!$res->successful()) {
+                    Log::warning('EmailSms MMS: image download HTTP ' . $res->status());
+                    return null;
+                }
+                $ctype = strtolower(trim(explode(';', (string) $res->header('Content-Type'))[0]));
+                // Stop before reading the body when the server says it is not an image.
+                if ($ctype !== '' && !str_starts_with($ctype, 'image/') && $ctype !== 'application/octet-stream') {
+                    Log::info('EmailSms MMS: download is not an image (content-type ' . $ctype . ')');
+                    return null;
+                }
+                if ((int) $res->header('Content-Length') > self::MAX_MMS_ATTACH) return null;
+                $stream = $res->toPsrResponse()->getBody();
+                $data = '';
+                while (!$stream->eof() && strlen($data) <= self::MAX_MMS_ATTACH) {
+                    $data .= $stream->read(65536);
+                }
+                $mime = str_starts_with($ctype, 'image/') ? $ctype : $this->sniffMime($data);
             }
             if ($data === '' || strlen($data) > self::MAX_MMS_ATTACH) return null;
-
-            $mime = strtolower(trim(explode(';', (string) $res->header('Content-Type'))[0]));
-            if (!str_starts_with($mime, 'image/')) $mime = $this->sniffMime($data);
             if (!str_starts_with($mime, 'image/')) {
-                Log::info('EmailSms MMS: download is not an image (content-type ' . ($res->header('Content-Type') ?: 'none') . ')');
+                Log::info('EmailSms MMS: content is not an image');
                 return null;
             }
             if ($mime === 'image/jpg') $mime = 'image/jpeg';
@@ -714,6 +838,19 @@ class EmailSmsService
             Log::warning('EmailSms MMS: image download failed');
             return null;
         }
+    }
+
+    /** Key names and value types only (never values) — for diagnosing unknown payload shapes. */
+    protected function shapeOf(mixed $v, int $depth = 0): string
+    {
+        if (is_array($v)) {
+            if ($depth > 2) return 'array';
+            $keys = array_is_list($v) ? 'list[' . count($v) . ']' : 'map{' . implode(',', array_slice(array_keys($v), 0, 10)) . '}';
+            $first = $v === [] ? null : reset($v);
+            return $keys . (is_array($first) ? ' of ' . $this->shapeOf($first, $depth + 1) : ' of ' . gettype($first));
+        }
+        if (is_string($v)) return 'string(' . strlen($v) . ')';
+        return gettype($v);
     }
 
     /** Content-sniff the bytes when the server's Content-Type is missing or generic. */

@@ -181,6 +181,20 @@ class WebhookController extends Controller
                 }
             }
 
+            // Email gateway, MMS without a caption: the message event carries only
+            // the media, so it never counts as a message above. The email service
+            // still needs it to collect the image (never throws).
+            if (!$isMessage && $dir === 'orig' && $isNew) {
+                try {
+                    $email = app(\App\Services\EmailSmsService::class);
+                    if ($email->isMmsEvent($ev)) {
+                        $email->notifySmsReceived((string) ($domain ?? ''), (string) ($channelUser ?? ''), $ev);
+                    }
+                } catch (\Throwable $e) {
+                    Log::warning('EmailSms MMS notify failed: ' . $e->getMessage());
+                }
+            }
+
             // Keyword auto-reply (inbound messages only; never throws).
             // (STOP/START opt-out keywords are handled inside maybeReply.)
             try {
