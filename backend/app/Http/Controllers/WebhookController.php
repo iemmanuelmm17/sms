@@ -183,7 +183,7 @@ class WebhookController extends Controller
 
             // Email gateway, MMS without a caption: the message event carries only
             // the media, so it never counts as a message above. The email service
-            // still needs it to collect the image (never throws).
+            // still needs it to send the MMS email with the image (never throws).
             if (!$isMessage && $dir === 'orig' && $isNew) {
                 try {
                     $email = app(\App\Services\EmailSmsService::class);

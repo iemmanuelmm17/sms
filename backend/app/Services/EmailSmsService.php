@@ -165,9 +165,13 @@ class EmailSmsService
             $tos = $this->company->numberNotifyEmails($domain, $this->digits($number));
             if ($tos === []) return;
 
-            // MMS: the media and the caption arrive in different events. Collect them.
+            // MMS: the media and the caption are on the MESSAGE event. Session
+            // events (last_mesg) show the conversation's most recent message,
+            // which can be an older text, so they are never used for an MMS.
             if ($this->isMmsEvent($ev)) {
-                $this->mmsTwin($domain, $user, $ev, $remote, $number, $tos);
+                if (isset($ev['type']) || isset($ev['term_uid'])) {
+                    $this->sendMmsEmail($domain, $user, $ev, $remote, $number, $tos);
+                }
                 return;
             }
 
@@ -186,95 +190,37 @@ class EmailSmsService
     }
 
     /**
-     * An MMS arrives as two events for one message. The message event carries
-     * the media (media_contents, no caption); the session event carries the
-     * caption (last_mesg, no media). Both are collected in one cache entry per
-     * session + sender. The email goes out as soon as it has both pieces, or
-     * after a short wait (a job), so an image-only MMS or a missing twin still
-     * gets its email.
+     * Notification for one inbound MMS, from its message event. The caption is
+     * that event's own text (empty for an image-only MMS); the image comes from
+     * its media fields. A duplicate delivery of the same MMS is suppressed.
      */
-    protected function mmsTwin(string $domain, string $user, array $ev, string $remote, string $number, array $tos): void
+    protected function sendMmsEmail(string $domain, string $user, array $ev, string $remote, string $number, array $tos): void
     {
-        $session = trim((string) ($ev['messagesession-id'] ?? ''));
-        $key = 'emailsms:mms:' . md5(($session !== '' ? $session : '-') . '|' . $remote);
-        $state = Cache::get($key, []);
-        if (!is_array($state)) $state = [];
+        $text = trim((string) ($ev['text'] ?? ''));
         $src = $this->mediaSource($ev);
-        if ($src === null && $this->hasMediaPayload($ev) && empty($state['src'])) {
-            // Diagnostic (key names only, never values): the media field exists
-            // but no URL or image data was found in it.
+        if ($src === null && $this->hasMediaPayload($ev)) {
+            // Diagnostic (key names only, never values): media is present but no URL or data was found.
             Log::info('EmailSms MMS: media field present but no URL or image data found', [
                 'shape' => $this->shapeOf($ev['media_contents'] ?? $ev['media-contents'] ?? null),
             ]);
         }
-        // A finished MMS that this event does not belong to (a new media URL in the
-        // same conversation) starts a fresh entry. Plain twins are ignored.
-        if (!empty($state['sent'])) {
-            if ($src === null || md5(json_encode($src)) === ($state['src_hash'] ?? null)) return;
-            $state = [];
-        }
-        $state['domain'] = $domain;
-        $state['user'] = $user;
-        $state['remote'] = $remote;
-        $state['number'] = $number;
-        $state['session'] = $session;
-        $state['tos'] = $tos;
-        if ($src !== null && empty($state['src'])) {
-            $state['src'] = $src;
-            $state['src_hash'] = md5(json_encode($src));
-        }
-        $size = $ev['media_size'] ?? $ev['last_mesg_media_size'] ?? $ev['media-size'] ?? null;
-        if ($size !== null && empty($state['size'])) $state['size'] = $size;
-        $caption = trim((string) ($ev['text'] ?? $ev['last_mesg'] ?? ''));
-        if ($caption !== '') $state['text'] = $caption;
-        Cache::put($key, $state, now()->addMinutes(2));
-
-        if (!empty($state['src']) && !empty($state['text'])) {
-            $this->sendMms($key);      // both pieces are here: send now
+        $fingerprint = md5(($ev['messagesession-id'] ?? '') . '|' . $remote . '|'
+            . ($src !== null ? json_encode($src) : '') . '|' . $text);
+        if (!Cache::add('emailsms:mms:' . $fingerprint, 1, now()->addSeconds(120))) {
+            Log::info('EmailSms MMS: duplicate suppressed');
             return;
         }
-        if (empty($state['scheduled'])) {
-            $state['scheduled'] = true;
-            Cache::put($key, $state, now()->addMinutes(2));
-            $this->scheduleMmsSend($key);   // wait for the twin, then send what arrived
-        }
-    }
-
-    /** Send the collected MMS notification once. Called by the delayed job, or directly. */
-    public function sendMms(string $key): void
-    {
-        try {
-            $state = Cache::get($key);
-            if (!is_array($state) || !empty($state['sent'])) return;
-            // Atomic claim, so two workers can't both send.
-            if (!Cache::add('emailsms:mmsdone:' . md5($key . '|' . ($state['src_hash'] ?? '')), 1, now()->addMinutes(2))) return;
-            $state['sent'] = true;
-            Cache::put($key, $state, now()->addMinutes(2));
-
-            $image = !empty($state['src']) ? $this->fetchMmsImage($state['src'], $state['size'] ?? null) : null;
-            Log::info('EmailSms MMS: ' . ($image ? 'image attached' : 'image not attached'), [
-                'has_media' => !empty($state['src']), 'has_caption' => !empty($state['text']),
-            ]);
-            $text = (string) ($state['text'] ?? '');
-            if ($text === '') $text = '[MMS attachment]';
-            $note = $image
-                ? "\n\nThe image from this MMS is attached as {$image['name']}."
-                : "\n\nThe MMS attachment could not be included here. Open the conversation in the app to view it.";
-            $this->sendNotifyEmails($state['domain'], $state['user'], ['messagesession-id' => $state['session']],
-                $state['remote'], $state['number'], $state['tos'], $text, $image, $note);
-        } catch (\Throwable $e) {
-            Log::warning('EmailSms MMS send failed: ' . $e->getMessage());
-        }
-    }
-
-    /** Queue the MMS send for a few seconds from now (lets the twin event arrive first). */
-    protected function scheduleMmsSend(string $key): void
-    {
-        try {
-            \App\Jobs\SendMmsNotification::dispatch($key)->delay(now()->addSeconds(4));
-        } catch (\Throwable $e) {
-            Log::warning('EmailSms MMS schedule failed: ' . $e->getMessage());
-        }
+        $image = $src !== null
+            ? $this->fetchMmsImage($src, $ev['media_size'] ?? $ev['media-size'] ?? null)
+            : null;
+        Log::info('EmailSms MMS: ' . ($image ? 'image attached' : 'image not attached'), [
+            'has_media' => $src !== null, 'has_caption' => $text !== '',
+        ]);
+        if ($text === '') $text = '[MMS attachment]';
+        $note = $image
+            ? "\n\nThe image from this MMS is attached as {$image['name']}."
+            : "\n\nThe MMS attachment could not be included here. Open the conversation in the app to view it.";
+        $this->sendNotifyEmails($domain, $user, $ev, $remote, $number, $tos, $text, $image, $note);
     }
 
     /** Build and send the notification, one row + Reply-To per recipient. */
