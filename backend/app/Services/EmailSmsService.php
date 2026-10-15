@@ -147,6 +147,7 @@ class EmailSmsService
     public function notifySmsReceived(string $domain, string $user, array $ev): void
     {
         try {
+            $ev = $this->withTwinMedia($ev);
             if (!$this->sendingReady()) return;
             if ($domain === '') return;
             $remote = $this->digits((string) ($ev['from-number'] ?? ''));
@@ -162,7 +163,12 @@ class EmailSmsService
             // twin's mail.
             $nkey = 'emailsms:notify:' . md5(
                 ($ev['messagesession-id'] ?? '') . '|' . $remote . '|' . $text);
-            if (!Cache::add($nkey, 1, now()->addSeconds(60))) return;
+            if (!Cache::add($nkey, 1, now()->addSeconds(60))) {
+                // Another twin already sent this message. Log it, so a missing
+                // image can be traced to the twin that was suppressed.
+                if (!empty($ev['file-access-url'])) Log::info('EmailSms MMS: duplicate suppressed (a twin already sent this message)');
+                return;
+            }
             $smtp = $this->smtpConfig();
             $mailer = new SmtpClient($smtp['host'], $smtp['port'], $smtp['encryption'], $smtp['username'], $smtp['password']);
             $inbound = $this->inboundDomain();
@@ -179,6 +185,9 @@ class EmailSmsService
             $image = $this->fetchMmsImage($ev);
             $note = '';
             if (!empty($ev['file-access-url'])) {
+                Log::info('EmailSms MMS: ' . ($image ? 'image attached' : 'image not attached'), [
+                    'media' => substr(strtolower(trim((string) ($ev['media-type'] ?? $ev['type'] ?? ''))), 0, 24),
+                ]);
                 $note = $image
                     ? "\n\nThe image from this MMS is attached as {$image['name']}."
                     : "\n\nThe MMS attachment could not be included here. Open the conversation in the app to view it.";
@@ -608,6 +617,36 @@ class EmailSmsService
     }
 
     /**
+     * Dynalink sends two events per SMS. Only the message event carries the
+     * media URL, and a numberless message-first twin returns early, so the
+     * session twin that actually sends can have no URL. Remember the URL per
+     * session + sender for two minutes, and give it to a twin with the same
+     * text that lacks one. Never overwrites a URL the event already has.
+     */
+    protected function withTwinMedia(array $ev): array
+    {
+        $remote = $this->digits((string) ($ev['from-number'] ?? ''));
+        $session = trim((string) ($ev['messagesession-id'] ?? ''));
+        if ($remote === '' || $session === '') return $ev;
+        $key = 'emailsms:mms:' . md5($session . '|' . $remote);
+        $text = trim((string) ($ev['text'] ?? ''));
+        $url = trim((string) ($ev['file-access-url'] ?? ''));
+        try {
+            if ($url !== '') {
+                Cache::put($key, ['url' => $url, 'text' => $text], now()->addMinutes(2));
+            } elseif ($text !== '') {
+                $hit = Cache::get($key);
+                if (is_array($hit) && ($hit['text'] ?? null) === $text && !empty($hit['url'])) {
+                    $ev['file-access-url'] = $hit['url'];
+                    Log::info('EmailSms MMS: image URL taken from the twin event');
+                }
+            }
+        } catch (\Throwable $e) {
+        }
+        return $ev;
+    }
+
+    /**
      * Download an inbound MMS image for the notification email. Returns
      * ['name', 'mime', 'data'], or null when there is no image, it is too
      * big, the URL is refused, or the download fails. Never throws, and never
@@ -618,15 +657,24 @@ class EmailSmsService
         $url = trim((string) ($ev['file-access-url'] ?? ''));
         if ($url === '') return null;
         // Images only: video, audio and documents are not attached.
+        // Dynalink's media-type is often a label such as "mms", not a MIME type,
+        // so only a real non-image MIME type (contains "/") stops the download.
         $hint = strtolower(trim((string) ($ev['mime-type'] ?? $ev['media-type'] ?? '')));
-        if ($hint !== '' && !str_starts_with($hint, 'image/')) return null;
+        if (str_contains($hint, '/') && !str_starts_with($hint, 'image/')) return null;
         try {
             if (!$this->isPublicHttpUrl($url)) {
                 Log::warning('EmailSms MMS: image URL refused (not a public http/https address)');
                 return null;
             }
             $res = Http::timeout(10)
-                ->withOptions(['allow_redirects' => false, 'stream' => true])
+                ->withOptions(['stream' => true, 'allow_redirects' => [
+                    'max' => 3, 'strict' => false, 'protocols' => ['http', 'https'],
+                    'on_redirect' => function ($req, $resp, $uri) {
+                        if (!$this->isPublicHttpUrl((string) $uri)) {
+                            throw new \RuntimeException('MMS redirect refused');
+                        }
+                    },
+                ]])
                 ->withHeaders(['Accept' => 'image/*'])
                 ->get($url);
             if (!$res->successful()) {
@@ -643,7 +691,10 @@ class EmailSmsService
 
             $mime = strtolower(trim(explode(';', (string) $res->header('Content-Type'))[0]));
             if (!str_starts_with($mime, 'image/')) $mime = $this->sniffMime($data);
-            if (!str_starts_with($mime, 'image/')) return null;
+            if (!str_starts_with($mime, 'image/')) {
+                Log::info('EmailSms MMS: download is not an image (content-type ' . ($res->header('Content-Type') ?: 'none') . ')');
+                return null;
+            }
             if ($mime === 'image/jpg') $mime = 'image/jpeg';
             $ext = match ($mime) {
                 'image/jpeg' => 'jpg',
